@@ -20,7 +20,11 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang clang-format clang-tidy liburing-dev
+          sudo apt-get install -y liburing-dev wget
+          # clang 18 (Ubuntu default) cannot see std::expected with libstdc++ 13;
+          # clang 20 defines __cpp_concepts=202002 so <expected> is enabled.
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 20
+          sudo apt-get install -y clang-20 clang-tidy-20 clang-format-20
 
       # Ubuntu 24.04 ships CMake 3.28; Aeron 1.54.0 requires 3.30.
       - name: CMake >= 3.30
@@ -32,5 +36,5 @@ jobs:
       - name: Fetch SBE tool
         run: scripts/fetch-sbe.sh
 
-      - name: Gate (gcc debug+release)
-        run: scripts/check.sh debug release
+      - name: Gate (gcc debug+release, clang-20 debug)
+        run: scripts/check.sh debug release debug-clang
