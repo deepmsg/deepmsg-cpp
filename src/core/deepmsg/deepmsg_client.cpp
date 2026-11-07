@@ -1,4 +1,4 @@
-#include "core/aeron/aeron_client.h"
+#include "core/deepmsg/deepmsg_client.h"
 
 #include <cstring>
 
@@ -21,21 +21,21 @@ bool copy_cstr(std::string_view text, std::array<char, N>& buffer) noexcept
 
 }  // namespace
 
-std::expected<AeronClient, Error> AeronClient::connect(const ClientConfig& config) noexcept
+std::expected<DeepmsgClient, Error> DeepmsgClient::connect(const ClientConfig& config) noexcept
 {
     aeron_context_t* context = nullptr;
     if (0 != aeron_context_init(&context))
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "aeron_context_init failed"));
     }
-    AeronContextPtr context_guard{context};
+    ContextPtr context_guard{context};
 
     if (!config.dir.empty())
     {
         std::array<char, MAX_DIR_LENGTH> dir{};
         if (!copy_cstr(config.dir, dir))
         {
-            return std::unexpected(make_error(ErrorCode::config_error, "aeron dir is too long"));
+            return std::unexpected(make_error(ErrorCode::config_error, "client dir is too long"));
         }
         if (0 != aeron_context_set_dir(context, dir.data()))
         {
@@ -53,31 +53,31 @@ std::expected<AeronClient, Error> AeronClient::connect(const ClientConfig& confi
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "aeron_init failed"));
     }
-    AeronPtr client_guard{client};
+    ClientPtr client_guard{client};
 
     if (0 != aeron_start(client))
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "aeron_start failed"));
     }
 
-    AeronClient result;
+    DeepmsgClient result;
     result.client_ = std::move(client_guard);
     result.context_ = std::move(context_guard);
     return result;
 }
 
-int AeronClient::do_work() noexcept
+int DeepmsgClient::do_work() noexcept
 {
     return nullptr == client_ ? -1 : aeron_main_do_work(client_.get());
 }
 
-aeron_counters_reader_t* AeronClient::counters_reader() noexcept
+aeron_counters_reader_t* DeepmsgClient::counters_reader() noexcept
 {
     return nullptr == client_ ? nullptr : aeron_counters_reader(client_.get());
 }
 
-AsyncAdd<CounterPtr> AeronClient::add_counter(std::int32_t type_id, std::span<const std::uint8_t> key,
-                                              std::string_view label) noexcept
+AsyncAdd<CounterPtr> DeepmsgClient::add_counter(std::int32_t type_id, std::span<const std::uint8_t> key,
+                                                std::string_view label) noexcept
 {
     if (nullptr == client_)
     {
@@ -103,7 +103,7 @@ AsyncAdd<CounterPtr> AeronClient::add_counter(std::int32_t type_id, std::span<co
         { return aeron_async_add_counter_cancel(client, static_cast<aeron_async_add_counter_t*>(resource)); });
 }
 
-AsyncAdd<ExPubPtr> AeronClient::add_exclusive_publication(std::string_view channel, std::int32_t stream_id) noexcept
+AsyncAdd<ExPubPtr> DeepmsgClient::add_exclusive_publication(std::string_view channel, std::int32_t stream_id) noexcept
 {
     if (nullptr == client_)
     {
@@ -137,7 +137,7 @@ AsyncAdd<ExPubPtr> AeronClient::add_exclusive_publication(std::string_view chann
         });
 }
 
-AsyncAdd<PubPtr> AeronClient::add_publication(std::string_view channel, std::int32_t stream_id) noexcept
+AsyncAdd<PubPtr> DeepmsgClient::add_publication(std::string_view channel, std::int32_t stream_id) noexcept
 {
     if (nullptr == client_)
     {
@@ -163,8 +163,8 @@ AsyncAdd<PubPtr> AeronClient::add_publication(std::string_view channel, std::int
         { return aeron_async_add_publication_cancel(client, static_cast<aeron_async_add_publication_t*>(resource)); });
 }
 
-AsyncAdd<SubPtr> AeronClient::add_subscription(std::string_view channel, std::int32_t stream_id,
-                                               ImageHandlers handlers) noexcept
+AsyncAdd<SubPtr> DeepmsgClient::add_subscription(std::string_view channel, std::int32_t stream_id,
+                                                 ImageHandlers handlers) noexcept
 {
     if (nullptr == client_)
     {

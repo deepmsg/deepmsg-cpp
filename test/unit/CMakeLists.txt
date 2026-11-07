@@ -7,7 +7,7 @@ axc_add_executable(axc_unit_tests
         core/idle_strategy_test.cpp
         core/cpu_affinity_test.cpp
         core/agent_runner_test.cpp
-        core/aeron_client_test.cpp
+        core/deepmsg_client_test.cpp
     DEPS
         axc_core
         GTest::gtest_main

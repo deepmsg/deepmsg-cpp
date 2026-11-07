@@ -3,7 +3,7 @@ find_package(Threads REQUIRED)
 axc_add_library(axc_core
     SOURCES
         version.cpp
-        aeron/aeron_client.cpp
+        deepmsg/deepmsg_client.cpp
         agent/cpu_affinity.cpp
         agent/idle_strategy.cpp
         collections/long2long_hash_map.cpp

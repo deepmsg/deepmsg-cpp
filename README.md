@@ -57,7 +57,7 @@ variants (`debug-clang`, …). `release-pgo` generates profiles into
 | `src/archive/io` | segment write/read backends (sync, io_uring, pread, mmap) |
 | `src/archive/server` | conductor, control/recording/replay/replication sessions, catalog |
 | `src/cluster/*` | common, election, consensus (CM), service container, client, backup |
-| `apps/` | `aeron-archive-server`, `aeron-cluster-node`, `aeron-consensus-module`, `aeron-clustered-service-container`, `aeron-cluster-backup`, sample services |
+| `apps/` | `deepmsg-archive-server`, `deepmsg-cluster-node`, `deepmsg-consensus-module`, `deepmsg-clustered-service-container`, `deepmsg-cluster-backup`, sample services |
 | `tools/` | `cluster-tool`, `archive-tool-ro`, repository self-checks |
 | `test/` | `unit/` (gtest), `interop/` (Java side, X0-4), `alloc/`, `fuzz/` |
 | `bench/` | micro benchmarks and the `x-c` / `j-c` / `x-j` batch arms |

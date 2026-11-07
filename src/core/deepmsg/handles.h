@@ -10,7 +10,7 @@ namespace axc::core
 // Close errors are not actionable in a deleter; they surface through the
 // driver's error log. Everything else in the code base must not ignore errors.
 
-struct AeronContextCloser
+struct ContextCloser
 {
     void operator()(aeron_context_t* context) const noexcept
     {
@@ -21,7 +21,7 @@ struct AeronContextCloser
     }
 };
 
-struct AeronCloser
+struct ClientCloser
 {
     void operator()(aeron_t* client) const noexcept
     {
@@ -76,8 +76,8 @@ struct CounterCloser
     }
 };
 
-using AeronContextPtr = std::unique_ptr<aeron_context_t, AeronContextCloser>;
-using AeronPtr = std::unique_ptr<aeron_t, AeronCloser>;
+using ContextPtr = std::unique_ptr<aeron_context_t, ContextCloser>;
+using ClientPtr = std::unique_ptr<aeron_t, ClientCloser>;
 using PubPtr = std::unique_ptr<aeron_publication_t, PublicationCloser>;
 using ExPubPtr = std::unique_ptr<aeron_exclusive_publication_t, ExclusivePublicationCloser>;
 using SubPtr = std::unique_ptr<aeron_subscription_t, SubscriptionCloser>;

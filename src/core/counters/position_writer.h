@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <utility>
 
-#include "core/aeron/handles.h"
+#include "core/deepmsg/handles.h"
 
 namespace axc::core
 {

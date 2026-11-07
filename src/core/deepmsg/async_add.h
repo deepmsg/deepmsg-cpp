@@ -94,7 +94,7 @@ public:
         {
             failed_ = true;
             async_ = nullptr;
-            error_ = make_error(ErrorCode::internal_error, "aeron async add failed");
+            error_ = make_error(ErrorCode::internal_error, "async add failed");
             return std::unexpected(error_);
         }
 

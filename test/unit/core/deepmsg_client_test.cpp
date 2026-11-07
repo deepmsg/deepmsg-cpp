@@ -10,15 +10,15 @@
 
 #include <aeronmd.h>
 
-#include "core/aeron/aeron_client.h"
 #include "core/counters/position_view.h"
 #include "core/counters/position_writer.h"
+#include "core/deepmsg/deepmsg_client.h"
 
 namespace
 {
 
-using axc::core::AeronClient;
 using axc::core::CounterPtr;
+using axc::core::DeepmsgClient;
 using axc::core::ExPubPtr;
 using axc::core::PositionView;
 using axc::core::PositionWriter;
@@ -30,7 +30,7 @@ class EmbeddedDriver
 public:
     EmbeddedDriver()
     {
-        char pattern[] = "/tmp/axc-aeron-XXXXXX";
+        char pattern[] = "/tmp/axc-deepmsg-XXXXXX";
         if (nullptr == ::mkdtemp(pattern))
         {
             return;
@@ -92,14 +92,14 @@ private:
     bool started_{false};
 };
 
-std::optional<AeronClient> connect_with_retry(const std::string& dir)
+std::optional<DeepmsgClient> connect_with_retry(const std::string& dir)
 {
     for (int attempt = 0; attempt < 200; ++attempt)
     {
-        auto connected = AeronClient::connect({dir, true});
+        auto connected = DeepmsgClient::connect({dir, true});
         if (connected.has_value())
         {
-            return std::optional<AeronClient>{std::move(*connected)};
+            return std::optional<DeepmsgClient>{std::move(*connected)};
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -107,7 +107,8 @@ std::optional<AeronClient> connect_with_retry(const std::string& dir)
 }
 
 template <class Predicate>
-bool pump_until(AeronClient& client, Predicate predicate, std::chrono::milliseconds timeout = std::chrono::seconds(10))
+bool pump_until(DeepmsgClient& client, Predicate predicate,
+                std::chrono::milliseconds timeout = std::chrono::seconds(10))
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -158,7 +159,7 @@ void on_fragment(void* clientd, const std::uint8_t*, std::size_t length, aeron_h
 
 }  // namespace
 
-TEST(AeronClient, ConnectsAndExposesCountersReader)
+TEST(DeepmsgClient, ConnectsAndExposesCountersReader)
 {
     EmbeddedDriver driver;
     ASSERT_TRUE(driver.ok());
@@ -170,14 +171,14 @@ TEST(AeronClient, ConnectsAndExposesCountersReader)
     EXPECT_GE(aeron_counters_reader_max_counter_id(client->counters_reader()), 0);
 }
 
-TEST(AeronClient, AddsCounterAndReadsPositionByAddress)
+TEST(DeepmsgClient, AddsCounterAndReadsPositionByAddress)
 {
     EmbeddedDriver driver;
     ASSERT_TRUE(driver.ok());
 
     auto connected = connect_with_retry(driver.dir());
     ASSERT_TRUE(connected.has_value());
-    AeronClient client = std::move(*connected);
+    DeepmsgClient client = std::move(*connected);
     ASSERT_TRUE(pump_until(client, [&] { return nullptr != client.counters_reader(); }));
 
     const std::array<std::uint8_t, 8> key{1, 2, 3, 4, 5, 6, 7, 8};
@@ -221,14 +222,14 @@ TEST(AeronClient, AddsCounterAndReadsPositionByAddress)
     EXPECT_FALSE(PositionView::at(client.counters_reader(), 100000).valid());
 }
 
-TEST(AeronClient, PublishesAndReceivesOverIpc)
+TEST(DeepmsgClient, PublishesAndReceivesOverIpc)
 {
     EmbeddedDriver driver;
     ASSERT_TRUE(driver.ok());
 
     auto connected = connect_with_retry(driver.dir());
     ASSERT_TRUE(connected.has_value());
-    AeronClient client = std::move(*connected);
+    DeepmsgClient client = std::move(*connected);
     ASSERT_TRUE(pump_until(client, [&] { return nullptr != client.counters_reader(); }));
 
     ImageCapture images;

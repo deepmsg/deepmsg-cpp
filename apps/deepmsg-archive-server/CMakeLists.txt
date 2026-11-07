@@ -1,4 +1,4 @@
-axc_add_executable(aeron-archive-server
+axc_add_executable(deepmsg-archive-server
     SOURCES
         main.cpp
     DEPS

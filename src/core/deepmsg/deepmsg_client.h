@@ -8,9 +8,9 @@
 
 #include <aeronc.h>
 
-#include "core/aeron/async_add.h"
-#include "core/aeron/handles.h"
-#include "core/aeron/image_handlers.h"
+#include "core/deepmsg/async_add.h"
+#include "core/deepmsg/handles.h"
+#include "core/deepmsg/image_handlers.h"
 #include "core/error/error.h"
 
 namespace axc::core
@@ -27,21 +27,21 @@ struct ClientConfig
 /// The conductor runs in invoker mode by default, so the owning agent calls
 /// `do_work()` once per pass; this is how archive and CM drive the client in the
 /// reference. Resource creation is two-phase through `AsyncAdd` (never blocks).
-class AeronClient
+class DeepmsgClient
 {
 public:
     static constexpr std::size_t MAX_DIR_LENGTH = 4096;
     static constexpr std::size_t MAX_CHANNEL_LENGTH = 4096;
 
-    static std::expected<AeronClient, Error> connect(const ClientConfig& config) noexcept;
+    static std::expected<DeepmsgClient, Error> connect(const ClientConfig& config) noexcept;
 
-    AeronClient() = default;
-    AeronClient(AeronClient&&) noexcept = default;
-    AeronClient& operator=(AeronClient&&) noexcept = default;
-    ~AeronClient() = default;
+    DeepmsgClient() = default;
+    DeepmsgClient(DeepmsgClient&&) noexcept = default;
+    DeepmsgClient& operator=(DeepmsgClient&&) noexcept = default;
+    ~DeepmsgClient() = default;
 
-    AeronClient(const AeronClient&) = delete;
-    AeronClient& operator=(const AeronClient&) = delete;
+    DeepmsgClient(const DeepmsgClient&) = delete;
+    DeepmsgClient& operator=(const DeepmsgClient&) = delete;
 
     /// Drives the client conductor once. Returns the C API result.
     [[nodiscard]] int do_work() noexcept;
@@ -67,8 +67,8 @@ public:
 private:
     // Declared context first so it is destroyed *after* the client (members are
     // destroyed in reverse order and the client must be closed before its context).
-    AeronContextPtr context_{};
-    AeronPtr client_{};
+    ContextPtr context_{};
+    ClientPtr client_{};
 };
 
 }  // namespace axc::core
