@@ -23,5 +23,8 @@ hotpath preset="debug":
 deps:
 	tools/repo/check-deps.sh
 
+forbidden:
+	tools/repo/check-forbidden.sh
+
 sbe:
 	scripts/fetch-sbe.sh
