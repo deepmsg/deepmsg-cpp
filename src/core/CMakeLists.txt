@@ -7,7 +7,13 @@ axc_add_library(axc_core
         agent/cpu_affinity.cpp
         agent/idle_strategy.cpp
         collections/long2long_hash_map.cpp
+        config/name_table.cpp
+        config/property_source.cpp
+        io/fs.cpp
+        io/mapped_file.cpp
+        io/mark_file.cpp
         time/clock.cpp
+        trace/trace.cpp
     DEPS
         aeron_static
         Threads::Threads)

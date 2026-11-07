@@ -8,6 +8,9 @@ axc_add_executable(axc_unit_tests
         core/cpu_affinity_test.cpp
         core/agent_runner_test.cpp
         core/deepmsg_client_test.cpp
+        core/io_test.cpp
+        core/config_test.cpp
+        core/trace_test.cpp
     DEPS
         axc_core
         GTest::gtest_main
@@ -16,9 +19,21 @@ axc_add_executable(axc_unit_tests
 
 target_compile_definitions(axc_unit_tests PRIVATE "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
+# Separate binary so the enabled StageTimer path is compiled and measured even
+# though AXC_STAGE_TIMING is off for normal builds.
+axc_add_executable(axc_stage_timer_timing_test
+    SOURCES
+        core/stage_timer_timing_test.cpp
+    DEPS
+        axc_core
+        GTest::gtest_main)
+
+target_compile_definitions(axc_stage_timer_timing_test PRIVATE AXC_STAGE_TIMING=1)
+
 include(GoogleTest)
 # PRE_TEST: discover at test time, not build time. Sanitizer binaries (TSan in
 # particular) cannot always be executed by the build step -- on kernels with high
 # ASLR entropy TSan aborts with "unexpected memory mapping" unless run under
 # `setarch -R`.
 gtest_discover_tests(axc_unit_tests DISCOVERY_MODE PRE_TEST)
+gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST)
