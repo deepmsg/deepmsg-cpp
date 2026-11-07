@@ -1,0 +1,2 @@
+# Hot-path translation units of this module, one path per line (relative to src/).
+# bounded_log_adapter.h / clustered_service_agent.h are template hot paths (C2).

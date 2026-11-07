@@ -1,0 +1,7 @@
+add_subdirectory(aeron-archive-server)
+add_subdirectory(aeron-consensus-module)
+add_subdirectory(aeron-clustered-service-container)
+add_subdirectory(aeron-cluster-node)
+add_subdirectory(aeron-cluster-backup)
+add_subdirectory(services/echo-service)
+add_subdirectory(services/basic-auction-service)

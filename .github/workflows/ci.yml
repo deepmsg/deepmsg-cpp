@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-format clang-tidy liburing-dev
+
+      # Ubuntu 24.04 ships CMake 3.28; Aeron 1.54.0 requires 3.30.
+      - name: CMake >= 3.30
+        run: |
+          curl -sSL -o /tmp/cmake.tar.gz https://cmake.org/files/v3.31/cmake-3.31.6-linux-x86_64.tar.gz
+          sudo tar -C /opt -xzf /tmp/cmake.tar.gz
+          echo "/opt/cmake-3.31.6-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch SBE tool
+        run: scripts/fetch-sbe.sh
+
+      - name: Gate (gcc debug+release)
+        run: scripts/check.sh debug release

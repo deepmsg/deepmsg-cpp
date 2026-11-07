@@ -1,0 +1,2 @@
+# Hot-path translation units of this module, one path per line (relative to src/).
+# timer services and the Long2LongHashMap-backed timer table land in C1c.

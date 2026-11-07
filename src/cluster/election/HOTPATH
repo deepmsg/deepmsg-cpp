@@ -1,0 +1,2 @@
+# Election is not on the steady-state hot path (gtest-mocked interfaces);
+# keep this file empty until C5 says otherwise.

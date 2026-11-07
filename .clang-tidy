@@ -1,0 +1,14 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-braces-around-statements,
+  readability-avoid-const-params-in-decls
+WarningsAsErrors: ''
+HeaderFilterRegex: '(src|apps|tools)/.*'
+ExcludeHeaderFilterRegex: 'third_party/.*|build/.*'
+FormatStyle: file
+...

@@ -1,0 +1,2 @@
+# Hot-path translation units of this module, one path per line (relative to src/).
+# recording_session.cpp / replay_session.cpp / *_conductor.cpp land in A2..A5.

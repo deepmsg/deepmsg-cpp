@@ -1,0 +1,9 @@
+axc_add_library(axc_archive_server
+    SOURCES
+        module.cpp
+    DEPS
+        axc_core
+        axc_sbe
+        axc_archive_io
+        aeron_static
+        aeron_archive_c_client_static)

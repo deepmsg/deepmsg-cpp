@@ -1,0 +1,3 @@
+# Hot-path translation units of this module, one path per line (relative to src/).
+# consensus_module_agent.cpp / log_publisher.cpp / log_adapter.cpp / session_manager.cpp
+# land in C4/C6 and must be listed here.

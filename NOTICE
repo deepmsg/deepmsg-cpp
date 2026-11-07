@@ -1,0 +1,12 @@
+deepmsg-cpp
+Copyright 2026 deepmsg
+
+This product includes software developed by the Aeron project
+(https://github.com/aeron-io/aeron) and licensed under the Apache License,
+Version 2.0.
+
+The archive-server and cluster sources are transcriptions of Aeron 1.54.0
+(commit 454da1e4e6). The pinned submodule in third_party/aeron is an
+unmodified upstream tree; the pin itself, not a patch, is the contract.
+
+Aeron is Copyright 2014-2026 Real Logic Limited and contributors.

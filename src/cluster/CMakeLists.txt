@@ -1,0 +1,6 @@
+add_subdirectory(common)
+add_subdirectory(election)
+add_subdirectory(consensus)
+add_subdirectory(service)
+add_subdirectory(client)
+add_subdirectory(backup)

@@ -1,0 +1,17 @@
+# build trees and generated code
+build/
+out/
+bench/out/
+compile_commands.json
+third_party/sbe-tool/*.jar
+
+# objects and libraries
+*.o
+*.a
+*.so
+
+# editors and OS
+.cache/
+.vscode/
+.idea/
+.DS_Store

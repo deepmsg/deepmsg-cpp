@@ -1,0 +1,2 @@
+# Hot-path translation units of this module, one path per line (relative to src/).
+# aeron_cluster.cpp (offer/try_claim/poll_egress) lands in C3b.
