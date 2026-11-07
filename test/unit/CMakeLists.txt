@@ -4,6 +4,9 @@ axc_add_executable(axc_unit_tests
         core/fixed_string_test.cpp
         core/long2long_hash_map_test.cpp
         core/clock_test.cpp
+        core/idle_strategy_test.cpp
+        core/cpu_affinity_test.cpp
+        core/agent_runner_test.cpp
     DEPS
         axc_core
         GTest::gtest_main)

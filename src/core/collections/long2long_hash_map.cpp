@@ -69,7 +69,7 @@ int Long2LongHashMap::find_key(std::int64_t key) const noexcept
     const int mask = static_cast<int>(entries_.size()) - 1;
     int index = even_hash(key, mask);
 
-    while (missing_value_ != entries_[static_cast<std::size_t>(index + 1)])
+    while (missing_value_ != entries_[static_cast<std::size_t>(index) + 1])
     {
         if (key == entries_[static_cast<std::size_t>(index)])
         {
@@ -84,7 +84,7 @@ int Long2LongHashMap::find_key(std::int64_t key) const noexcept
 std::int64_t Long2LongHashMap::get(std::int64_t key) const noexcept
 {
     const int index = find_key(key);
-    return index < 0 ? missing_value_ : entries_[static_cast<std::size_t>(index + 1)];
+    return index < 0 ? missing_value_ : entries_[static_cast<std::size_t>(index) + 1];
 }
 
 std::int64_t Long2LongHashMap::get(std::int64_t key, std::int64_t default_value) const noexcept
@@ -98,7 +98,7 @@ bool Long2LongHashMap::contains_key(std::int64_t key) const noexcept
     return missing_value_ != get(key);
 }
 
-std::int64_t Long2LongHashMap::put(std::int64_t key, std::int64_t value) noexcept
+std::int64_t Long2LongHashMap::put(std::int64_t key, std::int64_t value)
 {
     if (missing_value_ == value)
     {
@@ -109,7 +109,7 @@ std::int64_t Long2LongHashMap::put(std::int64_t key, std::int64_t value) noexcep
     int index = even_hash(key, mask);
 
     std::int64_t old_value = missing_value_;
-    while (missing_value_ != (old_value = entries_[static_cast<std::size_t>(index + 1)]))
+    while (missing_value_ != (old_value = entries_[static_cast<std::size_t>(index) + 1]))
     {
         if (key == entries_[static_cast<std::size_t>(index)])
         {
@@ -124,7 +124,7 @@ std::int64_t Long2LongHashMap::put(std::int64_t key, std::int64_t value) noexcep
         entries_[static_cast<std::size_t>(index)] = key;
     }
 
-    entries_[static_cast<std::size_t>(index + 1)] = value;
+    entries_[static_cast<std::size_t>(index) + 1] = value;
 
     increase_capacity();
 
@@ -139,7 +139,7 @@ bool Long2LongHashMap::remove(std::int64_t key) noexcept
         return false;
     }
 
-    entries_[static_cast<std::size_t>(index + 1)] = missing_value_;
+    entries_[static_cast<std::size_t>(index) + 1] = missing_value_;
     --size_;
     compact_chain(index);
     return true;
@@ -148,12 +148,12 @@ bool Long2LongHashMap::remove(std::int64_t key) noexcept
 bool Long2LongHashMap::remove(std::int64_t key, std::int64_t value) noexcept
 {
     const int index = find_key(key);
-    if (index < 0 || value != entries_[static_cast<std::size_t>(index + 1)])
+    if (index < 0 || value != entries_[static_cast<std::size_t>(index) + 1])
     {
         return false;
     }
 
-    entries_[static_cast<std::size_t>(index + 1)] = missing_value_;
+    entries_[static_cast<std::size_t>(index) + 1] = missing_value_;
     --size_;
     compact_chain(index);
     return true;
@@ -190,13 +190,13 @@ void Long2LongHashMap::rehash(int new_capacity)
 
         const std::int64_t key = old_entries[value_index - 1];
         int new_key_index = even_hash(key, mask);
-        while (missing_value_ != entries_[static_cast<std::size_t>(new_key_index + 1)])
+        while (missing_value_ != entries_[static_cast<std::size_t>(new_key_index) + 1])
         {
             new_key_index = (new_key_index + 2) & mask;
         }
 
         entries_[static_cast<std::size_t>(new_key_index)] = key;
-        entries_[static_cast<std::size_t>(new_key_index + 1)] = old_entries[value_index];
+        entries_[static_cast<std::size_t>(new_key_index) + 1] = old_entries[value_index];
     }
 }
 
@@ -208,7 +208,7 @@ void Long2LongHashMap::compact_chain(int delete_key_index)
     for (;;)
     {
         key_index = (key_index + 2) & mask;
-        const std::int64_t value = entries_[static_cast<std::size_t>(key_index + 1)];
+        const std::int64_t value = entries_[static_cast<std::size_t>(key_index) + 1];
         if (missing_value_ == value)
         {
             break;
@@ -221,8 +221,8 @@ void Long2LongHashMap::compact_chain(int delete_key_index)
             (hash_position <= delete_key_index && delete_key_index <= key_index))
         {
             entries_[static_cast<std::size_t>(delete_key_index)] = key;
-            entries_[static_cast<std::size_t>(delete_key_index + 1)] = value;
-            entries_[static_cast<std::size_t>(key_index + 1)] = missing_value_;
+            entries_[static_cast<std::size_t>(delete_key_index) + 1] = value;
+            entries_[static_cast<std::size_t>(key_index) + 1] = missing_value_;
             delete_key_index = key_index;
         }
     }

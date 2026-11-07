@@ -16,7 +16,8 @@ namespace axc::core
 ///
 /// The map allocates only when it grows (in the reference too). Pre-size it
 /// with `reserve()` semantics by constructing with the final capacity where a
-/// preallocated table is required (cluster timer tables do this).
+/// preallocated table is required (cluster timer tables do this). Because a
+/// growth allocates, `put` is the one mutator that is not `noexcept`.
 class Long2LongHashMap
 {
 public:
@@ -46,7 +47,7 @@ public:
     /// Returns the previous value, or `missing_value()` when the key was absent.
     /// A `value == missing_value()` is rejected by returning `missing_value()`
     /// without inserting (Agrona throws; hot paths must not throw).
-    std::int64_t put(std::int64_t key, std::int64_t value) noexcept;
+    std::int64_t put(std::int64_t key, std::int64_t value);
 
     bool remove(std::int64_t key) noexcept;
     bool remove(std::int64_t key, std::int64_t value) noexcept;
@@ -87,7 +88,7 @@ public:
         const int mask = length - 1;
         int key_index = length;
 
-        if (missing_value_ != entries_[static_cast<std::size_t>(length - 1)])
+        if (missing_value_ != entries_[static_cast<std::size_t>(length) - 1])
         {
             for (int i = 1; i < length; i += 2)
             {
@@ -105,9 +106,9 @@ public:
         for (int position = position_counter - 2; position >= stop_counter; position -= 2)
         {
             const int slot = position & mask;
-            if (missing_value_ != entries_[static_cast<std::size_t>(slot + 1)])
+            if (missing_value_ != entries_[static_cast<std::size_t>(slot) + 1])
             {
-                consumer(entries_[static_cast<std::size_t>(slot)], entries_[static_cast<std::size_t>(slot + 1)]);
+                consumer(entries_[static_cast<std::size_t>(slot)], entries_[static_cast<std::size_t>(slot) + 1]);
             }
         }
     }

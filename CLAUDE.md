@@ -34,8 +34,10 @@ The plan, per-card plans and delivery records live outside this repo in
 
 `scripts/check.sh [presets…]` is the one gate — CI calls exactly it:
 configure + build + ctest, `hotpath-audit.sh`, `check-deps.sh`, clang-format,
-clang-tidy when available. A card is done only when it is green with gcc 13.3
-and clang 18.1 (Debug/Release/ASan; TSan for thread handovers once they exist).
+clang-tidy when available. A card is done only when it is green with **gcc 13.3
+on all presets** and **clang-20 on `debug-clang`** (the reference policy: one
+production compiler plus one clang build so the clang-tidy gate is honest; TSan
+for thread handovers once they exist).
 
 ## Branches, commits, PRs
 

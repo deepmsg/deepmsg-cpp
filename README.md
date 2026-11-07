@@ -24,8 +24,10 @@ The plan, work packages and delivery records live **outside** this repository in
 
 ## Build
 
-Prerequisites: **CMake ≥ 3.30** (Aeron 1.54.0 requires it), JDK 21, gcc 13.3 and
-clang 18.1, `liburing-dev` optional.
+Prerequisites: **CMake ≥ 3.30** (Aeron 1.54.0 requires it), JDK 21, gcc 13.3 for
+all presets and **clang-20** for the `debug-clang` preset (clang 18 reports
+`__cpp_concepts=201907`, so libstdc++ 13 does not expose `std::expected`),
+`liburing-dev` optional.
 
 ```sh
 git submodule update --init --recursive

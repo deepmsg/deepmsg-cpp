@@ -1,4 +1,11 @@
 ---
+# ErrorCode is a public vocabulary type; its underlying type is part of the
+# interface we keep stable (the reference error-code domain is int32), so
+# performance-enum-size is disabled.
+#
+# APIs mirror Agrona's signatures (put(key, value), remove(key, value));
+# renaming or wrapping the parameters would diverge from the reference, so
+# bugprone-easily-swappable-parameters is disabled.
 Checks: >
   -*,
   bugprone-*,
@@ -6,9 +13,14 @@ Checks: >
   modernize-use-nullptr,
   modernize-use-override,
   readability-braces-around-statements,
-  readability-avoid-const-params-in-decls
+  readability-avoid-const-params-in-decls,
+  -performance-enum-size,
+  -bugprone-easily-swappable-parameters
 WarningsAsErrors: ''
+# Only first-party headers are analysed; third_party/build are excluded by not
+# matching this regex. Do not add ExcludeHeaderFilterRegex: clang-tidy 18.0
+# rejects it, and a rejected config silently falls back to default checks and
+# the default C++ standard (which then cannot see std::expected).
 HeaderFilterRegex: '(src|apps|tools)/.*'
-ExcludeHeaderFilterRegex: 'third_party/.*|build/.*'
 FormatStyle: file
 ...

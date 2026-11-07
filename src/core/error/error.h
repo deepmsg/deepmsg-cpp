@@ -33,6 +33,15 @@ struct Error
     }
 };
 
+[[nodiscard]] inline Error make_error(ErrorCode code, std::string_view message, std::int32_t errcode = 0) noexcept
+{
+    Error error;
+    error.code = code;
+    error.errcode = errcode;
+    error.message.assign(message);
+    return error;
+}
+
 /// Startup/configuration failure. Only caught in `main`/`launch`.
 class ConfigError : public std::runtime_error
 {
