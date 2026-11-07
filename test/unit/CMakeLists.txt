@@ -7,9 +7,12 @@ axc_add_executable(axc_unit_tests
         core/idle_strategy_test.cpp
         core/cpu_affinity_test.cpp
         core/agent_runner_test.cpp
+        core/aeron_client_test.cpp
     DEPS
         axc_core
-        GTest::gtest_main)
+        GTest::gtest_main
+        aeron_driver_static
+        aeron_static)
 
 target_compile_definitions(axc_unit_tests PRIVATE "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
