@@ -4,3 +4,5 @@
 # __cxa_allocate_exception or aeron_counters_reader_foreach_*.
 #
 # Empty until X0-3 delivers the core components.
+
+agent/idle_strategy.cpp
