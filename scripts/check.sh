@@ -16,6 +16,9 @@ fi
 for preset in "${presets[@]}"; do
     cmake --preset "$preset"
     cmake --build "build/$preset" --parallel "$(nproc)"
+    # The interop CDriver fixture needs the reference driver binary; build it so
+    # the fixture runs instead of skipping in CI.
+    cmake --build "build/$preset" --target aeronmd --parallel "$(nproc)"
     ctest --test-dir "build/$preset" --output-on-failure
 done
 
