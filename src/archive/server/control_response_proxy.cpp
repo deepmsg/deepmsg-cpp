@@ -53,6 +53,7 @@ bool ControlResponseProxy::send_ping(std::int64_t control_session_id, ResponsePu
             archive_codecs::Ping encoder;
             encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.buffer.data()), 0, claim.buffer.size());
             encoder.controlSessionId(control_session_id);
+            claim.commit();
             last_length_ = length;
             return true;
         }
@@ -82,6 +83,7 @@ bool ControlResponseProxy::send_signal(std::int64_t control_session_id, std::int
                 .subscriptionId(subscription_id)
                 .position(position)
                 .signal(signal);
+            claim.commit();
             last_length_ = length;
             return true;
         }

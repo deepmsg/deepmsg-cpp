@@ -2,6 +2,9 @@ axc_add_library(axc_archive_server
     SOURCES
         module.cpp
         catalog.cpp
+        archive_conductor.cpp
+        aeron_response_publication.cpp
+        control_session_adapter.cpp
         authenticator.cpp
         control_response_proxy.cpp
         control_session.cpp

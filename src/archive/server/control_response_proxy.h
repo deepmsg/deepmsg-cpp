@@ -29,6 +29,18 @@ public:
     struct Claim
     {
         std::span<std::uint8_t> buffer{};
+        /// Called once the message has been encoded into `buffer`
+        /// (`BufferClaim.commit()` in the reference).
+        void (*commit_fn)(void* context){nullptr};
+        void* context{nullptr};
+
+        void commit() noexcept
+        {
+            if (nullptr != commit_fn)
+            {
+                commit_fn(context);
+            }
+        }
     };
 
     ResponsePublication() = default;
