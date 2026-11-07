@@ -1,5 +1,7 @@
 #include "archive/server/archive_conductor.h"
 
+#include <unistd.h>
+
 #include <cerrno>
 #include <utility>
 
@@ -25,7 +27,12 @@ namespace
 
 }  // namespace
 
-ArchiveConductor::ArchiveConductor(const ArchiveConductorContext& context) : context_(context), adapter_(*this) {}
+ArchiveConductor::ArchiveConductor(const ArchiveConductorContext& context)
+    : context_(context),
+      authenticator_(nullptr != context.authenticator ? context.authenticator : &default_authenticator_),
+      adapter_(*this)
+{
+}
 
 ArchiveConductor::~ArchiveConductor()
 {
@@ -61,24 +68,25 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     handlers.on_unavailable_clientd = this;
 
     auto subscription = client_.add_subscription(context_.control_channel, context_.control_stream_id, handlers);
-    for (int attempt = 0; attempt < 1000; attempt++)
+    for (int attempt = 0; attempt < 5000; attempt++)
     {
         auto polled = subscription.poll();
-        if (polled)
-        {
-            if (polled->has_value())
-            {
-                control_subscription_ = std::move(**polled);
-                cached_clock_.update(epoch_clock_.time_ms());
-                return {};
-            }
-        }
-        else
+        if (!polled)
         {
             return std::unexpected(polled.error());
         }
+        if (polled->has_value())
+        {
+            control_subscription_ = std::move(**polled);
+            cached_clock_.update(epoch_clock_.time_ms());
+            return {};
+        }
+
+        // The driver has to answer the async add, so the conductor has to keep
+        // turning between polls (`铁律 2`: never block inside an add).
         const int work = client_.do_work();
         (void)work;
+        ::usleep(1000);
     }
 
     return std::unexpected(
@@ -109,6 +117,26 @@ int ArchiveConductor::do_work()
             adapter_.unregister_session(session.session_id());
             sessions_by_id_.erase(session.session_id());
             publications_.erase(session.session_id());
+
+            // A session that ended before its publication add completed must not
+            // leave the async registration behind: the client conductor walks
+            // it on close.
+            for (std::size_t index = 0; index < pending_publications_.size();)
+            {
+                if (pending_publications_[index].control_session_id == session.session_id())
+                {
+                    if (0 != aeron_async_add_exclusive_publication_cancel(client_.handle(),
+                                                                          pending_publications_[index].async))
+                    {
+                        log_warning("failed to cancel the control publication add of an ended session");
+                    }
+                    pending_publications_.erase(pending_publications_.begin() + static_cast<std::ptrdiff_t>(index));
+                }
+                else
+                {
+                    index++;
+                }
+            }
         });
 
     return work_count;
@@ -206,14 +234,21 @@ int ArchiveConductor::poll_pending_publications()
         PendingPublication& pending = pending_publications_[index];
         aeron_exclusive_publication_t* publication = nullptr;
 
-        if (0 != aeron_async_add_exclusive_publication_poll(&publication, pending.async))
+        // `aeron_client_conductor_async_resource_poll`: 0 = still awaiting the
+        // driver, 1 = registered (complete), -1 = error or timeout.
+        const int add_result = aeron_async_add_exclusive_publication_poll(&publication, pending.async);
+        if (add_result < 0)
         {
-            log_warning("control publication add failed");
+            log_warning(std::string{"control publication add failed: "} + aeron_errmsg());
+            if (0 != aeron_async_add_exclusive_publication_cancel(client_.handle(), pending.async))
+            {
+                log_warning("failed to cancel the control publication add");
+            }
             pending_publications_.erase(pending_publications_.begin() + static_cast<std::ptrdiff_t>(index));
             continue;
         }
 
-        if (nullptr == publication)
+        if (1 != add_result || nullptr == publication)
         {
             index++;
             continue;

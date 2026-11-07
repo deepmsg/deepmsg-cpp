@@ -18,6 +18,8 @@ target_compile_definitions(axc_interop_tests PRIVATE
 axc_add_executable(axc_archive_interop_tests
     SOURCES
         archive/catalog_interop_test.cpp
+        archive/conductor_interop_test.cpp
+        fixture/c_driver.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
@@ -34,7 +36,8 @@ set(AXC_AERON_ALL_JAR
     "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar")
 
 target_compile_definitions(axc_archive_interop_tests PRIVATE
-    "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\"")
+    "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
+    "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\"")
 
 include(GoogleTest)
 gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)

@@ -85,6 +85,13 @@ public:
         warnings.emplace_back(message);
     }
 
+    [[nodiscard]] std::int64_t archive_id() const override
+    {
+        return archive_id_value;
+    }
+
+    std::int64_t archive_id_value{-1};
+
     std::vector<ConnectRequest> connect_requests;
     std::vector<std::string> warnings;
     CachedEpochClock clock{10};

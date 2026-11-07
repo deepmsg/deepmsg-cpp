@@ -37,6 +37,8 @@ struct ArchiveConductorContext
     std::int64_t connect_timeout_ms{3000};
     std::int64_t session_liveness_check_interval_ms{1000};
     int fragment_limit{10};
+    /// `Aeron.NULL_VALUE` unless the archive was given one (`ctx.archiveId()`).
+    std::int64_t archive_id{-1};
     /// nullptr ⇒ `DefaultAuthenticator`.
     Authenticator* authenticator{nullptr};
 };
@@ -73,6 +75,11 @@ public:
 
     ControlSession* on_connect_request(const ConnectRequest& request) override;
     void log_warning(std::string_view message) override;
+
+    [[nodiscard]] std::int64_t archive_id() const override
+    {
+        return context_.archive_id;
+    }
 
     [[nodiscard]] std::size_t session_count() const noexcept
     {

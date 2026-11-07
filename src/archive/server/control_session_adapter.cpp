@@ -3,6 +3,7 @@
 #include <cstring>
 #include <string_view>
 
+#include "io_aeron_archive_codecs/ArchiveIdRequest.h"
 #include "io_aeron_archive_codecs/AuthConnectRequest.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
@@ -176,6 +177,30 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (nullptr != session)
             {
                 session->on_keep_alive(decoder.correlationId());
+                return 1;
+            }
+            return 0;
+        }
+
+        case TEMPLATE_ARCHIVE_ID:
+        {
+            // `ControlSessionAdapter.java:1063-1084` and
+            // `ControlSession.onArchiveId` (`ControlSession.java:541`): the gate
+            // first, then activation, then the archive id as the relevant id.
+            archive_codecs::ArchiveIdRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ControlSession* session =
+                control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr != session)
+            {
+                session->attempt_to_activate();
+                if (ControlSession::State::active == session->state())
+                {
+                    session->send_ok_response(decoder.correlationId(), handler_.archive_id());
+                }
                 return 1;
             }
             return 0;

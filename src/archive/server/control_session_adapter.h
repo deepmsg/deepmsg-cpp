@@ -44,6 +44,10 @@ public:
 
     /// `ArchiveConductor.logWarning` (`ArchiveConductor.java:442`).
     virtual void log_warning(std::string_view message) = 0;
+
+    /// `ArchiveConductor.archiveId` (`ArchiveConductor.java:524`): the id a
+    /// session receives for an `ArchiveIdRequest`.
+    [[nodiscard]] virtual std::int64_t archive_id() const = 0;
 };
 
 /// `ControlSessionAdapter` (`ControlSessionAdapter.java:107-1231`): decodes a
@@ -64,6 +68,7 @@ public:
 
     // Template ids from `aeron-archive-codecs.xml`.
     static constexpr std::int32_t TEMPLATE_CLOSE_SESSION = 3;
+    static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;
     static constexpr std::int32_t TEMPLATE_KEEP_ALIVE = 61;
