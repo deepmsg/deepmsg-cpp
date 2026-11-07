@@ -16,7 +16,9 @@ if [ ! -d "$build_dir" ]; then
     exit 2
 fi
 
-banned='operator new(unsigned long)|pthread_mutex_lock|__cxa_allocate_exception|aeron_counters_reader_foreach_'
+# Note: this is an ERE. Do NOT write "operator new(unsigned long)" -- the
+# parentheses would be parsed as a group and the pattern would never match.
+banned='operator new|pthread_mutex_lock|__cxa_allocate_exception|aeron_counters_reader_foreach_'
 status=0
 checked=0
 

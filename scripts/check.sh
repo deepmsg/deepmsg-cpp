@@ -21,6 +21,7 @@ done
 
 tools/repo/hotpath-audit.sh "build/${presets[0]}"
 tools/repo/check-deps.sh
+tools/repo/check-forbidden.sh
 
 # clang-format / clang-tidy must be the same major version as the clang build
 # preset (clang-18 cannot see std::expected with libstdc++ 13, so its tidy would
