@@ -34,6 +34,14 @@ cmake --build build/reference-shim --target aeron_archive_test
 build/reference-shim/binaries/aeron_archive_test --gtest_filter='AeronCArchiveTest.*'
 ```
 
+
+## XA-0: reference Java archive tests on the C driver
+
+`run-xa0.sh` runs `io.aeron.archive.ArchiveTest` twice (Java driver baseline and
+`-Daeron.test.system.aeronmd.path=<aeronmd>`), stores both JUnit XMLs and fails
+if the C driver has a red the Java driver does not. A bogus `aeronmd` path is a
+useful negative control: the suite must fail, proving the property is honoured.
+
 ## C++ fixtures
 
 - `Process` (`run_process`): fork/exec with timeout, combined output and an exit
