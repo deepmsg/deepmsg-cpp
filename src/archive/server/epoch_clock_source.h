@@ -27,4 +27,25 @@ public:
     [[nodiscard]] std::int64_t time_ms() const noexcept override;
 };
 
+/// `org.agrona.concurrent.CachedEpochClock`: read once per pass and reuse, so a
+/// whole `doWork` pass sees one time.
+class CachedEpochClock final : public EpochClockSource
+{
+public:
+    explicit CachedEpochClock(std::int64_t now_ms = 0) noexcept : now_ms_(now_ms) {}
+
+    [[nodiscard]] std::int64_t time_ms() const noexcept override
+    {
+        return now_ms_;
+    }
+
+    void update(std::int64_t now_ms) noexcept
+    {
+        now_ms_ = now_ms;
+    }
+
+private:
+    std::int64_t now_ms_{0};
+};
+
 }  // namespace deepmsg::archive::server

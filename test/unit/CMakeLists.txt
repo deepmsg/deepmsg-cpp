@@ -38,6 +38,8 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/recording_reader_test.cpp
         archive/server/archive_mark_file_test.cpp
         archive/server/archive_mark_file_golden_test.cpp
+        archive/server/authenticator_test.cpp
+        archive/server/control_session_test.cpp
         archive/io/sync_writer_test.cpp
         archive/server/catalog_test.cpp
         archive/server/catalog_golden_test.cpp

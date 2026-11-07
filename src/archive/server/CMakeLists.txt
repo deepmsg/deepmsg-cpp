@@ -2,6 +2,9 @@ axc_add_library(axc_archive_server
     SOURCES
         module.cpp
         catalog.cpp
+        authenticator.cpp
+        control_response_proxy.cpp
+        control_session.cpp
         archive_mark_file.cpp
         checksum.cpp
         epoch_clock_source.cpp
