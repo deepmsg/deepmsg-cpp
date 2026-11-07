@@ -98,7 +98,7 @@ void ArchiveConductor::close()
     sessions_ = SessionWorker<ControlSession>{};
     publications_.clear();
     control_subscription_.reset();
-    client_ = axc::core::DeepmsgClient{};
+    client_.close();
 }
 
 int ArchiveConductor::do_work()

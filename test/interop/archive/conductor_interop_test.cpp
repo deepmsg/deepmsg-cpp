@@ -50,15 +50,6 @@ protected:
         archive_dir_ = root_ + "/archive";
         std::filesystem::create_directories(archive_dir_);
 
-        if (nullptr == std::getenv("AXC_CONDUCTOR_INTEROP"))
-        {
-            // Work in progress: the control request path reaches the conductor
-            // (a session is created and the connect answer is built), but the
-            // response publication add and the conductor teardown are not right
-            // yet - see records/a2a-part2.md §「未完成」. Skipping loudly rather
-            // than pretending to pass; run with AXC_CONDUCTOR_INTEROP=1.
-            GTEST_SKIP() << "conductor interop is work in progress; set AXC_CONDUCTOR_INTEROP=1 to run it";
-        }
         if (!std::filesystem::exists(AXC_AERONMD_DEFAULT))
         {
             GTEST_SKIP() << "aeronmd not built at " << AXC_AERONMD_DEFAULT;
@@ -71,6 +62,20 @@ protected:
 
     void TearDown() override
     {
+        // `aeron_archive_close` returns the duplicated context (and the Aeron
+        // client it owns); the original context was handed to the async connect
+        // with `owns_aeron_client=false`, so closing it only frees the struct
+        // (`aeron_archive_async_connect_leak_test.cpp:143-145`).
+        if (nullptr != client_archive_)
+        {
+            EXPECT_EQ(0, aeron_archive_close(client_archive_));
+            client_archive_ = nullptr;
+        }
+        if (nullptr != archive_context_)
+        {
+            EXPECT_EQ(0, aeron_archive_context_close(archive_context_));
+            archive_context_ = nullptr;
+        }
         driver_.stop();
         std::error_code error;
         std::filesystem::remove_all(root_, error);
@@ -106,10 +111,13 @@ protected:
         aeron_archive_context_set_control_response_stream_id(context, RESPONSE_STREAM_ID);
         if (!credentials.empty())
         {
-            const_credentials_.data = credentials.data();
-            const_credentials_.length = static_cast<std::uint32_t>(credentials.size());
+            credentials_.initial_text = credentials;
+            credentials_.initial = {credentials_.initial_text.data(),
+                                    static_cast<std::uint32_t>(credentials_.initial_text.size())};
+            credentials_.challenge = {credentials_.challenge_text.data(),
+                                      static_cast<std::uint32_t>(credentials_.challenge_text.size())};
             aeron_archive_context_set_credentials_supplier(context, &static_credentials, &challenge_credentials,
-                                                           &credentials_free, &const_credentials_);
+                                                           &credentials_free, &credentials_);
         }
 
         aeron_archive_async_connect_t* async = nullptr;
@@ -158,18 +166,30 @@ protected:
 
     static aeron_archive_encoded_credentials_t* static_credentials(void* clientd)
     {
-        return static_cast<aeron_archive_encoded_credentials_t*>(clientd);
+        return &static_cast<Credentials*>(clientd)->initial;
     }
 
     static aeron_archive_encoded_credentials_t* challenge_credentials(aeron_archive_encoded_credentials_t* challenge,
                                                                       void* clientd)
     {
+        // `SampleAuthenticator` challenges `admin:adminC` and only accepts
+        // `admin:CSadmin` as the answer.
         (void)challenge;
-        return static_cast<aeron_archive_encoded_credentials_t*>(clientd);
+        return &static_cast<Credentials*>(clientd)->challenge;
     }
 
     static constexpr std::int32_t CONTROL_STREAM_ID = 10;
     static constexpr std::int32_t RESPONSE_STREAM_ID = 11;
+
+    /// The three values the client's credentials supplier can return. The
+    /// challenge answer is the one `SampleAuthenticator` expects.
+    struct Credentials
+    {
+        std::string initial_text;
+        std::string challenge_text{"admin:CSadmin"};
+        aeron_archive_encoded_credentials_t initial{};
+        aeron_archive_encoded_credentials_t challenge{};
+    };
 
     std::string root_;
     std::string aeron_dir_;
@@ -178,7 +198,7 @@ protected:
     aeron_archive_async_connect_t* async_{nullptr};
     aeron_archive_context_t* archive_context_{nullptr};
     aeron_archive_t* client_archive_{nullptr};
-    aeron_archive_encoded_credentials_t const_credentials_{};
+    Credentials credentials_;
     std::string last_error_;
 };
 
@@ -204,8 +224,14 @@ TEST_F(ConductorInteropTest, theClientAuthenticatesThroughAChallenge)
 
     // `admin:adminC` makes the archive answer with a challenge; the client's
     // supplier answers `admin:CSadmin`.
-    EXPECT_EQ(0, connect_client(*conductor, "admin:adminC")) << "the challenge flow did not complete";
+    EXPECT_EQ(0, connect_client(*conductor, "admin:adminC"))
+        << "the challenge flow did not complete: " << last_error_
+        << " warnings: " << (conductor->warnings().empty() ? std::string{"none"} : conductor->warnings().back());
     EXPECT_EQ(1u, conductor->session_count());
+    // The authenticator only forgets a session once the challenge answer was
+    // accepted (`SampleAuthenticator.on_challenged_session`).
+    EXPECT_EQ(0u, authenticator.tracked_sessions());
+    EXPECT_EQ(1u, authenticator.accepted_challenge_responses());
 }
 
 }  // namespace

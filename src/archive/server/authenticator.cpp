@@ -73,6 +73,7 @@ void SampleAuthenticator::on_challenge_response(std::int64_t session_id,
         credentials == CHALLENGE_CREDENTIALS)
     {
         found->second = SessionState::authenticated;
+        accepted_challenge_responses_++;
     }
     else if (credentials != CHALLENGE_CREDENTIALS)
     {

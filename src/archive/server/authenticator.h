@@ -93,6 +93,13 @@ public:
         return session_states_.size();
     }
 
+    /// Challenge answers that were accepted (test observable: proves the
+    /// `ChallengeResponse`(60) round trip actually happened).
+    [[nodiscard]] std::size_t accepted_challenge_responses() const noexcept
+    {
+        return accepted_challenge_responses_;
+    }
+
 private:
     enum class SessionState
     {
@@ -105,6 +112,7 @@ private:
 
     std::unordered_map<std::int64_t, SessionState> session_states_;
     std::array<std::uint8_t, PRINCIPAL.size()> principal_{principal_bytes()};
+    std::size_t accepted_challenge_responses_{0};
 };
 
 }  // namespace deepmsg::archive::server
