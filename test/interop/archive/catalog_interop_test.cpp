@@ -17,7 +17,10 @@
 #include <string>
 #include <vector>
 
+#include "archive/server/archive_mark_file.h"
 #include "archive/server/catalog.h"
+#include "archive/server/frame_layout.h"
+#include "archive/server/recording_writer.h"
 #include "fixture/java_process.h"
 
 #ifndef AXC_AERON_JAR
@@ -27,9 +30,12 @@
 namespace
 {
 
+using deepmsg::archive::server::ArchiveMarkFile;
 using deepmsg::archive::server::Catalog;
 using deepmsg::archive::server::CatalogOpenOptions;
 using deepmsg::archive::server::CatalogOptions;
+using deepmsg::archive::server::RecordingWriter;
+using deepmsg::archive::server::RecordingWriterContext;
 using io::aeron::archive::codecs::RecordingState;
 
 constexpr std::int32_t TERM_LENGTH = 8192;
@@ -224,6 +230,135 @@ TEST_F(CatalogInteropTest, archiveToolReadsEveryFieldOfOurCatalog)
         expect("originalChannel", "'" + recording.original_channel + "'");
         expect("sourceIdentity", "'" + recording.source_identity + "'");
     }
+}
+
+TEST_F(CatalogInteropTest, archiveToolDescribeAllReadsOurMarkFileAndCatalog)
+{
+    // `describe-all` prints the mark information first, so the directory needs
+    // both files (`ArchiveTool.java:421-428`).
+    for (const char* channel : {"channelG", "channelH"})
+    {
+        auto catalog = create_catalog(1024);
+        ASSERT_TRUE(catalog) << catalog.error().message.view();
+        auto id = catalog->add_new_recording(0, 0, 0, SEGMENT_LENGTH, TERM_LENGTH, MTU_LENGTH, 6, 1, channel,
+                                             std::string{channel} + "?tag=f", "sourceA");
+        ASSERT_TRUE(id) << id.error().message.view();
+        auto closed = catalog->close();
+        ASSERT_TRUE(closed) << closed.error().message.view();
+    }
+
+    {
+        ArchiveMarkFile::Options options;
+        options.directory = archive_dir_;
+        options.total_file_length = ArchiveMarkFile::HEADER_LENGTH + 4096;
+        options.error_buffer_length = 4096;
+
+        ArchiveMarkFile::HeaderValues values;
+        values.start_timestamp = 77;
+        values.control_stream_id = 10;
+        values.local_control_stream_id = 11;
+        values.events_stream_id = 12;
+        values.archive_id = 42;
+        values.control_channel = "aeron:udp?endpoint=localhost:8010";
+        values.local_control_channel = "aeron:ipc";
+        values.events_channel = "aeron:udp?endpoint=localhost:8011";
+        values.aeron_directory = "/dev/shm/aeron-interop";
+
+        auto mark_file = ArchiveMarkFile::create_or_open(options, values);
+        ASSERT_TRUE(mark_file) << mark_file.error().message.view();
+        // A long-past activity timestamp: the tool's liveness wait must not block.
+        mark_file->signal_ready(5555);
+        ASSERT_TRUE(mark_file->force());
+    }
+
+    auto described = run_archive_tool("describe-all");
+    ASSERT_TRUE(described) << described.error().message.view();
+    ASSERT_EQ(0, described->exit_code) << described->output;
+
+    const std::string& output = described->output;
+    EXPECT_NE(std::string::npos, output.find("Catalog capacity in bytes: 1024")) << output;
+    EXPECT_NE(std::string::npos, output.find("recordingId=0")) << output;
+    EXPECT_NE(std::string::npos, output.find("recordingId=1")) << output;
+    EXPECT_NE(std::string::npos, output.find("channelG")) << output;
+    EXPECT_NE(std::string::npos, output.find("channelH")) << output;
+    EXPECT_NE(std::string::npos, output.find("archiveId=42")) << output;
+    EXPECT_NE(std::string::npos, output.find("controlChannel='aeron:udp?endpoint=localhost:8010'")) << output;
+}
+
+TEST_F(CatalogInteropTest, archiveToolVerifyAcceptsOurSegmentFiles)
+{
+    // One recording written by `RecordingWriter`, described by our catalog, with
+    // our mark file next to it: the reference's own `verify` has to accept it.
+    constexpr std::int64_t recording_id = 0;
+    constexpr std::int32_t frame_length = 1024;
+    constexpr int frame_count = 8;
+    // `verify` validates the term length with `LogBufferDescriptor`, whose
+    // minimum is 64 KiB (`TERM_MIN_LENGTH`), so this case uses its own sizes.
+    constexpr std::int32_t verify_term_length = 64 * 1024;
+    constexpr std::int32_t verify_segment_length = 4 * verify_term_length;
+
+    std::vector<std::uint8_t> term_buffer(static_cast<std::size_t>(frame_length), 0);
+    const auto type = static_cast<std::uint16_t>(deepmsg::archive::server::DATA_FRAME_TYPE);
+    std::memcpy(term_buffer.data() + deepmsg::archive::server::FRAME_TYPE_OFFSET, &type, sizeof(type));
+    std::memcpy(term_buffer.data(), &frame_length, sizeof(frame_length));
+    const std::int32_t stream_id = 3;
+    std::memcpy(term_buffer.data() + deepmsg::archive::server::STREAM_ID_OFFSET, &stream_id, sizeof(stream_id));
+    const std::int32_t session_id = 5;
+    std::memcpy(term_buffer.data() + deepmsg::archive::server::SESSION_ID_OFFSET, &session_id, sizeof(session_id));
+
+    {
+        RecordingWriterContext context;
+        context.archive_dir = archive_dir_;
+        RecordingWriter writer{recording_id, 0, verify_segment_length, verify_term_length, 0, context, nullptr};
+        ASSERT_TRUE(writer.init());
+
+        for (int index = 0; index < frame_count; index++)
+        {
+            const auto position = static_cast<std::int32_t>(index * frame_length);
+            const std::int32_t term_offset = position & (verify_term_length - 1);
+            const std::int32_t term_id = position / verify_term_length;
+            std::memcpy(term_buffer.data() + deepmsg::archive::server::TERM_OFFSET_FIELD_OFFSET, &term_offset,
+                        sizeof(term_offset));
+            std::memcpy(term_buffer.data() + deepmsg::archive::server::TERM_ID_OFFSET, &term_id, sizeof(term_id));
+            std::memset(term_buffer.data() + deepmsg::archive::server::DATA_HEADER_LENGTH, index & 0xFF,
+                        static_cast<std::size_t>(frame_length - deepmsg::archive::server::DATA_HEADER_LENGTH));
+            auto written = writer.on_block(term_buffer.data(), 0, frame_length, session_id, term_id);
+            ASSERT_TRUE(written) << written.error().message.view();
+        }
+        ASSERT_TRUE(writer.close());
+    }
+
+    const std::int64_t stop_position = static_cast<std::int64_t>(frame_count) * frame_length;
+    {
+        auto catalog = create_catalog(1024);
+        ASSERT_TRUE(catalog) << catalog.error().message.view();
+        auto id = catalog->add_new_recording(0, 0, 0, verify_segment_length, verify_term_length, MTU_LENGTH, session_id,
+                                             stream_id, "channelG", "channelG?tag=f", "sourceA");
+        ASSERT_TRUE(id) << id.error().message.view();
+        ASSERT_EQ(recording_id, *id);
+        ASSERT_TRUE(catalog->stop_position(recording_id, stop_position));
+        auto closed = catalog->close();
+        ASSERT_TRUE(closed) << closed.error().message.view();
+    }
+
+    {
+        ArchiveMarkFile::Options options;
+        options.directory = archive_dir_;
+        options.total_file_length = ArchiveMarkFile::HEADER_LENGTH + 4096;
+        options.error_buffer_length = 4096;
+        ArchiveMarkFile::HeaderValues values;
+        values.archive_id = 7;
+        auto mark_file = ArchiveMarkFile::create_or_open(options, values);
+        ASSERT_TRUE(mark_file) << mark_file.error().message.view();
+        mark_file->signal_ready(5555);
+        ASSERT_TRUE(mark_file->force());
+    }
+
+    auto verified = run_archive_tool("verify");
+    ASSERT_TRUE(verified) << verified.error().message.view();
+    ASSERT_EQ(0, verified->exit_code) << verified->output;
+    EXPECT_NE(std::string::npos, verified->output.find("recordingId=" + std::to_string(recording_id)))
+        << verified->output;
 }
 
 TEST_F(CatalogInteropTest, archiveToolReadsACatalogThatGrewWhileBeingWritten)

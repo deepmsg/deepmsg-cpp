@@ -33,6 +33,12 @@ target_compile_definitions(axc_stage_timer_timing_test PRIVATE AXC_STAGE_TIMING=
 axc_add_executable(axc_archive_unit_tests
     SOURCES
         archive/server/catalog_index_test.cpp
+        archive/server/checksum_test.cpp
+        archive/server/recording_writer_test.cpp
+        archive/server/recording_reader_test.cpp
+        archive/server/archive_mark_file_test.cpp
+        archive/server/archive_mark_file_golden_test.cpp
+        archive/io/sync_writer_test.cpp
         archive/server/catalog_test.cpp
         archive/server/catalog_golden_test.cpp
     DEPS

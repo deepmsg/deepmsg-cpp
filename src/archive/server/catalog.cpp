@@ -14,6 +14,8 @@
 #include <system_error>
 #include <utility>
 
+#include "archive/server/codecs.h"
+#include "archive/server/segment_files.h"
 #include "core/io/fs.h"
 #include "core/time/clock.h"
 #include "core/trace/trace.h"
@@ -23,10 +25,10 @@ namespace deepmsg::archive::server
 namespace
 {
 
-using io::aeron::archive::codecs::CatalogHeader;
-using io::aeron::archive::codecs::RecordingDescriptor;
-using io::aeron::archive::codecs::RecordingDescriptorHeader;
-using io::aeron::archive::codecs::RecordingState;
+using archive_codecs::CatalogHeader;
+using archive_codecs::RecordingDescriptor;
+using archive_codecs::RecordingDescriptorHeader;
+using archive_codecs::RecordingState;
 
 // `FrameDescriptor.FRAME_ALIGNMENT` (`FrameDescriptor.java:66`) and the
 // `DataHeaderFlyweight` constants the catalog's recovery scan uses
@@ -73,36 +75,6 @@ void write_long_volatile(std::uint8_t* address, std::int64_t value) noexcept
 [[nodiscard]] std::int64_t read_long_volatile(std::uint8_t* address) noexcept
 {
     return std::atomic_ref<std::int64_t>(*reinterpret_cast<std::int64_t*>(address)).load(std::memory_order_acquire);
-}
-
-/// `AsciiEncoding.parseLongAscii` (`org.agrona.AsciiEncoding`).
-[[nodiscard]] std::expected<std::int64_t, axc::core::Error> parse_long_ascii(std::string_view text, std::size_t offset,
-                                                                             std::size_t length)
-{
-    if (0 == length)
-    {
-        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument, "no digits to parse"));
-    }
-
-    std::int64_t value = 0;
-    for (std::size_t index = 0; index < length; index++)
-    {
-        const char character = text[offset + index];
-        if (character < '0' || character > '9')
-        {
-            std::string message{"invalid long value in: "};
-            message.append(text.substr(offset, length));
-            return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument, message));
-        }
-        if (value > (std::numeric_limits<std::int64_t>::max() - 9) / 10)
-        {
-            std::string message{"long value out of range: "};
-            message.append(text.substr(offset, length));
-            return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument, message));
-        }
-        value = (value * 10) + (character - '0');
-    }
-    return value;
 }
 
 [[nodiscard]] std::string path_in(std::string_view archive_dir, const std::string& name)
@@ -361,11 +333,6 @@ std::expected<void, axc::core::Error> retry_force(const ForceFn& force, const Re
 }
 
 }  // namespace detail
-
-std::int64_t SystemEpochClock::time_ms() const noexcept
-{
-    return axc::core::EpochClock::now_ms();
-}
 
 Catalog::Catalog(std::string archive_dir)
     : archive_dir_(std::move(archive_dir)), catalog_file_(path_in(archive_dir_, CATALOG_FILE_NAME))
@@ -789,7 +756,7 @@ std::expected<void, axc::core::Error> Catalog::refresh_catalog(bool fix_on_refre
         scratch = std::span<std::uint8_t>(owned_recovery_buffer_);
     }
 
-    auto segment_files = index_segment_files(archive_dir_);
+    auto segment_files = server::index_segment_files(archive_dir_);
     if (!segment_files)
     {
         return std::unexpected(segment_files.error());
@@ -823,7 +790,7 @@ std::expected<void, axc::core::Error> Catalog::refresh_and_fix_descriptor(
         const auto found = segment_files.find(recording_id);
         const std::vector<std::string>& files = found != segment_files.end() ? found->second : EMPTY;
 
-        auto max_segment_file = find_segment_file_with_highest_position(files);
+        auto max_segment_file = server::find_segment_file_with_highest_position(files);
         if (!max_segment_file)
         {
             return std::unexpected(max_segment_file.error());
@@ -1444,129 +1411,6 @@ std::int32_t Catalog::compute_recording_descriptor_checksum(std::int32_t recordi
     return 0;
 }
 
-std::vector<std::string> Catalog::list_segment_files(std::string_view archive_dir, std::int64_t recording_id)
-{
-    std::vector<std::string> segment_files;
-    std::error_code error;
-    std::filesystem::directory_iterator iterator{std::filesystem::path(archive_dir), error};
-    if (error)
-    {
-        return segment_files;
-    }
-
-    const std::string prefix = std::to_string(recording_id) + "-";
-    const std::string suffix = RECORDING_SEGMENT_SUFFIX;
-    for (const auto& entry : iterator)
-    {
-        const std::string name = entry.path().filename().string();
-        if (0 == name.rfind(prefix, 0) && name.size() >= suffix.size() &&
-            0 == name.compare(name.size() - suffix.size(), suffix.size(), suffix))
-        {
-            segment_files.push_back(name);
-        }
-    }
-    return segment_files;
-}
-
-std::expected<std::unordered_map<std::int64_t, std::vector<std::string>>, axc::core::Error>
-Catalog::index_segment_files(std::string_view archive_dir)
-{
-    std::unordered_map<std::int64_t, std::vector<std::string>> index;
-    std::error_code error;
-    std::filesystem::directory_iterator iterator{std::filesystem::path(archive_dir), error};
-    if (error)
-    {
-        return index;
-    }
-
-    const std::string suffix = RECORDING_SEGMENT_SUFFIX;
-    for (const auto& entry : iterator)
-    {
-        const std::string name = entry.path().filename().string();
-        if (name.size() < suffix.size() || 0 != name.compare(name.size() - suffix.size(), suffix.size(), suffix))
-        {
-            continue;
-        }
-
-        // `parseSegmentFileRecordingId` throws `InvalidRecordingNameException`,
-        // which `indexSegmentFiles` skips over (`Catalog.java:1157-1163`); a bad
-        // number is not caught there and aborts the open.
-        const std::size_t dash = name.find('-');
-        if (std::string::npos == dash || 0 == dash)
-        {
-            continue;
-        }
-        auto recording_id = parse_long_ascii(name, 0, dash);
-        if (!recording_id)
-        {
-            return std::unexpected(recording_id.error());
-        }
-        index[*recording_id].push_back(name);
-    }
-    return index;
-}
-
-std::expected<std::string, axc::core::Error> Catalog::find_segment_file_with_highest_position(
-    const std::vector<std::string>& segment_files)
-{
-    std::int64_t max_segment_position = NULL_POSITION;
-    std::string max_file_name;
-
-    for (const auto& filename : segment_files)
-    {
-        auto file_position = parse_segment_file_position(filename);
-        if (!file_position)
-        {
-            return std::unexpected(file_position.error());
-        }
-        if (*file_position < 0)
-        {
-            return std::unexpected(message_error(axc::core::ErrorCode::protocol_error,
-                                                 "negative position encoded in the file name: " + filename));
-        }
-        if (*file_position > max_segment_position)
-        {
-            max_segment_position = *file_position;
-            max_file_name = filename;
-        }
-    }
-
-    return max_file_name;
-}
-
-std::expected<std::int64_t, axc::core::Error> Catalog::parse_segment_file_position(const std::string& filename)
-{
-    const std::size_t dash_offset = filename.find('-');
-    if (std::string::npos == dash_offset)
-    {
-        return std::unexpected(
-            message_error(axc::core::ErrorCode::invalid_argument, "invalid filename format: " + filename));
-    }
-
-    const auto position_offset = dash_offset + 1;
-    const auto suffix_length = std::strlen(RECORDING_SEGMENT_SUFFIX);
-    const auto position_length = static_cast<std::int64_t>(filename.size()) -
-                                 static_cast<std::int64_t>(position_offset) - static_cast<std::int64_t>(suffix_length);
-    if (0 >= position_length)
-    {
-        return std::unexpected(message_error(axc::core::ErrorCode::invalid_argument,
-                                             "no position encoded in the segment file: " + filename));
-    }
-
-    return parse_long_ascii(filename, position_offset, static_cast<std::size_t>(position_length));
-}
-
-std::expected<std::int64_t, axc::core::Error> Catalog::parse_segment_file_recording_id(const std::string& filename)
-{
-    const std::size_t dash_offset = filename.find('-');
-    if (std::string::npos == dash_offset || 0 == dash_offset)
-    {
-        return std::unexpected(
-            message_error(axc::core::ErrorCode::invalid_argument, "invalid filename format: " + filename));
-    }
-    return parse_long_ascii(filename, 0, dash_offset);
-}
-
 bool Catalog::fragment_straddles_page_boundary(std::int32_t fragment_offset, std::int32_t fragment_length) noexcept
 {
     return (fragment_offset / PAGE_SIZE) != ((fragment_offset + (fragment_length - 1)) / PAGE_SIZE);
@@ -1584,7 +1428,7 @@ std::expected<std::int64_t, axc::core::Error> Catalog::compute_stop_position(
 
     const auto start_term_offset = static_cast<std::int32_t>(start_position & (term_length - 1));
     const std::int64_t start_term_base_position = start_position - start_term_offset;
-    auto segment_file_base_position = parse_segment_file_position(max_segment_file);
+    auto segment_file_base_position = server::parse_segment_file_position(max_segment_file);
     if (!segment_file_base_position)
     {
         return std::unexpected(segment_file_base_position.error());

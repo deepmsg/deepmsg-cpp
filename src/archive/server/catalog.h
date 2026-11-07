@@ -11,6 +11,8 @@
 
 #include "archive/server/catalog_index.h"
 #include "archive/server/checksum.h"
+#include "archive/server/codecs.h"
+#include "archive/server/epoch_clock_source.h"
 #include "core/error/error.h"
 #include "core/io/mapped_file.h"
 #include "io_aeron_archive_codecs/CatalogHeader.h"
@@ -21,28 +23,6 @@
 namespace deepmsg::archive::server
 {
 
-/// Millisecond wall clock, the reference's `EpochClock` functional interface;
-/// injectable so the crash-recovery tests can pin the timestamp written into a
-/// repaired descriptor.
-class EpochClockSource
-{
-public:
-    EpochClockSource() = default;
-    virtual ~EpochClockSource() = default;
-
-    EpochClockSource(const EpochClockSource&) = delete;
-    EpochClockSource& operator=(const EpochClockSource&) = delete;
-
-    [[nodiscard]] virtual std::int64_t time_ms() const noexcept = 0;
-};
-
-/// `EpochClock` as production code gets it (`CLOCK_REALTIME`).
-class SystemEpochClock final : public EpochClockSource
-{
-public:
-    [[nodiscard]] std::int64_t time_ms() const noexcept override;
-};
-
 /// One descriptor as handed to a `CatalogEntryProcessor`, equivalent to the
 /// reference's `(offset, headerEncoder, headerDecoder, descriptorEncoder,
 /// descriptorDecoder)` argument list (`Catalog.java:104-109`). The generated
@@ -52,8 +32,8 @@ struct CatalogEntry
 {
     std::int32_t recording_descriptor_offset{0};
     std::span<std::uint8_t> frame{};
-    io::aeron::archive::codecs::RecordingDescriptorHeader header{};
-    io::aeron::archive::codecs::RecordingDescriptor descriptor{};
+    archive_codecs::RecordingDescriptorHeader header{};
+    archive_codecs::RecordingDescriptor descriptor{};
 };
 
 using CatalogEntryProcessor = std::function<void(CatalogEntry& entry)>;
@@ -145,11 +125,11 @@ public:
     static constexpr std::int32_t PAGE_SIZE = 4096;
     static constexpr std::int64_t NULL_RECORD_ID = -1;
     static constexpr std::int32_t DESCRIPTOR_HEADER_LENGTH =
-        io::aeron::archive::codecs::RecordingDescriptorHeader::SBE_BLOCK_LENGTH;
+        archive_codecs::RecordingDescriptorHeader::SBE_BLOCK_LENGTH;
     static constexpr std::int32_t DEFAULT_ALIGNMENT = 1024;
     static constexpr std::int64_t MAX_CATALOG_LENGTH = 2147483647;
     static constexpr std::int64_t DEFAULT_CAPACITY = 1024 * 1024;
-    static constexpr std::int64_t MIN_CAPACITY = io::aeron::archive::codecs::CatalogHeader::SBE_BLOCK_LENGTH;
+    static constexpr std::int64_t MIN_CAPACITY = archive_codecs::CatalogHeader::SBE_BLOCK_LENGTH;
     static constexpr int MAX_CLOSE_FSYNC_ATTEMPTS = 3;
 
     // `AeronArchive.NULL_VALUE` and friends (`AeronArchive.java:96-101`).
@@ -161,9 +141,8 @@ public:
     static constexpr std::int32_t MAJOR_VERSION = 3;
     static constexpr std::int32_t SEMANTIC_VERSION = (3 << 16) | (1 << 8) | 0;
 
-    // `Archive.Configuration.CATALOG_FILE_NAME` / `RECORDING_SEGMENT_SUFFIX` (`Archive.java:290-295`).
+    // `Archive.Configuration.CATALOG_FILE_NAME` (`Archive.java:290`).
     static constexpr const char* CATALOG_FILE_NAME = "archive.catalog";
-    static constexpr const char* RECORDING_SEGMENT_SUFFIX = ".rec";
 
     /// `ArchiveEventCode.CATALOG_RESIZE` (`ArchiveEventCode.java:193`).
     static constexpr std::int32_t EVENT_CATALOG_RESIZE = 37;
@@ -290,8 +269,8 @@ public:
     [[nodiscard]] std::expected<void, axc::core::Error> start_position(std::int64_t recording_id,
                                                                        std::int64_t position);
 
-    [[nodiscard]] std::expected<bool, axc::core::Error> change_state(
-        std::int64_t recording_id, io::aeron::archive::codecs::RecordingState::Value new_state);
+    [[nodiscard]] std::expected<bool, axc::core::Error> change_state(std::int64_t recording_id,
+                                                                     archive_codecs::RecordingState::Value new_state);
 
     [[nodiscard]] RecordingSummary recording_summary(std::int64_t recording_id) const;
 
@@ -312,18 +291,8 @@ public:
     [[nodiscard]] std::int32_t compute_recording_descriptor_checksum(std::int32_t recording_descriptor_offset,
                                                                      std::int32_t recording_length) const;
 
-    // Segment-file helpers shared with the archive tool and the repair pass
-    // (`Catalog.java:1123-1253`).
-    [[nodiscard]] static std::vector<std::string> list_segment_files(std::string_view archive_dir,
-                                                                     std::int64_t recording_id);
-    [[nodiscard]] static std::expected<std::unordered_map<std::int64_t, std::vector<std::string>>, axc::core::Error>
-    index_segment_files(std::string_view archive_dir);
-    [[nodiscard]] static std::expected<std::string, axc::core::Error> find_segment_file_with_highest_position(
-        const std::vector<std::string>& segment_files);
-    [[nodiscard]] static std::expected<std::int64_t, axc::core::Error> parse_segment_file_position(
-        const std::string& filename);
-    [[nodiscard]] static std::expected<std::int64_t, axc::core::Error> parse_segment_file_recording_id(
-        const std::string& filename);
+    // The segment-file naming and parsing helpers live in `segment_files.h`
+    // (`Catalog.java:1123-1221`); the repair pass uses them from there.
     [[nodiscard]] static bool fragment_straddles_page_boundary(std::int32_t fragment_offset,
                                                                std::int32_t fragment_length) noexcept;
 

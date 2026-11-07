@@ -1,6 +1,9 @@
 axc_add_library(axc_archive_io
     SOURCES
         module.cpp
+        sync_writer.cpp
+        mmap_reader.cpp
+        pread_reader.cpp
     DEPS
         axc_core)
 
