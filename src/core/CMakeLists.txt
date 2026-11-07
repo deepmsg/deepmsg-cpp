@@ -1,6 +1,8 @@
 axc_add_library(axc_core
     SOURCES
         version.cpp
+        collections/long2long_hash_map.cpp
+        time/clock.cpp
     DEPS
         aeron_static)
 
