@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Java shim for interop tests (self-contained; no cross-repo dependency).
+#
+# Modes (AXC_SHIM_MODE):
+#   transparent (default) -- log the invocation and exec the real java unchanged
+#   mapped                -- if the main class is in the map, exec our binary;
+#                            an unknown main class FAILS LOUDLY (non-zero)
+#
+# Environment:
+#   AXC_REAL_JAVA   real JVM (default /usr/bin/java)
+#   AXC_SHIM_MAP    map file (default <this dir>/main-class-map.tsv)
+#   AXC_BIN_DIR     prefix for relative commands in the map
+#   AXC_SHIM_LOG    optional log file (transparent and mapped both log)
+#
+# Map format (tab separated): <main-class>\t<command> [args...]
+# When mapped, the command receives every -D argument from the original
+# invocation plus every argument after the main class (the Aeron launch style
+# puts -D options before -cp and application arguments after the main class).
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+mode=${AXC_SHIM_MODE:-transparent}
+real_java=${AXC_REAL_JAVA:-/usr/bin/java}
+map_file=${AXC_SHIM_MAP:-"$here/main-class-map.tsv"}
+log_file=${AXC_SHIM_LOG:-}
+
+log_invocation()
+{
+    if [ -z "$log_file" ]; then
+        return
+    fi
+    {
+        printf '%s\tpid=%s\tmode=%s\t' "$(date +%H:%M:%S.%3N)" "$$" "$mode"
+        local arg
+        for arg in "$@"; do
+            printf '[%s]' "$arg"
+        done
+        printf '\n'
+    } >> "$log_file"
+}
+
+# Options that consume the following token as their value.
+takes_value()
+{
+    case "$1" in
+        -cp|-classpath|--class-path|--module-path|-p|--add-opens|--add-exports|--add-reads|--add-modules|--limit-modules|--upgrade-module-path|--patch-module|--enable-native-access|-javaagent|-agentlib)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+log_invocation "$@"
+
+if [ "$mode" = "transparent" ]; then
+    exec "$real_java" "$@"
+fi
+
+if [ "$mode" != "mapped" ]; then
+    echo "shim: AXC_SHIM_MODE='$mode' is not transparent|mapped" >&2
+    exit 64
+fi
+
+main_class=""
+pass_args=()
+jar_mode=0
+args=("$@")
+index=0
+
+while [ "$index" -lt "${#args[@]}" ]; do
+    arg=${args[$index]}
+
+    if [ "$arg" = "-jar" ]; then
+        # The main class lives in the jar manifest: not mappable by class name.
+        jar_mode=1
+        index=$((index + 1))
+        continue
+    fi
+
+    case "$arg" in
+        -D*)
+            pass_args+=("$arg")
+            index=$((index + 1))
+            continue
+            ;;
+        -*)
+            if takes_value "$arg"; then
+                index=$((index + 2))
+            else
+                index=$((index + 1))
+            fi
+            continue
+            ;;
+        *)
+            main_class=$arg
+            index=$((index + 1))
+            break
+            ;;
+    esac
+done
+
+while [ "$index" -lt "${#args[@]}" ]; do
+    pass_args+=("${args[$index]}")
+    index=$((index + 1))
+done
+
+if [ "$jar_mode" -eq 1 ]; then
+    echo "shim: mapped mode cannot resolve a main class for '-jar' (class mapping needs a main class)" >&2
+    exit 65
+fi
+
+if [ -z "$main_class" ]; then
+    echo "shim: no main class found in the java invocation" >&2
+    exit 66
+fi
+
+command_line=""
+while IFS=$'\t' read -r mapped_class mapped_command; do
+    case "$mapped_class" in
+        ''|'#'*) continue ;;
+    esac
+    if [ "$mapped_class" = "$main_class" ]; then
+        command_line=$mapped_command
+        break
+    fi
+done < "$map_file"
+
+if [ -z "$command_line" ]; then
+    echo "shim: unknown main class '$main_class' (mapped mode; no entry in $map_file)" >&2
+    exit 67
+fi
+
+read -r -a command <<< "$command_line"
+if [ -n "${AXC_BIN_DIR:-}" ] && [ "${command[0]:0:1}" != "/" ]; then
+    command[0]="$AXC_BIN_DIR/${command[0]}"
+fi
+
+exec "${command[@]}" "${pass_args[@]}"
