@@ -32,9 +32,10 @@ std::expected<int, Error> open_file(std::string_view path, int flags, bool creat
     return fd;
 }
 
-std::expected<std::uint8_t*, Error> map_fd(int fd, std::size_t length) noexcept
+std::expected<std::uint8_t*, Error> map_fd(int fd, std::size_t length, bool writable) noexcept
 {
-    void* address = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    const int protection = writable ? (PROT_READ | PROT_WRITE) : PROT_READ;
+    void* address = ::mmap(nullptr, length, protection, MAP_SHARED, fd, 0);
     if (MAP_FAILED == address)
     {
         return std::unexpected(make_error(ErrorCode::io_error, "mmap failed", errno));
@@ -99,7 +100,7 @@ std::expected<MappedFile, Error> MappedFile::create(std::string_view path, std::
         return std::unexpected(fd.error());
     }
 
-    auto address = map_fd(*fd, length);
+    auto address = map_fd(*fd, length, true);
     if (!address)
     {
         ::close(*fd);
@@ -115,7 +116,12 @@ std::expected<MappedFile, Error> MappedFile::create(std::string_view path, std::
 
 std::expected<MappedFile, Error> MappedFile::open(std::string_view path) noexcept
 {
-    auto fd = open_file(path, O_RDWR, false, 0);
+    return open(path, true);
+}
+
+std::expected<MappedFile, Error> MappedFile::open(std::string_view path, bool writable) noexcept
+{
+    auto fd = open_file(path, writable ? O_RDWR : O_RDONLY, false, 0);
     if (!fd)
     {
         return std::unexpected(fd.error());
@@ -130,7 +136,7 @@ std::expected<MappedFile, Error> MappedFile::open(std::string_view path) noexcep
     }
 
     const auto length = static_cast<std::size_t>(info.st_size);
-    auto address = map_fd(*fd, length);
+    auto address = map_fd(*fd, length, writable);
     if (!address)
     {
         ::close(*fd);

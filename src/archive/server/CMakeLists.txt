@@ -1,6 +1,8 @@
 axc_add_library(axc_archive_server
     SOURCES
         module.cpp
+        catalog.cpp
+        checksum.cpp
     DEPS
         axc_core
         axc_sbe

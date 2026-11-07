@@ -7,7 +7,7 @@ commit.
 
 | Contract | Follows | Pinned by |
 |---|---|---|
-| `archive.catalog` descriptors | `aeron-archive-codecs.xml` | A1a (`CatalogTest` + golden) |
+| `archive.catalog` descriptors | `aeron-archive-codecs.xml` (schema 101, `CatalogHeader`/`RecordingDescriptorHeader`/`RecordingDescriptor`) | A1a: `test/golden/archive/catalog/` (reference-written file) + `CatalogTest`/`CatalogGoldenTest` + `ArchiveTool describe/count-entries` interop |
 | `archive-mark.dat` | `aeron-archive-mark-codecs.xml` | A1b |
 | segment files `<id>-<base>.rec` | `SegmentFile` naming, `max(segment, term)` | A1b |
 | archive counters 100–117 key layout | `ArchiveCounters` / `RecordingPos` | A2b |
