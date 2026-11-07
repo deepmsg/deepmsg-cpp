@@ -1,9 +1,16 @@
 # Fixture (X0-4)
 
-Filled by the X0-4 card. Non-negotiables from the plan (`analysis/cpp/`):
+- `process.{h,cpp}` — `run_process` (fork/exec, timeout, combined output) and
+  `ChildProcess` (long-running peer, SIGTERM then SIGKILL grace).
+- `java_process.{h,cpp}` — `java` launcher with a timeout; exit code 143
+  (SIGTERM) is normal, not a failure.
+- `c_driver.{h,cpp}` — `aeronmd` on a caller-owned directory. The destructor
+  stops the driver but must never delete the directory.
 
-1. `JavaProcess` always has a timeout; exit code 143 (SIGTERM) is normal.
-2. `CDriver`'s destructor never deletes the shared aeron directory.
+Non-negotiables from the plan:
+
+1. Every Java process has a timeout.
+2. The driver fixture never deletes the shared aeron directory.
 3. The shim fails loudly on an unknown main class.
-4. One process per case.
+4. One process per case (the case table and suite filters land with X0-6/A5b).
 5. `AXC_AERON_TESTS` missing ⇒ SKIP with a printed reason.
