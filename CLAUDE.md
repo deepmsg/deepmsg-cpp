@@ -29,6 +29,13 @@ The plan, per-card plans and delivery records live outside this repo in
    ends the current `doWork` pass must end ours too.
 7. **Every new criterion gets a mutant** that makes it fail, and the reading goes
    into the delivery record.
+8. **Our own names never contain `aeron`.** File and directory names, classes,
+   structs, functions, variables and namespaces are ours: use `deepmsg`
+   (`src/core/deepmsg/`, `DeepmsgClient`, `deepmsg::archive::server`,
+   `deepmsg-archive-server`, …). The only allowed occurrences are references to
+   Aeron's own API, configuration and files: `aeron_t`, `aeron_init`,
+   `aeron_context_*`, `aeron.archive.*` / `aeron.cluster.*`, `third_party/aeron`,
+   the reference Java classes and schema files.
 
 ## Gates
 

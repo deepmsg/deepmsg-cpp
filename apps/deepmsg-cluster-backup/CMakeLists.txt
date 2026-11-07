@@ -1,4 +1,4 @@
-axc_add_executable(aeron-cluster-backup
+axc_add_executable(deepmsg-cluster-backup
     SOURCES
         main.cpp
     DEPS
