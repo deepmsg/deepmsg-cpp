@@ -1,0 +1,42 @@
+# Long2LongHashMap golden operations.
+# put <key> <value> / remove <key> / check (iteration order) / hash <key> (Hashing.hash)
+hash 0
+hash 1
+hash -1
+hash 9223372036854775807
+put 10 100
+put 20 200
+put 30 300
+put 40 400
+put 50 500
+check
+put 60 600
+check
+put 70 700
+put 80 800
+put 90 900
+check
+remove 30
+check
+remove 999
+check
+put 30 301
+check
+put -5 -55
+put 9223372036854775807 7
+check
+remove 10
+remove 20
+check
+put 100 1
+put 101 1
+put 102 1
+check
+remove 100
+remove 90
+remove 80
+check
+put 100 2
+check
+clear
+check

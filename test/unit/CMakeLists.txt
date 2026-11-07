@@ -1,9 +1,14 @@
 axc_add_executable(axc_unit_tests
     SOURCES
         core/version_test.cpp
+        core/fixed_string_test.cpp
+        core/long2long_hash_map_test.cpp
+        core/clock_test.cpp
     DEPS
         axc_core
         GTest::gtest_main)
+
+target_compile_definitions(axc_unit_tests PRIVATE "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
 include(GoogleTest)
 # PRE_TEST: discover at test time, not build time. Sanitizer binaries (TSan in
