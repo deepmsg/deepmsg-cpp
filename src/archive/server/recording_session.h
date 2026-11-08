@@ -165,6 +165,18 @@ public:
     /// counter is closed.
     [[nodiscard]] std::int64_t recorded_position() const noexcept;
 
+    /// The type-100 position counter's id and registration id, as the replay
+    /// limit source reads them (`ReplaySession.java:550-556`).
+    [[nodiscard]] std::int32_t position_counter_id() const noexcept
+    {
+        return position_ ? position_->counter_id() : -1;
+    }
+
+    [[nodiscard]] std::int64_t position_counter_registration_id() const noexcept
+    {
+        return position_ ? position_->registration_id() : -1;
+    }
+
     [[nodiscard]] bool auto_stop() const noexcept
     {
         return config_.auto_stop;

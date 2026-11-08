@@ -26,9 +26,9 @@ namespace deepmsg::archive::server
 ///   re-sends its connect OK forever and the client sees stale responses
 ///   (`memory/deepmsg-archive-session-activation.md`).
 ///
-/// Not in this card: the async response queue and the recording/replay handlers
-/// (A2b+); `send_descriptor`/`send_subscription_descriptor` land with the list
-/// and replay sessions.
+/// The async response queue (A3b) is drained after the sync queue in
+/// `sendResponses` (`ControlSession.java:1001-1039`); the replay session's OK
+/// goes through it because it is produced by another session.
 class ControlSession final : public SessionAbort, public SessionProxy
 {
 public:
@@ -129,6 +129,10 @@ public:
     // Responses (`ControlSession.java:683-731`). A send that cannot happen now
     // is queued and replayed on a later pass (`铁律 1`).
     void send_ok_response(std::int64_t correlation_id, std::int64_t relevant_id);
+
+    /// `ControlSession.asyncSendOkResponse` (`:733-745`): the replay session's
+    /// OK, queued and sent by `sendResponses` on a later pass.
+    void async_send_ok_response(std::int64_t correlation_id, std::int64_t replay_session_id);
     void send_error_response(std::int64_t correlation_id, std::string_view message);
     void send_error_response(std::int64_t correlation_id, std::int64_t relevant_id, std::string_view message);
 
@@ -158,6 +162,11 @@ public:
     [[nodiscard]] std::size_t pending_responses() const noexcept
     {
         return sync_response_queue_.size();
+    }
+
+    [[nodiscard]] std::size_t pending_async_responses() const noexcept
+    {
+        return async_response_queue_.size();
     }
 
     [[nodiscard]] std::span<const std::uint8_t> encoded_principal() const noexcept
@@ -195,6 +204,7 @@ private:
     [[nodiscard]] int wait_for_request(std::int64_t now_ms);
     [[nodiscard]] int perform_liveness_check(std::int64_t now_ms);
     [[nodiscard]] int send_responses(std::int64_t now_ms);
+    [[nodiscard]] bool send_pending(const PendingResponse& response);
     [[nodiscard]] int send_reject(std::int64_t now_ms);
 
     [[nodiscard]] bool has_no_activity(std::int64_t now_ms) const noexcept;
@@ -219,6 +229,7 @@ private:
     std::string abort_reason_;
     std::span<const std::uint8_t> encoded_principal_{};
     std::deque<PendingResponse> sync_response_queue_;
+    std::deque<PendingResponse> async_response_queue_;
 };
 
 }  // namespace deepmsg::archive::server

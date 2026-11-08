@@ -42,15 +42,15 @@ std::int64_t SystemReplayClock::nano_time() const noexcept
 
 ReplaySession::ReplaySession(Config config, std::unique_ptr<ReplayPublication> publication,
                              ReplayControlResponses& control, ReplayMetrics& metrics, ReplayClock& clock,
-                             const Checksum* checksum, ReplayLimitSource* limit, std::span<std::uint8_t> buffer,
-                             ReplayWarningSink* warnings) noexcept
+                             const Checksum* checksum, std::unique_ptr<ReplayLimitSource> limit,
+                             std::span<std::uint8_t> buffer, ReplayWarningSink* warnings) noexcept
     : config_(std::move(config)),
       publication_(std::move(publication)),
       control_(control),
       metrics_(metrics),
       clock_(clock),
       checksum_(checksum),
-      limit_(limit),
+      limit_(std::move(limit)),
       warnings_(warnings),
       buffer_(buffer)
 {
@@ -146,7 +146,7 @@ void ReplaySession::send_pending_error()
     // `ReplaySession.sendPendingError` (`:288-295`).
     if (!error_message_.empty())
     {
-        control_.send_error(config_.correlation_id, error_code_, error_message_);
+        control_.send_error(config_.control_session_id, config_.correlation_id, error_code_, error_message_);
     }
 }
 
@@ -198,7 +198,7 @@ int ReplaySession::init()
         // ★ The OK goes out **before** waiting for the connection
         // (`ReplaySession.java:338`; the class comment at `:68` disagrees and the
         // code wins).
-        control_.async_send_ok(config_.correlation_id, config_.replay_session_id);
+        control_.async_send_ok(config_.control_session_id, config_.correlation_id, config_.replay_session_id);
     }
 
     if (!publication_->is_connected())

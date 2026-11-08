@@ -58,6 +58,12 @@ struct ReplayChannelOptions
     std::int64_t response_correlation_id{0};
 };
 
+/// The adapter's `channelUri.put(RESPONSE_CORRELATION_ID_PARAM_NAME, ...)`
+/// (`ControlSessionAdapter.java:1183`): the channel with the response
+/// correlation id replaced (or added), everything else preserved.
+[[nodiscard]] std::expected<std::string, axc::core::Error> with_response_correlation_id(std::string_view channel,
+                                                                                        std::int64_t correlation_id);
+
 /// `strippedChannelBuilder(uri).initialPosition(...).eos(uri).sparse(uri).mtu(...).linger(...)`
 /// (`ArchiveConductor.java:893-901`): the stripped channel plus the four
 /// initial-position parameters, `eos`/`sparse` copied from the channel,

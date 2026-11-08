@@ -174,8 +174,10 @@ struct BuildOptions
 {
     bool force_mtu{false};
     std::int32_t mtu{0};
+    bool copy_mtu{false};
     bool force_term_length{false};
     std::int32_t term_length{0};
+    bool copy_term_length{false};
     bool has_initial_position{false};
     std::int32_t initial_term_id{0};
     std::int32_t term_id{0};
@@ -189,6 +191,8 @@ struct BuildOptions
     bool copy_eos{false};
     bool has_linger{false};
     std::int64_t linger_ns{0};
+    /// The adapter rewrite keeps the channel's own `linger` (a string).
+    bool copy_linger{false};
     bool has_response_correlation_id{false};
     std::int64_t response_correlation_id{0};
 };
@@ -213,9 +217,17 @@ struct BuildOptions
     {
         append_int(out, "mtu", options.mtu);
     }
+    else if (options.copy_mtu)
+    {
+        append_param(out, "mtu", param(uri, "mtu"));
+    }
     if (options.force_term_length)
     {
         append_int(out, "term-length", options.term_length);
+    }
+    else if (options.copy_term_length)
+    {
+        append_param(out, "term-length", param(uri, "term-length"));
     }
     if (options.has_initial_position)
     {
@@ -228,6 +240,10 @@ struct BuildOptions
     if (options.has_linger)
     {
         append_param(out, "linger", format_duration_ns(options.linger_ns));
+    }
+    else if (options.copy_linger)
+    {
+        append_param(out, "linger", param(uri, "linger"));
     }
     append_param(out, "alias", param(uri, "alias"));
     append_param(out, "cc", param(uri, "cc"));
@@ -313,6 +329,26 @@ std::expected<std::string, axc::core::Error> control_response_channel(std::strin
     build.sparse = uri_bool(*uri, "sparse", options.sparse);
     build.has_response_correlation_id = options.has_response_correlation_id;
     build.response_correlation_id = options.response_correlation_id;
+    return build_channel(*uri, build);
+}
+
+std::expected<std::string, axc::core::Error> with_response_correlation_id(std::string_view channel,
+                                                                          std::int64_t correlation_id)
+{
+    auto uri = parse_channel(channel);
+    if (!uri)
+    {
+        return std::unexpected(uri.error());
+    }
+
+    BuildOptions build;
+    build.copy_mtu = true;
+    build.copy_term_length = true;
+    build.copy_sparse = true;
+    build.copy_eos = true;
+    build.copy_linger = true;
+    build.has_response_correlation_id = true;
+    build.response_correlation_id = correlation_id;
     return build_channel(*uri, build);
 }
 

@@ -382,6 +382,17 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     conductor_context.control_term_buffer_sparse = config_.control_term_buffer_sparse;
     conductor_context.recording = config_.recording;
     conductor_context.replay = config_.replay;
+
+    if (!config_.replay.replay_checksum_name.empty())
+    {
+        auto checksum = checksum_by_name(config_.replay.replay_checksum_name);
+        if (!checksum)
+        {
+            close();
+            return std::unexpected(checksum.error());
+        }
+        conductor_context.replay_checksum = *checksum;
+    }
     conductor_context.catalog_capacity = config_.catalog_capacity;
     conductor_context.catalog_file_sync_level = config_.catalog_file_sync_level;
     conductor_context.authenticator = config_.authenticator_supplier.empty() ? nullptr : &sample_authenticator_;

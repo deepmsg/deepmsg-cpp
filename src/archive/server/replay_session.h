@@ -31,9 +31,11 @@ public:
     ReplayControlResponses& operator=(const ReplayControlResponses&) = delete;
 
     /// `ControlSession.asyncSendOkResponse` (`ControlSession.java:733-745`).
-    virtual void async_send_ok(std::int64_t correlation_id, std::int64_t replay_session_id) = 0;
+    virtual void async_send_ok(std::int64_t control_session_id, std::int64_t correlation_id,
+                               std::int64_t replay_session_id) = 0;
     /// `ControlSession.sendErrorResponse(correlationId, errorCode, message)`.
-    virtual void send_error(std::int64_t correlation_id, std::int64_t relevant_id, std::string_view message) = 0;
+    virtual void send_error(std::int64_t control_session_id, std::int64_t correlation_id, std::int64_t relevant_id,
+                            std::string_view message) = 0;
 };
 
 /// `ReplaySession`'s view of its limit position counter
@@ -143,13 +145,15 @@ public:
         std::int32_t term_buffer_length{0};
         std::int32_t stream_id{0};
         std::int64_t replay_session_id{0};
+        std::int64_t control_session_id{0};
         std::int64_t connect_timeout_ms{0};
         std::string archive_dir;
     };
 
     ReplaySession(Config config, std::unique_ptr<ReplayPublication> publication, ReplayControlResponses& control,
-                  ReplayMetrics& metrics, ReplayClock& clock, const Checksum* checksum, ReplayLimitSource* limit,
-                  std::span<std::uint8_t> buffer, ReplayWarningSink* warnings = nullptr) noexcept;
+                  ReplayMetrics& metrics, ReplayClock& clock, const Checksum* checksum,
+                  std::unique_ptr<ReplayLimitSource> limit, std::span<std::uint8_t> buffer,
+                  ReplayWarningSink* warnings = nullptr) noexcept;
 
     ~ReplaySession();
 
@@ -237,7 +241,7 @@ private:
     ReplayMetrics& metrics_;
     ReplayClock& clock_;
     const Checksum* checksum_{nullptr};
-    ReplayLimitSource* limit_{nullptr};
+    std::unique_ptr<ReplayLimitSource> limit_{};
     ReplayWarningSink* warnings_{nullptr};
     std::span<std::uint8_t> buffer_{};
 

@@ -335,25 +335,29 @@ class FakeControl final : public ReplayControlResponses
 public:
     struct Ok
     {
+        std::int64_t control_session_id;
         std::int64_t correlation_id;
         std::int64_t replay_session_id;
     };
 
     struct Error
     {
+        std::int64_t control_session_id;
         std::int64_t correlation_id;
         std::int64_t relevant_id;
         std::string message;
     };
 
-    void async_send_ok(std::int64_t correlation_id, std::int64_t replay_session_id) override
+    void async_send_ok(std::int64_t control_session_id, std::int64_t correlation_id,
+                       std::int64_t replay_session_id) override
     {
-        oks.push_back({correlation_id, replay_session_id});
+        oks.push_back({control_session_id, correlation_id, replay_session_id});
     }
 
-    void send_error(std::int64_t correlation_id, std::int64_t relevant_id, std::string_view message) override
+    void send_error(std::int64_t control_session_id, std::int64_t correlation_id, std::int64_t relevant_id,
+                    std::string_view message) override
     {
-        errors.push_back({correlation_id, relevant_id, std::string{message}});
+        errors.push_back({control_session_id, correlation_id, relevant_id, std::string{message}});
     }
 
     std::vector<Ok> oks;
@@ -470,6 +474,7 @@ struct Fixture
         config.term_buffer_length = TERM_LENGTH;
         config.stream_id = RECORDING_STREAM_ID;
         config.replay_session_id = (3LL << 32) | REPLAY_SESSION_ID_SESSION;
+        config.control_session_id = 11;
         config.connect_timeout_ms = 5000;
         config.archive_dir = dir.path();
 
@@ -478,12 +483,13 @@ struct Fixture
         buffer.assign(1024 * 1024, 0);
     }
 
-    [[nodiscard]] std::unique_ptr<ReplaySession> make(ReplayLimitSource* limit = nullptr,
+    [[nodiscard]] std::unique_ptr<ReplaySession> make(std::unique_ptr<ReplayLimitSource> limit = nullptr,
                                                       const Checksum* checksum = nullptr,
                                                       ReplayWarningSink* warnings = nullptr)
     {
-        return std::make_unique<ReplaySession>(config, std::move(publication), control, metrics, clock, checksum, limit,
-                                               std::span<std::uint8_t>{buffer.data(), buffer.size()}, warnings);
+        return std::make_unique<ReplaySession>(config, std::move(publication), control, metrics, clock, checksum,
+                                               std::move(limit), std::span<std::uint8_t>{buffer.data(), buffer.size()},
+                                               warnings);
     }
 
     TempArchiveDir dir;
@@ -519,6 +525,7 @@ TEST(ReplaySessionTest, replaysEveryTermAcrossSegmentsWithThePublicationIds)
 
     // ★ One OK, carrying the replay session id, sent from init.
     ASSERT_EQ(1U, fixture.control.oks.size());
+    EXPECT_EQ(11, fixture.control.oks[0].control_session_id);
     EXPECT_EQ(9, fixture.control.oks[0].correlation_id);
     EXPECT_EQ((3LL << 32) | REPLAY_SESSION_ID_SESSION, fixture.control.oks[0].replay_session_id);
     EXPECT_TRUE(fixture.control.errors.empty());
@@ -660,25 +667,26 @@ TEST(ReplaySessionTest, followsALiveRecordingLimitAndFreezesWhenTheCounterIsClos
     const Recording recording = build_recording(3);
     Fixture fixture(recording, 0, std::numeric_limits<std::int64_t>::max(), 0, TERM_LENGTH);
 
-    FakeLimit limit;
-    limit.current = TERM_LENGTH;
+    auto limit = std::make_unique<FakeLimit>();
+    auto* limit_raw = limit.get();
+    limit->current = TERM_LENGTH;
 
-    auto session = fixture.make(&limit);
+    auto session = fixture.make(std::move(limit));
     session->do_work();
     session->do_work();
     EXPECT_EQ(ReplaySession::State::replay, session->state());
     EXPECT_EQ(static_cast<std::size_t>(63 * FRAME_LENGTH), fixture.publication_raw->offered.size());
 
     // The recording extends: the limit counter moves and the replay follows.
-    limit.current = 2 * TERM_LENGTH;
+    limit_raw->current = 2 * TERM_LENGTH;
     session->do_work();
     EXPECT_GT(fixture.publication_raw->offered.size(), static_cast<std::size_t>(TERM_LENGTH));
 
     // The recorder closes the counter at its final position: the replay ends at
     // that position (same registration ⇒ the last value is the limit).
-    limit.closed = true;
-    limit.matches = true;
-    limit.current = 2 * TERM_LENGTH;
+    limit_raw->closed = true;
+    limit_raw->matches = true;
+    limit_raw->current = 2 * TERM_LENGTH;
     session->do_work();
     EXPECT_TRUE(session->is_done());
     session->close();
@@ -691,18 +699,19 @@ TEST(ReplaySessionTest, freezesAtTheStopPositionWhenTheLimitSlotWasReused)
     const Recording recording = build_recording(2);
     Fixture fixture(recording, 0, std::numeric_limits<std::int64_t>::max(), 0, TERM_LENGTH);
 
-    FakeLimit limit;
-    limit.current = TERM_LENGTH;
+    auto limit = std::make_unique<FakeLimit>();
+    auto* limit_raw = limit.get();
+    limit->current = TERM_LENGTH;
 
-    auto session = fixture.make(&limit);
+    auto session = fixture.make(std::move(limit));
     session->do_work();
     session->do_work();
     EXPECT_EQ(ReplaySession::State::replay, session->state());
 
     // Closed and the slot no longer belongs to us: freeze at the old stop.
-    limit.closed = true;
-    limit.matches = false;
-    limit.current = 9999999;
+    limit_raw->closed = true;
+    limit_raw->matches = false;
+    limit_raw->current = 9999999;
 
     session->do_work();
     EXPECT_TRUE(session->is_done());
@@ -714,16 +723,17 @@ TEST(ReplaySessionTest, aBoundedClientCounterFollowsItsValueWithoutClosing)
     const Recording recording = build_recording(2);
     Fixture fixture(recording, 0, std::numeric_limits<std::int64_t>::max(), 0, TERM_LENGTH);
 
-    FakeLimit limit;
-    limit.current = TERM_LENGTH;
-    limit.closed = false;
+    auto limit = std::make_unique<FakeLimit>();
+    auto* limit_raw = limit.get();
+    limit->current = TERM_LENGTH;
+    limit->closed = false;
 
-    auto session = fixture.make(&limit);
+    auto session = fixture.make(std::move(limit));
     session->do_work();
     session->do_work();
     EXPECT_EQ(ReplaySession::State::replay, session->state());
 
-    limit.current = 2 * TERM_LENGTH;
+    limit_raw->current = 2 * TERM_LENGTH;
     session->do_work();
     EXPECT_GT(fixture.publication_raw->offered.size(), static_cast<std::size_t>(TERM_LENGTH));
 }
