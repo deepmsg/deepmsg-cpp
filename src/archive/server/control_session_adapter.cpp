@@ -9,9 +9,13 @@
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
+#include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MessageHeader.h"
+#include "io_aeron_archive_codecs/RecordingPositionRequest.h"
+#include "io_aeron_archive_codecs/StartPositionRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
+#include "io_aeron_archive_codecs/StopPositionRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingByIdentityRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
@@ -322,6 +326,106 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (ControlSession::State::active == request.session->state())
             {
                 handler_.on_stop_recording_by_identity(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_RECORDING_POSITION:
+        {
+            // `ControlSessionAdapter.java:374-393`.
+            archive_codecs::RecordingPositionRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_get_recording_position(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_POSITION:
+        {
+            // `ControlSessionAdapter.java:437-456`.
+            archive_codecs::StopPositionRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_get_stop_position(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_START_POSITION:
+        {
+            // `ControlSessionAdapter.java:640-659`.
+            archive_codecs::StartPositionRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_get_start_position(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_MAX_RECORDED_POSITION:
+        {
+            // `ControlSessionAdapter.java:1042-1061`.
+            archive_codecs::MaxRecordedPositionRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_get_max_recorded_position(request);
             }
             return 1;
         }

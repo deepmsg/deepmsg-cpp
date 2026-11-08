@@ -859,6 +859,75 @@ void ArchiveConductor::on_stop_recording_subscription(const StopRecordingSubscri
     session->send_ok_response(request.correlation_id, 0);
 }
 
+namespace
+{
+/// `ArchiveConductor.hasRecording` (`ArchiveConductor.java:1950-1960`): a live
+/// recording or a catalog entry; an unknown id answers with
+/// `UNKNOWN_RECORDING` and `buildUnknownRecordingErrorMsg`.
+bool require_recording(const Catalog& catalog, std::int64_t recording_id, std::int64_t correlation_id,
+                       ControlSession& session)
+{
+    if (catalog.has_recording(recording_id))
+    {
+        return true;
+    }
+    session.send_error_response(correlation_id, UNKNOWN_RECORDING,
+                                "unknown recording id: " + std::to_string(recording_id));
+    return false;
+}
+}  // namespace
+
+void ArchiveConductor::on_get_recording_position(const RecordingIdRequest& request)
+{
+    // `ArchiveConductor.getRecordingPosition` (`ArchiveConductor.java:1167-1176`).
+    if (nullptr == request.session ||
+        !require_recording(catalog_, request.recording_id, request.correlation_id, *request.session))
+    {
+        return;
+    }
+    const auto active = sessions_by_recording_id_.find(request.recording_id);
+    const std::int64_t position =
+        active == sessions_by_recording_id_.end() ? Catalog::NULL_POSITION : active->second->recorded_position();
+    request.session->send_ok_response(request.correlation_id, position);
+}
+
+void ArchiveConductor::on_get_stop_position(const RecordingIdRequest& request)
+{
+    // `ArchiveConductor.getStopPosition` (`ArchiveConductor.java:1178-1184`).
+    if (nullptr == request.session ||
+        !require_recording(catalog_, request.recording_id, request.correlation_id, *request.session))
+    {
+        return;
+    }
+    request.session->send_ok_response(request.correlation_id, catalog_.stop_position(request.recording_id));
+}
+
+void ArchiveConductor::on_get_start_position(const RecordingIdRequest& request)
+{
+    // `ArchiveConductor.getStartPosition` (`ArchiveConductor.java:1159-1165`).
+    if (nullptr == request.session ||
+        !require_recording(catalog_, request.recording_id, request.correlation_id, *request.session))
+    {
+        return;
+    }
+    request.session->send_ok_response(request.correlation_id, catalog_.start_position(request.recording_id));
+}
+
+void ArchiveConductor::on_get_max_recorded_position(const RecordingIdRequest& request)
+{
+    // `ArchiveConductor.getMaxRecordedPosition` (`ArchiveConductor.java:1186-1195`).
+    if (nullptr == request.session ||
+        !require_recording(catalog_, request.recording_id, request.correlation_id, *request.session))
+    {
+        return;
+    }
+    const auto active = sessions_by_recording_id_.find(request.recording_id);
+    const std::int64_t position = active != sessions_by_recording_id_.end()
+                                      ? active->second->recorded_position()
+                                      : catalog_.stop_position(request.recording_id);
+    request.session->send_ok_response(request.correlation_id, position);
+}
+
 void ArchiveConductor::on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request)
 {
     // `ArchiveConductor.stopRecordingByIdentity` (`ArchiveConductor.java:1301-1327`).

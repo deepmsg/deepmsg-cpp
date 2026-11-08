@@ -322,12 +322,43 @@ TEST_F(RecordingInteropTest, stopBySubscriptionEndsTheRecordingAndWritesTheStopP
     ASSERT_GE(recording_id, 0);
     EXPECT_EQ(published.position, wait_for_position(static_cast<std::int32_t>(counter_id), published.position));
 
+    // The four position queries while the recording is live.
+    std::int64_t start_position = -1;
+    ASSERT_EQ(0, aeron_archive_get_start_position(&start_position, client_archive_, recording_id));
+    EXPECT_EQ(0, start_position);
+
+    std::int64_t recording_position = -1;
+    ASSERT_EQ(0, aeron_archive_get_recording_position(&recording_position, client_archive_, recording_id));
+    EXPECT_EQ(published.position, recording_position);
+
+    std::int64_t stop_position = 0;
+    ASSERT_EQ(0, aeron_archive_get_stop_position(&stop_position, client_archive_, recording_id));
+    EXPECT_EQ(AERON_NULL_VALUE, stop_position);
+
+    std::int64_t max_recorded_position = -1;
+    ASSERT_EQ(0, aeron_archive_get_max_recorded_position(&max_recorded_position, client_archive_, recording_id));
+    EXPECT_EQ(published.position, max_recorded_position);
+
     ASSERT_EQ(0, aeron_archive_stop_recording_subscription(client_archive_, subscription_id));
     for (int iteration = 0; iteration < 20'000 && conductor_->recording_session_count() > 0; iteration++)
     {
         ::usleep(200);
     }
     EXPECT_EQ(0u, conductor_->recording_session_count());
+
+    // After the stop: the counter is gone, the catalog carries the stop
+    // position, and the max recorded position falls back to it.
+    std::int64_t recording_position_after = 0;
+    ASSERT_EQ(0, aeron_archive_get_recording_position(&recording_position_after, client_archive_, recording_id));
+    EXPECT_EQ(AERON_NULL_VALUE, recording_position_after);
+
+    std::int64_t stop_position_after = 0;
+    ASSERT_EQ(0, aeron_archive_get_stop_position(&stop_position_after, client_archive_, recording_id));
+    EXPECT_EQ(published.position, stop_position_after);
+
+    std::int64_t max_recorded_after = 0;
+    ASSERT_EQ(0, aeron_archive_get_max_recorded_position(&max_recorded_after, client_archive_, recording_id));
+    EXPECT_EQ(published.position, max_recorded_after);
 
     stop_conductor();
     EXPECT_EQ(published.position, catalog_stop_position(recording_id));

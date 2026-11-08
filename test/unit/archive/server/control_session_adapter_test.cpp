@@ -19,8 +19,12 @@
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
+#include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
+#include "io_aeron_archive_codecs/RecordingPositionRequest.h"
 #include "io_aeron_archive_codecs/SourceLocation.h"
+#include "io_aeron_archive_codecs/StartPositionRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
+#include "io_aeron_archive_codecs/StopPositionRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingByIdentityRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
@@ -35,6 +39,7 @@ using deepmsg::archive::server::ControlSession;
 using deepmsg::archive::server::ControlSessionAdapter;
 using deepmsg::archive::server::ControlSessionHandler;
 using deepmsg::archive::server::DefaultAuthenticator;
+using deepmsg::archive::server::RecordingIdRequest;
 using deepmsg::archive::server::ResponsePublication;
 using deepmsg::archive::server::StartRecordingRequest;
 using deepmsg::archive::server::StopRecordingByIdentityRequest;
@@ -47,6 +52,10 @@ using deepmsg::archive::server::archive_codecs::CloseSessionRequest;
 using deepmsg::archive::server::archive_codecs::KeepAliveRequest;
 using deepmsg::archive::server::archive_codecs::SourceLocation;
 using deepmsg::archive::server::archive_codecs::StartRecordingRequest2;
+using RecordingPositionRequest = deepmsg::archive::server::archive_codecs::RecordingPositionRequest;
+using StartPositionRequest = deepmsg::archive::server::archive_codecs::StartPositionRequest;
+using StopPositionRequest = deepmsg::archive::server::archive_codecs::StopPositionRequest;
+using MaxRecordedPositionRequest = deepmsg::archive::server::archive_codecs::MaxRecordedPositionRequest;
 using StopRecordingByIdentityEncoder = deepmsg::archive::server::archive_codecs::StopRecordingByIdentityRequest;
 using StopRecordingEncoder = deepmsg::archive::server::archive_codecs::StopRecordingRequest;
 using StopRecordingSubscriptionEncoder = deepmsg::archive::server::archive_codecs::StopRecordingSubscriptionRequest;
@@ -116,6 +125,26 @@ public:
         stop_recording_by_identity_requests.push_back(request);
     }
 
+    void on_get_recording_position(const RecordingIdRequest& request) override
+    {
+        recording_position_requests.push_back(request);
+    }
+
+    void on_get_stop_position(const RecordingIdRequest& request) override
+    {
+        stop_position_requests.push_back(request);
+    }
+
+    void on_get_start_position(const RecordingIdRequest& request) override
+    {
+        start_position_requests.push_back(request);
+    }
+
+    void on_get_max_recorded_position(const RecordingIdRequest& request) override
+    {
+        max_recorded_position_requests.push_back(request);
+    }
+
     void log_warning(std::string_view message) override
     {
         warnings.emplace_back(message);
@@ -133,6 +162,10 @@ public:
     std::vector<StopRecordingRequest> stop_recording_requests;
     std::vector<StopRecordingSubscriptionRequest> stop_recording_subscription_requests;
     std::vector<StopRecordingByIdentityRequest> stop_recording_by_identity_requests;
+    std::vector<RecordingIdRequest> recording_position_requests;
+    std::vector<RecordingIdRequest> stop_position_requests;
+    std::vector<RecordingIdRequest> start_position_requests;
+    std::vector<RecordingIdRequest> max_recorded_position_requests;
     std::vector<std::string> warnings;
     CachedEpochClock clock{10};
     ControlResponseProxy proxy;
@@ -218,6 +251,19 @@ public:
 {
     std::vector<std::uint8_t> buffer(64, 0);
     StopRecordingByIdentityEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+template <class Encoder>
+[[nodiscard]] std::vector<std::uint8_t> encode_recording_id_request(std::int64_t control_session_id,
+                                                                    std::int64_t correlation_id,
+                                                                    std::int64_t recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    Encoder encoder;
     encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
     encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
     buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
@@ -394,20 +440,52 @@ TEST_F(ControlSessionAdapterTest, aStopRecordingByIdentityRequestReachesTheHandl
     EXPECT_EQ(handler_.session.get(), decoded.session);
 }
 
+TEST_F(ControlSessionAdapterTest, theFourRecordingIdQueriesReachTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto recording_position = encode_recording_id_request<RecordingPositionRequest>(7, 46, 7);
+    const auto stop_position = encode_recording_id_request<StopPositionRequest>(7, 47, 7);
+    const auto start_position = encode_recording_id_request<StartPositionRequest>(7, 48, 7);
+    const auto max_recorded = encode_recording_id_request<MaxRecordedPositionRequest>(7, 49, 7);
+
+    EXPECT_EQ(1, adapter_->on_fragment(recording_position.data(), static_cast<std::int32_t>(recording_position.size()),
+                                       &image_));
+    EXPECT_EQ(1, adapter_->on_fragment(stop_position.data(), static_cast<std::int32_t>(stop_position.size()), &image_));
+    EXPECT_EQ(1,
+              adapter_->on_fragment(start_position.data(), static_cast<std::int32_t>(start_position.size()), &image_));
+    EXPECT_EQ(1, adapter_->on_fragment(max_recorded.data(), static_cast<std::int32_t>(max_recorded.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.recording_position_requests.size());
+    ASSERT_EQ(1u, handler_.stop_position_requests.size());
+    ASSERT_EQ(1u, handler_.start_position_requests.size());
+    ASSERT_EQ(1u, handler_.max_recorded_position_requests.size());
+
+    EXPECT_EQ(46, handler_.recording_position_requests[0].correlation_id);
+    EXPECT_EQ(47, handler_.stop_position_requests[0].correlation_id);
+    EXPECT_EQ(48, handler_.start_position_requests[0].correlation_id);
+    EXPECT_EQ(49, handler_.max_recorded_position_requests[0].correlation_id);
+    EXPECT_EQ(7, handler_.recording_position_requests[0].recording_id);
+    EXPECT_EQ(handler_.session.get(), handler_.start_position_requests[0].session);
+}
+
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)
 {
     const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
     ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
 
     // Re-use a valid frame but claim a template id the adapter does not serve
-    // yet (`RecordingPositionRequest` = 12).
+    // yet (`ExtendRecordingRequest2` = 64).
     std::vector<std::uint8_t> frame = encode_keep_alive(7, 1);
-    frame[2] = 12;  // message header template id (offset 2), little endian
+    frame[2] = 64;  // message header template id (offset 2), little endian
     frame[3] = 0;
 
     EXPECT_EQ(0, adapter_->on_fragment(frame.data(), static_cast<std::int32_t>(frame.size()), &image_));
     ASSERT_FALSE(handler_.warnings.empty());
-    EXPECT_EQ("unsupported control request templateId=12", handler_.warnings.back());
+    EXPECT_EQ("unsupported control request templateId=64", handler_.warnings.back());
 }
 
 TEST_F(ControlSessionAdapterTest, aShortOrMalformedFrameIsRejectedBeforeDecode)

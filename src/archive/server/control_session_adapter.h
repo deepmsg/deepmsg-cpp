@@ -68,6 +68,17 @@ struct StopRecordingByIdentityRequest
     ControlSession* session{nullptr};
 };
 
+/// `RecordingPositionRequest` (12), `StopPositionRequest` (15),
+/// `StartPositionRequest` (52) and `MaxRecordedPositionRequest` (67) all carry a
+/// `recordingId` (`ControlSessionAdapter.java:374-393`, `:437-456`, `:640-659`,
+/// `:1042-1061`).
+struct RecordingIdRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    ControlSession* session{nullptr};
+};
+
 /// What the adapter asks the conductor for.
 class ControlSessionHandler
 {
@@ -93,6 +104,12 @@ public:
 
     /// `ControlSession.onStopRecordingByIdentity` (`ControlSession.java:570-578`).
     virtual void on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request) = 0;
+
+    /// The four position queries (`ControlSession.java:436-484`, `:520-568`).
+    virtual void on_get_recording_position(const RecordingIdRequest& request) = 0;
+    virtual void on_get_stop_position(const RecordingIdRequest& request) = 0;
+    virtual void on_get_start_position(const RecordingIdRequest& request) = 0;
+    virtual void on_get_max_recorded_position(const RecordingIdRequest& request) = 0;
 
     /// `ArchiveConductor.logWarning` (`ArchiveConductor.java:442`).
     virtual void log_warning(std::string_view message) = 0;
@@ -126,6 +143,10 @@ public:
     static constexpr std::int32_t TEMPLATE_STOP_RECORDING = 5;
     static constexpr std::int32_t TEMPLATE_STOP_RECORDING_SUBSCRIPTION = 14;
     static constexpr std::int32_t TEMPLATE_STOP_RECORDING_BY_IDENTITY = 65;
+    static constexpr std::int32_t TEMPLATE_RECORDING_POSITION = 12;
+    static constexpr std::int32_t TEMPLATE_STOP_POSITION = 15;
+    static constexpr std::int32_t TEMPLATE_START_POSITION = 52;
+    static constexpr std::int32_t TEMPLATE_MAX_RECORDED_POSITION = 67;
     static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;

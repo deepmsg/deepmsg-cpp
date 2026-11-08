@@ -94,6 +94,10 @@ public:
     void on_stop_recording(const StopRecordingRequest& request) override;
     void on_stop_recording_subscription(const StopRecordingSubscriptionRequest& request) override;
     void on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request) override;
+    void on_get_recording_position(const RecordingIdRequest& request) override;
+    void on_get_stop_position(const RecordingIdRequest& request) override;
+    void on_get_start_position(const RecordingIdRequest& request) override;
+    void on_get_max_recorded_position(const RecordingIdRequest& request) override;
     void log_warning(std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
