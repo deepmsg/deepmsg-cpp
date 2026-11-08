@@ -361,20 +361,7 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     }
     mark_file_ = std::move(*mark_file);
 
-    CatalogOptions catalog_options;
-    catalog_options.archive_dir = config_.archive_dir;
-    catalog_options.file_sync_level = config_.catalog_file_sync_level;
-    catalog_options.catalog_capacity = config_.catalog_capacity;
-    catalog_options.clock = &epoch_clock_;
-
-    auto catalog = Catalog::create(catalog_options);
-    if (!catalog)
-    {
-        close();
-        return std::unexpected(catalog.error());
-    }
-    catalog_ = std::move(*catalog);
-
+    // The catalog is created by the conductor (`Archive.Context.catalog`).
     ArchiveConductorContext conductor_context;
     conductor_context.archive_dir = config_.archive_dir;
     conductor_context.control_channel = config_.control_channel;
@@ -386,6 +373,9 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     conductor_context.control_term_buffer_length = config_.control_term_buffer_length;
     conductor_context.control_mtu_length = config_.control_mtu_length;
     conductor_context.control_term_buffer_sparse = config_.control_term_buffer_sparse;
+    conductor_context.recording = config_.recording;
+    conductor_context.catalog_capacity = config_.catalog_capacity;
+    conductor_context.catalog_file_sync_level = config_.catalog_file_sync_level;
     conductor_context.authenticator = config_.authenticator_supplier.empty() ? nullptr : &sample_authenticator_;
 
     auto conductor = ArchiveConductor::create(conductor_context);
@@ -414,10 +404,6 @@ void ArchiveServer::close()
     if (conductor_)
     {
         conductor_.reset();
-    }
-    if (!catalog_.is_closed())
-    {
-        (void)catalog_.close();
     }
     if (started_)
     {

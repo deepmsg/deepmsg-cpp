@@ -28,6 +28,20 @@ struct ConnectRequest
     const void* image{nullptr};
 };
 
+/// `StartRecordingRequest` / `StartRecordingRequest2`
+/// (`ControlSessionAdapter.java:880-915`).
+struct StartRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int32_t stream_id{0};
+    /// `SourceLocation.LOCAL` (0) / `REMOTE` (1).
+    std::int32_t source_location{0};
+    /// `StartRecordingRequest2.autoStop`; always false for the v1 request.
+    bool auto_stop{false};
+    std::string channel;
+    ControlSession* session{nullptr};
+};
+
 /// What the adapter asks the conductor for.
 class ControlSessionHandler
 {
@@ -41,6 +55,9 @@ public:
     /// Create (or refuse) a session for a connect request. Returns nullptr when
     /// the request cannot be served; the adapter then drops it.
     virtual ControlSession* on_connect_request(const ConnectRequest& request) = 0;
+
+    /// `ControlSession.onStartRecording` (`ControlSession.java:340-348`).
+    virtual void on_start_recording(const StartRecordingRequest& request) = 0;
 
     /// `ArchiveConductor.logWarning` (`ArchiveConductor.java:442`).
     virtual void log_warning(std::string_view message) = 0;
@@ -68,6 +85,9 @@ public:
 
     // Template ids from `aeron-archive-codecs.xml`.
     static constexpr std::int32_t TEMPLATE_CLOSE_SESSION = 3;
+    /// `StartRecordingRequest` (v1, no `autoStop`) and `StartRecordingRequest2`.
+    static constexpr std::int32_t TEMPLATE_START_RECORDING = 4;
+    static constexpr std::int32_t TEMPLATE_START_RECORDING_2 = 63;
     static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;

@@ -81,6 +81,8 @@ public:
 
     RecordingWriter(const RecordingWriter&) = delete;
     RecordingWriter& operator=(const RecordingWriter&) = delete;
+    RecordingWriter(RecordingWriter&&) noexcept = default;
+    RecordingWriter& operator=(RecordingWriter&&) noexcept = default;
 
     /// `RecordingWriter.init` (`RecordingWriter.java:188`): create the first
     /// segment file and position it at the join offset.

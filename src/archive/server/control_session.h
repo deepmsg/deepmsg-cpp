@@ -132,6 +132,11 @@ public:
     void send_error_response(std::int64_t correlation_id, std::string_view message);
     void send_error_response(std::int64_t correlation_id, std::int64_t relevant_id, std::string_view message);
 
+    /// `ControlSession.sendSignal` (`ControlSession.java:779-800`): the same
+    /// "send now or queue it" discipline as a response.
+    void send_signal(std::int64_t correlation_id, std::int64_t recording_id, std::int64_t subscription_id,
+                     std::int64_t position, archive_codecs::RecordingSignal::Value signal);
+
     [[nodiscard]] std::size_t pending_responses() const noexcept
     {
         return sync_response_queue_.size();
@@ -148,9 +153,20 @@ public:
 private:
     struct PendingResponse
     {
+        enum class Kind
+        {
+            response,
+            signal
+        };
+
+        Kind kind{Kind::response};
         archive_codecs::ControlResponseCode::Value code{archive_codecs::ControlResponseCode::OK};
+        archive_codecs::RecordingSignal::Value signal{archive_codecs::RecordingSignal::START};
         std::int64_t correlation_id{0};
         std::int64_t relevant_id{0};
+        std::int64_t recording_id{0};
+        std::int64_t subscription_id{0};
+        std::int64_t position{0};
         axc::core::FixedString<256> message{};
     };
 

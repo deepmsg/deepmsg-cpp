@@ -89,7 +89,6 @@ private:
     ArchiveLaunchConfig config_;
     SystemEpochClock epoch_clock_;
     ArchiveMarkFile mark_file_;
-    Catalog catalog_;
     SampleAuthenticator sample_authenticator_;
     DefaultAuthenticator default_authenticator_;
     std::unique_ptr<ArchiveConductor> conductor_;

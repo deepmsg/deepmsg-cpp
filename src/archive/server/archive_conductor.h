@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -10,13 +12,17 @@
 
 #include <aeronc.h>
 
+#include "archive/server/archive_config.h"
 #include "archive/server/authenticator.h"
+#include "archive/server/catalog.h"
 #include "archive/server/control_response_proxy.h"
 #include "archive/server/control_session.h"
 #include "archive/server/control_session_adapter.h"
 #include "archive/server/deepmsg_response_publication.h"
 #include "archive/server/epoch_clock_source.h"
+#include "archive/server/recorder.h"
 #include "archive/server/session_worker.h"
+#include "core/counters/counter_target.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error.h"
 
@@ -46,6 +52,11 @@ struct ArchiveConductorContext
     std::int64_t archive_id{-1};
     /// nullptr ⇒ `DefaultAuthenticator`.
     Authenticator* authenticator{nullptr};
+    /// `Archive.Configuration` recording values (`Archive.java:328-438`).
+    RecordingSettings recording;
+    /// `aeron.archive.catalog.capacity` (`Archive.java:508-516`).
+    std::int64_t catalog_capacity{1024 * 1024};
+    int catalog_file_sync_level{0};
 };
 
 /// `ArchiveConductor` (`ArchiveConductor.java:126-...`), SHARED threading mode:
@@ -79,6 +90,7 @@ public:
     void close();
 
     ControlSession* on_connect_request(const ConnectRequest& request) override;
+    void on_start_recording(const StartRecordingRequest& request) override;
     void log_warning(std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
@@ -91,12 +103,51 @@ public:
         return sessions_.size();
     }
 
+    /// Live recording sessions (`ctx.numActiveRecordings`).
+    [[nodiscard]] std::size_t recording_session_count() const noexcept
+    {
+        return recorder_.size();
+    }
+
+    [[nodiscard]] std::int64_t recording_sessions_counter_value() const noexcept;
+
     [[nodiscard]] const std::vector<std::string>& warnings() const noexcept
     {
         return warnings_;
     }
 
 private:
+    /// A recording subscription (`ArchiveConductor.recordingSubscriptionByKeyMap`),
+    /// plus the start request that created it (the reference captures those in the
+    /// `AvailableImageHandler` closure).
+    struct RecordingSubscription
+    {
+        std::string key;
+        std::string stripped_channel;
+        std::string original_channel;
+        std::int32_t stream_id{0};
+        std::int64_t control_session_id{0};
+        std::int64_t correlation_id{0};
+        std::int64_t registration_id{0};
+        bool auto_stop{false};
+        int ref_count{0};
+        axc::core::SubPtr subscription;
+    };
+
+    /// A subscription add in flight (`AsyncAdd`, C API); the OK carries the
+    /// registration id, which only exists once the driver answers.
+    struct PendingRecordingSubscription
+    {
+        std::string key;
+        std::string stripped_channel;
+        std::string original_channel;
+        std::int32_t stream_id{0};
+        std::int64_t control_session_id{0};
+        std::int64_t correlation_id{0};
+        bool auto_stop{false};
+        axc::core::AsyncAdd<axc::core::SubPtr> subscription_add;
+    };
+
     struct PollContext
     {
         ArchiveConductor* conductor{nullptr};
@@ -109,6 +160,15 @@ private:
 
     [[nodiscard]] int poll_control_subscription();
     [[nodiscard]] int poll_pending_publications();
+    [[nodiscard]] int poll_pending_recording_subscriptions();
+    [[nodiscard]] int poll_recording_images();
+    [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
+    void close_recording_session(RecordingSession& session);
+    [[nodiscard]] ControlSession* control_session_by_id(std::int64_t id) noexcept;
+    void increment_recording_sessions() noexcept;
+    void decrement_recording_sessions() noexcept;
+    [[nodiscard]] std::expected<axc::core::PositionWriter, axc::core::Error> allocate_counter(
+        std::int32_t type_id, std::span<const std::uint8_t> key, std::string_view label);
 
     static void fragment_trampoline(void* clientd, const std::uint8_t* buffer, size_t length, aeron_header_t* header);
     static void unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription, aeron_image_t* image);
@@ -134,6 +194,19 @@ private:
     std::vector<PendingPublication> pending_publications_;
     std::int64_t next_session_id_{0};
     std::vector<std::string> warnings_;
+
+    // Recording (A2b).
+    Catalog catalog_;
+    Recorder recorder_;
+    std::optional<axc::core::PositionWriterTarget> max_write_time_counter_;
+    std::optional<axc::core::PositionWriterTarget> total_write_bytes_counter_;
+    std::optional<axc::core::PositionWriterTarget> total_write_time_counter_;
+    std::optional<axc::core::PositionWriterTarget> recording_sessions_counter_;
+    std::unordered_map<std::string, RecordingSubscription> recording_subscriptions_;
+    /// subscription registration id -> `recording_subscriptions_` key.
+    std::unordered_map<std::int64_t, std::string> recording_subscription_keys_;
+    std::vector<PendingRecordingSubscription> pending_recording_subscriptions_;
+    std::unordered_map<aeron_image_t*, RecordingSession*> sessions_by_image_;
 };
 
 }  // namespace deepmsg::archive::server

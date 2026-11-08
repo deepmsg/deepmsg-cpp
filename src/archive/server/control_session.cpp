@@ -241,8 +241,12 @@ int ControlSession::send_responses(std::int64_t now_ms)
     {
         PendingResponse& response = sync_response_queue_.front();
         const bool sent =
-            proxy_.send_response(config_.control_session_id, response.correlation_id, response.relevant_id,
-                                 response.code, response.message.view(), *control_publication_, *this);
+            PendingResponse::Kind::signal == response.kind
+                ? proxy_.send_signal(config_.control_session_id, response.correlation_id, response.recording_id,
+                                     response.subscription_id, response.position, response.signal,
+                                     *control_publication_)
+                : proxy_.send_response(config_.control_session_id, response.correlation_id, response.relevant_id,
+                                       response.code, response.message.view(), *control_publication_, *this);
         if (sent)
         {
             sync_response_queue_.pop_front();
@@ -337,11 +341,35 @@ void ControlSession::send_response(std::int64_t correlation_id, std::int64_t rel
     }
 }
 
+void ControlSession::send_signal(std::int64_t correlation_id, std::int64_t recording_id, std::int64_t subscription_id,
+                                 std::int64_t position, archive_codecs::RecordingSignal::Value signal)
+{
+    // `ControlSession.sendSignal` (`ControlSession.java:779-800`).
+    if (!sync_response_queue_.empty() || !proxy_.send_signal(config_.control_session_id, correlation_id, recording_id,
+                                                             subscription_id, position, signal, *control_publication_))
+    {
+        update_activity_deadline(clock_.time_ms());
+        PendingResponse pending;
+        pending.kind = PendingResponse::Kind::signal;
+        pending.correlation_id = correlation_id;
+        pending.recording_id = recording_id;
+        pending.subscription_id = subscription_id;
+        pending.position = position;
+        pending.signal = signal;
+        sync_response_queue_.push_back(pending);
+    }
+    else
+    {
+        activity_deadline_ms_ = NULL_VALUE;
+    }
+}
+
 void ControlSession::queue_response(std::int64_t correlation_id, std::int64_t relevant_id,
                                     archive_codecs::ControlResponseCode::Value code, std::string_view message)
 {
     // `ControlSession.queueResponse` (`ControlSession.java:843-853`).
     PendingResponse pending;
+    pending.kind = PendingResponse::Kind::response;
     pending.correlation_id = correlation_id;
     pending.relevant_id = relevant_id;
     pending.code = code;

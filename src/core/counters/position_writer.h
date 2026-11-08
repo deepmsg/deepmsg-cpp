@@ -14,6 +14,9 @@ namespace axc::core
 class PositionWriter
 {
 public:
+    /// Empty writer (`valid()` false); assigned later once the counter exists.
+    PositionWriter() noexcept = default;
+
     explicit PositionWriter(CounterPtr counter) noexcept
         : counter_(std::move(counter)), addr_(nullptr == counter_ ? nullptr : aeron_counter_addr(counter_.get()))
     {
