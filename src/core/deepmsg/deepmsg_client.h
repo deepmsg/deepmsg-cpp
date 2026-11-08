@@ -37,8 +37,30 @@ public:
 
     DeepmsgClient() = default;
     DeepmsgClient(DeepmsgClient&&) noexcept = default;
-    DeepmsgClient& operator=(DeepmsgClient&&) noexcept = default;
+
+    /// Released **client first**: `aeron_close` writes its close command to the
+    /// driver ring buffer, which lives in the CnC map `context_` owns. The
+    /// defaulted member-wise assignment would reset `context_` first (members
+    /// are assigned in declaration order) and then `aeron_close` would deref a
+    /// ring descriptor in unmapped memory.
+    DeepmsgClient& operator=(DeepmsgClient&& other) noexcept
+    {
+        if (this != &other)
+        {
+            client_ = std::move(other.client_);
+            context_ = std::move(other.context_);
+        }
+        return *this;
+    }
+
     ~DeepmsgClient() = default;
+
+    /// Same ordering rule as move assignment, for an explicit teardown.
+    void close() noexcept
+    {
+        client_.reset();
+        context_.reset();
+    }
 
     DeepmsgClient(const DeepmsgClient&) = delete;
     DeepmsgClient& operator=(const DeepmsgClient&) = delete;

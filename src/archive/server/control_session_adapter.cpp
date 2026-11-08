@@ -1,0 +1,282 @@
+#include "archive/server/control_session_adapter.h"
+
+#include <cstring>
+#include <string_view>
+
+#include "io_aeron_archive_codecs/ArchiveIdRequest.h"
+#include "io_aeron_archive_codecs/AuthConnectRequest.h"
+#include "io_aeron_archive_codecs/ChallengeResponse.h"
+#include "io_aeron_archive_codecs/CloseSessionRequest.h"
+#include "io_aeron_archive_codecs/KeepAliveRequest.h"
+#include "io_aeron_archive_codecs/MessageHeader.h"
+
+namespace deepmsg::archive::server
+{
+namespace
+{
+
+/// Bounds-checked reader for the var-data fields: every length prefix and the
+/// bytes behind it must sit inside the fragment. The generated codecs throw on
+/// a short buffer, but the request path must turn that away before it decodes
+/// (`work-packages` §0: 解码前长度守卫).
+class VarDataReader
+{
+public:
+    VarDataReader(const std::uint8_t* buffer, std::int32_t length, std::int32_t offset)
+        : buffer_(buffer), length_(length), offset_(offset)
+    {
+    }
+
+    [[nodiscard]] bool read_string(std::string& out)
+    {
+        std::int32_t field_length = 0;
+        if (!read_length(field_length))
+        {
+            return false;
+        }
+        out.assign(reinterpret_cast<const char*>(buffer_ + offset_), static_cast<std::size_t>(field_length));
+        offset_ += field_length;
+        return true;
+    }
+
+    [[nodiscard]] bool read_bytes(std::vector<std::uint8_t>& out)
+    {
+        std::int32_t field_length = 0;
+        if (!read_length(field_length))
+        {
+            return false;
+        }
+        out.assign(buffer_ + offset_, buffer_ + offset_ + field_length);
+        offset_ += field_length;
+        return true;
+    }
+
+    [[nodiscard]] bool at_end() const noexcept
+    {
+        return offset_ == length_;
+    }
+
+private:
+    [[nodiscard]] bool read_length(std::int32_t& field_length)
+    {
+        if (offset_ < 0 || offset_ + 4 > length_)
+        {
+            return false;
+        }
+        std::memcpy(&field_length, buffer_ + offset_, sizeof(field_length));
+        offset_ += 4;
+        return field_length >= 0 && offset_ + field_length <= length_;
+    }
+
+    const std::uint8_t* buffer_;
+    std::int32_t length_;
+    std::int32_t offset_;
+};
+
+}  // namespace
+
+int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t length, const void* image)
+{
+    // `ControlSessionAdapter.onFragment` (`ControlSessionAdapter.java:126-134`).
+    if (length < MESSAGE_HEADER_LENGTH)
+    {
+        handler_.log_warning("control request shorter than the message header");
+        return 0;
+    }
+
+    archive_codecs::MessageHeader header;
+    header.wrap(const_cast<char*>(reinterpret_cast<const char*>(buffer)), 0,
+                archive_codecs::MessageHeader::sbeSchemaVersion(), static_cast<std::uint64_t>(length));
+
+    if (SCHEMA_ID != static_cast<std::int32_t>(header.schemaId()))
+    {
+        handler_.log_warning("expected schemaId=" + std::to_string(SCHEMA_ID) +
+                             ", actual=" + std::to_string(header.schemaId()));
+        return 0;
+    }
+
+    const auto block_length = static_cast<std::int32_t>(header.blockLength());
+    if (MESSAGE_HEADER_LENGTH + block_length > length)
+    {
+        handler_.log_warning("control request shorter than its block length");
+        return 0;
+    }
+
+    const auto template_id = static_cast<std::int32_t>(header.templateId());
+    const auto* body = buffer + MESSAGE_HEADER_LENGTH;
+
+    switch (template_id)
+    {
+        case TEMPLATE_AUTH_CONNECT:
+        {
+            // `ControlSessionAdapter.java:766-802`.
+            ConnectRequest request;
+            request.image = image;
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.response_channel) || !reader.read_bytes(request.encoded_credentials) ||
+                !reader.read_string(request.client_info) || !reader.at_end())
+            {
+                handler_.log_warning("malformed AuthConnectRequest");
+                return 0;
+            }
+
+            archive_codecs::AuthConnectRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+            request.correlation_id = decoder.correlationId();
+            request.response_stream_id = decoder.responseStreamId();
+            request.protocol_version = decoder.version();
+
+            ControlSession* session = handler_.on_connect_request(request);
+            if (nullptr != session)
+            {
+                register_session(session->session_id(), image, session);
+                return 1;
+            }
+            return 0;
+        }
+
+        case TEMPLATE_CHALLENGE_RESPONSE:
+        {
+            // `ControlSessionAdapter.java:804-835`.
+            archive_codecs::ChallengeResponse decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            std::vector<std::uint8_t> credentials;
+            if (!reader.read_bytes(credentials) || !reader.at_end())
+            {
+                handler_.log_warning("malformed ChallengeResponse");
+                return 0;
+            }
+
+            ControlSession* session =
+                control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr != session)
+            {
+                session->on_challenge_response(decoder.correlationId(), credentials);
+                return 1;
+            }
+            return 0;
+        }
+
+        case TEMPLATE_KEEP_ALIVE:
+        {
+            // `ControlSessionAdapter.java:845-856`.
+            archive_codecs::KeepAliveRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ControlSession* session =
+                control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr != session)
+            {
+                session->on_keep_alive(decoder.correlationId());
+                return 1;
+            }
+            return 0;
+        }
+
+        case TEMPLATE_ARCHIVE_ID:
+        {
+            // `ControlSessionAdapter.java:1063-1084` and
+            // `ControlSession.onArchiveId` (`ControlSession.java:541`): the gate
+            // first, then activation, then the archive id as the relevant id.
+            archive_codecs::ArchiveIdRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ControlSession* session =
+                control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr != session)
+            {
+                session->attempt_to_activate();
+                if (ControlSession::State::active == session->state())
+                {
+                    session->send_ok_response(decoder.correlationId(), handler_.archive_id());
+                }
+                return 1;
+            }
+            return 0;
+        }
+
+        case TEMPLATE_CLOSE_SESSION:
+        {
+            // `ControlSessionAdapter.java:144-160`.
+            archive_codecs::CloseSessionRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            const std::int64_t control_session_id = decoder.controlSessionId();
+            const auto found = sessions_.find(control_session_id);
+            if (found != sessions_.end() && found->second.image == image)
+            {
+                found->second.session->abort(ControlSession::SESSION_CLOSED_MSG);
+            }
+            return 1;
+        }
+
+        default:
+            // The remaining requests land with A2b (recording), A3a (queries) and
+            // A3b (replay); they are named rather than silently dropped.
+            handler_.log_warning("unsupported control request templateId=" + std::to_string(template_id));
+            return 0;
+    }
+}
+
+ControlSession* ControlSessionAdapter::control_session(std::int64_t control_session_id, const void* image,
+                                                       std::int32_t template_id, std::int64_t correlation_id)
+{
+    // `ControlSessionAdapter.getControlSession` (`ControlSessionAdapter.java:1186-1230`).
+    const auto found = sessions_.find(control_session_id);
+    if (found == sessions_.end())
+    {
+        handler_.log_warning("control request for unknown session: controlSessionId=" +
+                             std::to_string(control_session_id) + " templateId=" + std::to_string(template_id));
+        return nullptr;
+    }
+
+    if (found->second.image != image)
+    {
+        handler_.log_warning("unauthorised archive action=" + std::to_string(template_id) +
+                             " controlSessionId=" + std::to_string(control_session_id));
+        return nullptr;
+    }
+
+    // The authorisation service (`AuthorisationService`) is A2b's; the default
+    // one allows everything.
+    (void)correlation_id;
+    return found->second.session;
+}
+
+void ControlSessionAdapter::register_session(std::int64_t control_session_id, const void* image,
+                                             ControlSession* session)
+{
+    sessions_[control_session_id] = SessionInfo{image, session};
+}
+
+void ControlSessionAdapter::unregister_session(std::int64_t control_session_id)
+{
+    sessions_.erase(control_session_id);
+}
+
+void ControlSessionAdapter::abort_sessions_for_image(const void* image, std::string_view reason)
+{
+    for (auto& [control_session_id, info] : sessions_)
+    {
+        (void)control_session_id;
+        if (info.image == image && nullptr != info.session)
+        {
+            info.session->abort(reason);
+        }
+    }
+}
+
+}  // namespace deepmsg::archive::server

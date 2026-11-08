@@ -21,6 +21,10 @@ class MappedFile
 public:
     static std::expected<MappedFile, Error> create(std::string_view path, std::size_t length) noexcept;
     static std::expected<MappedFile, Error> open(std::string_view path) noexcept;
+    /// `writable = false` opens the file `O_RDONLY` and maps it `PROT_READ`, so a
+    /// read-only file or mount can be inspected (reference: `Catalog`'s read-only
+    /// open, `Catalog.java:270-276`).
+    static std::expected<MappedFile, Error> open(std::string_view path, bool writable) noexcept;
 
     MappedFile() noexcept = default;
     MappedFile(MappedFile&& other) noexcept;

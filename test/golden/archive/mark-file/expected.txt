@@ -1,0 +1,14 @@
+version=196864
+activityTimestamp=5555
+startTimestamp=77
+controlStreamId=10
+localControlStreamId=11
+eventsStreamId=12
+headerLength=8192
+errorBufferLength=4096
+archiveId=462348234343
+controlChannel=aeron:udp?endpoint=localhost:8010
+localControlChannel=aeron:ipc
+eventsChannel=aeron:udp?endpoint=localhost:8011
+aeronDirectory=/dev/shm/aeron-golden
+fileLength=12288
