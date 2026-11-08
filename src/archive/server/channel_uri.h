@@ -26,6 +26,11 @@ struct ChannelUriOptions
 /// True for a `aeron:udp` channel; an optional `aeron-spy:` prefix is ignored.
 [[nodiscard]] bool is_udp_channel(std::string_view channel) noexcept;
 
+/// True when the channel carries `control-mode=response` (MDS), which is what
+/// makes `newControlSession` add `response-correlation-id`
+/// (`ArchiveConductor.java:467-479`).
+[[nodiscard]] bool is_mds_response_channel(std::string_view channel) noexcept;
+
 /// `ArchiveConductor.strippedChannelBuilder(uri).build()` (`ArchiveConductor.java:1889-1911`):
 /// the 23-parameter whitelist, in `ChannelUriStringBuilder.build()` order.
 [[nodiscard]] std::expected<std::string, axc::core::Error> stripped_channel(std::string_view channel);

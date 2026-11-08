@@ -5,6 +5,7 @@ axc_add_library(axc_archive_server
         archive_conductor.cpp
         archive_config.cpp
         archive_counters.cpp
+        archive_launch.cpp
         channel_uri.cpp
         recording_pos.cpp
         deepmsg_response_publication.cpp

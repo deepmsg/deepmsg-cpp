@@ -9,7 +9,10 @@ extern "C"
 }
 
 #include <cstddef>
+#include <cstring>
 #include <string>
+
+#include "archive/server/archive_config.h"
 
 namespace deepmsg::archive::server
 {
@@ -134,6 +137,29 @@ void append_int(std::string& out, std::string_view key, std::int64_t value)
     append_param(out, key, std::to_string(value));
 }
 
+/// `ArchiveConductor.java:457`: a size parameter on the channel wins over the
+/// context default; `parseSize` suffixes (`64k`) are honoured.
+[[nodiscard]] std::int32_t uri_int32(const aeron_uri_t& uri, std::string_view key, std::int32_t fallback) noexcept
+{
+    const char* value = param(uri, key);
+    if (nullptr == value)
+    {
+        return fallback;
+    }
+    const auto parsed = parse_size(value);
+    return parsed.has_value() ? static_cast<std::int32_t>(*parsed) : fallback;
+}
+
+[[nodiscard]] bool uri_bool(const aeron_uri_t& uri, std::string_view key, bool fallback) noexcept
+{
+    const char* value = param(uri, key);
+    if (nullptr == value)
+    {
+        return fallback;
+    }
+    return 0 == std::strcmp(value, "true");
+}
+
 /// `ChannelUriStringBuilder.build()` drops a trailing `|` or `?` (`:2555-2558`).
 void trim_trailing_separator(std::string& out)
 {
@@ -157,10 +183,17 @@ void trim_trailing_separator(std::string& out)
     append_param(out, "interface", param(uri, "interface"));
     append_param(out, "control", param(uri, "control"));
     append_param(out, "control-mode", param(uri, "control-mode"));
+
+    // `ArchiveConductor.java:453-468`: a value on the channel wins over the
+    // context default, and only the context default is used when it is absent.
+    const auto mtu_length = uri_int32(uri, "mtu", nullptr == options ? 0 : options->mtu_length);
+    const auto term_length = uri_int32(uri, "term-length", nullptr == options ? 0 : options->term_length);
+    const bool sparse = uri_bool(uri, "sparse", nullptr != options && options->sparse);
+
     if (nullptr != options)
     {
-        append_int(out, "mtu", options->mtu_length);
-        append_int(out, "term-length", options->term_length);
+        append_int(out, "mtu", mtu_length);
+        append_int(out, "term-length", term_length);
     }
     append_param(out, "session-id", param(uri, "session-id"));
     append_param(out, "ttl", param(uri, "ttl"));
@@ -170,7 +203,7 @@ void trim_trailing_separator(std::string& out)
     append_param(out, "gtag", param(uri, "gtag"));
     if (nullptr != options)
     {
-        append_param(out, "sparse", options->sparse ? "true" : "false");
+        append_param(out, "sparse", sparse ? "true" : "false");
     }
     append_param(out, "tether", param(uri, "tether"));
     append_param(out, "group", param(uri, "group"));
@@ -202,6 +235,12 @@ bool is_udp_channel(std::string_view channel) noexcept
 {
     const std::string_view parsed_channel = without_spy_prefix(channel);
     return parsed_channel.size() >= 9 && parsed_channel.substr(0, 9) == "aeron:udp";
+}
+
+bool is_mds_response_channel(std::string_view channel) noexcept
+{
+    const std::string_view parsed_channel = without_spy_prefix(channel);
+    return parsed_channel.find("control-mode=response") != std::string_view::npos;
 }
 
 std::expected<std::string, axc::core::Error> stripped_channel(std::string_view channel)

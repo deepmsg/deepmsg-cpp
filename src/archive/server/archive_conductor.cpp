@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <utility>
 
+#include "archive/server/channel_uri.h"
 #include "core/deepmsg/image_handlers.h"
 #include "core/time/clock.h"
 
@@ -203,14 +204,41 @@ ControlSession* ArchiveConductor::on_connect_request(const ConnectRequest& reque
     config.session_liveness_check_interval_ms = context_.session_liveness_check_interval_ms;
     config.invalid_version_message = std::move(invalid_version_message);
 
+    // `ArchiveConductor.newControlSession` (`ArchiveConductor.java:457-482`):
+    // strip the client's channel, then apply the archive's term length, sparse
+    // flag and MTU (the channel's own values win), plus the correlation id for
+    // an MDS response channel.
+    ChannelUriOptions options;
+    options.term_length = context_.control_term_buffer_length;
+    options.mtu_length = context_.control_mtu_length;
+    options.sparse = context_.control_term_buffer_sparse;
+
+    aeron_image_constants_t image_constants{};
+    if (nullptr != request.image &&
+        0 == aeron_image_constants(const_cast<aeron_image_t*>(static_cast<const aeron_image_t*>(request.image)),
+                                   &image_constants) &&
+        is_mds_response_channel(request.response_channel))
+    {
+        options.has_response_correlation_id = true;
+        options.response_correlation_id = image_constants.correlation_id;
+    }
+
+    auto response_channel = control_response_channel(request.response_channel, options);
+    if (!response_channel)
+    {
+        log_warning("failed to rewrite the control response channel " + request.response_channel + ": " +
+                    std::string{response_channel.error().message.view()});
+        return nullptr;
+    }
+
     // `ControlSession.init` adds the publication asynchronously and waits for it
     // in INIT (`ControlSession.java:859-908`); the add is started here and
     // completed in `poll_pending_publications`.
     aeron_async_add_exclusive_publication_t* async = nullptr;
-    if (0 != aeron_async_add_exclusive_publication(&async, client_.handle(), request.response_channel.c_str(),
+    if (0 != aeron_async_add_exclusive_publication(&async, client_.handle(), response_channel->c_str(),
                                                    request.response_stream_id))
     {
-        log_warning("failed to add the control publication on " + request.response_channel);
+        log_warning("failed to add the control publication on " + *response_channel);
         return nullptr;
     }
 

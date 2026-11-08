@@ -37,6 +37,11 @@ struct ArchiveConductorContext
     std::int64_t connect_timeout_ms{3000};
     std::int64_t session_liveness_check_interval_ms{1000};
     int fragment_limit{10};
+    /// `Archive.Context.controlTermBufferLength()` / `controlMtuLength()` /
+    /// `controlTermBufferSparse()` (`Archive.java:2816-2840`).
+    std::int32_t control_term_buffer_length{64 * 1024};
+    std::int32_t control_mtu_length{1408};
+    bool control_term_buffer_sparse{true};
     /// `Aeron.NULL_VALUE` unless the archive was given one (`ctx.archiveId()`).
     std::int64_t archive_id{-1};
     /// nullptr ⇒ `DefaultAuthenticator`.

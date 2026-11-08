@@ -42,17 +42,30 @@ TEST(ChannelUriTest, whitelistedParamsUseTheReferenceOrder)
     EXPECT_EQ("aeron:udp?tags=a,b|endpoint=localhost:3333|interface=eth0|ttl=32", *stripped);
 }
 
-TEST(ChannelUriTest, controlResponseChannelAddsMtuTermLengthAndSparse)
+TEST(ChannelUriTest, controlResponseChannelUsesTheContextDefaultsWhenTheChannelHasNone)
 {
     ChannelUriOptions options;
     options.term_length = 65536;
     options.mtu_length = 1408;
     options.sparse = false;
 
-    const auto channel =
-        control_response_channel("aeron:udp?endpoint=localhost:0|session-id=7|term-length=32768|mtu=1024", options);
+    const auto channel = control_response_channel("aeron:udp?endpoint=localhost:0|session-id=7", options);
     ASSERT_TRUE(channel.has_value()) << channel.error().message.view();
     EXPECT_EQ("aeron:udp?endpoint=localhost:0|mtu=1408|term-length=65536|session-id=7|sparse=false", *channel);
+}
+
+TEST(ChannelUriTest, controlResponseChannelLetsTheChannelOverrideTheContextDefaults)
+{
+    ChannelUriOptions options;
+    options.term_length = 65536;
+    options.mtu_length = 1408;
+    options.sparse = false;
+
+    // `ArchiveConductor.java:453-468`: the channel's own values win.
+    const auto channel =
+        control_response_channel("aeron:udp?endpoint=localhost:0|term-length=32768|mtu=1024|sparse=true", options);
+    ASSERT_TRUE(channel.has_value()) << channel.error().message.view();
+    EXPECT_EQ("aeron:udp?endpoint=localhost:0|mtu=1024|term-length=32768|sparse=true", *channel);
 }
 
 TEST(ChannelUriTest, mdsResponseChannelGetsTheCorrelationId)
