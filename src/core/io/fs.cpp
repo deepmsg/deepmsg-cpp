@@ -1,6 +1,7 @@
 #include "core/io/fs.h"
 
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
@@ -42,6 +43,17 @@ std::expected<void, Error> remove_file(std::string_view path) noexcept
         return std::unexpected(make_error(ErrorCode::io_error, "unlink failed", errno));
     }
     return {};
+}
+
+std::int64_t usable_space(std::string_view path) noexcept
+{
+    const std::string name{path};
+    struct statvfs info{};
+    if (0 != ::statvfs(name.c_str(), &info))
+    {
+        return 0;
+    }
+    return static_cast<std::int64_t>(info.f_frsize) * static_cast<std::int64_t>(info.f_bavail);
 }
 
 std::expected<void, Error> create_directories(std::string_view path) noexcept

@@ -3,6 +3,7 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/error/error.h"
 #include "fixture/process.h"
@@ -29,6 +30,11 @@ public:
     CDriver& operator=(const CDriver&) = delete;
 
     static std::expected<CDriver, Error> start(std::string_view aeronmd_path, std::string_view aeron_dir) noexcept;
+
+    /// Same, with `KEY=VALUE` entries applied to the driver's environment
+    /// (e.g. `AERON_SPIES_SIMULATE_CONNECTION=true`).
+    static std::expected<CDriver, Error> start(std::string_view aeronmd_path, std::string_view aeron_dir,
+                                               const std::vector<std::string>& environment) noexcept;
 
     [[nodiscard]] const std::string& aeron_dir() const noexcept
     {

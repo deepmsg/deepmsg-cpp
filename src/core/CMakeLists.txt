@@ -9,6 +9,7 @@ axc_add_library(axc_core
         collections/long2long_hash_map.cpp
         config/name_table.cpp
         config/property_source.cpp
+        counters/counter_directory.cpp
         io/fs.cpp
         io/mapped_file.cpp
         io/mark_file.cpp

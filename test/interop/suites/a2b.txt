@@ -1,0 +1,45 @@
+# A2b (archive recording, SHARED) criteria: the reference C suite cases this
+# card is judged by, run against our binary with test/interop/run-c-suite.sh.
+#
+#   test/interop/run-c-suite.sh debug --gtest_filter="$(grep -v '^#' test/interop/suites/a2b.txt | grep -v '^$' | paste -sd:)"
+#
+# Full round at the A2b close (2026-11-08, 45 cases, 220 s): 24 green / 21 red.
+# The reds are attributed in analysis/cpp/records/a2b.md (replay A3b, segments
+# A4a, replication A4b, URI/multi listings A3a, the exit family A5a) plus one
+# open red for the second IPC client (embedded-driver investigation).
+
+# Connection and authentication.
+AeronCArchiveTest.shouldConnectToArchive
+AeronCArchiveTest.shouldAsyncConnectToArchive
+AeronCArchiveTest.shouldConnectToArchiveWithPrebuiltAeron
+AeronCArchiveTest.shouldAsyncConnectToArchiveWithPrebuiltAeron
+AeronCArchiveTest.shouldConnectToArchiveAndCallInvoker
+AeronCArchiveTest.shouldConnectToArchiveWithResponseChannels
+AeronCArchiveTest.shouldBeAbleToHandleBeingChallenged
+AeronCArchiveTest.shouldFailForIncorrectInitialCredentials
+AeronCArchiveTest.shouldExceptionForIncorrectChallengeCredentials
+AeronCArchiveTest.shouldHandleNullCredentialsSupplier
+AeronCArchiveTest.shouldHandleNullDataInTheEncodedCredentials
+AeronCArchiveTest.shouldSendClientInfoToArchive
+AeronCArchiveTest.shouldSetAeronClientName
+
+# Control-request error handling.
+AeronCArchiveTest.shouldCallErrorHandlerOnError
+AeronCArchiveTest.shouldObserveErrorOnBadDataOnControlResponseChannel
+AeronCArchiveTest.shouldRejectReentractCallsDuringCallbacks
+AeronCArchiveTest.shouldRejectReplayMergeWhenReplayDestinationHasNoEndpoint
+AeronCArchiveTest.shouldReleaseArchiveLockWhenPollingForRecordingSignalsFails
+
+# Recording, stop and the four position queries.
+AeronCArchiveTest.shouldRecordPublicationAndFindRecording
+AeronCArchiveTest.shouldRecordPublicationAndTryStopById
+AeronCArchiveTest.shouldGetStartPosition
+
+# Recording listings (single descriptor, including a jumbo one).
+AeronCArchiveTest.shouldListRegisteredRecordingSubscriptions
+AeronCArchiveTest.shouldReadRecordingDescriptor
+AeronCArchiveTest.shouldReadJumboRecordingDescriptor
+
+# Known red until a later card (kept here so the gap is named, not silent):
+#   AeronCArchive/AeronCArchiveParamTest.shouldRecordAndExtend/0,/1
+#     recording-side assertions all pass; the tail is a replay (A3b).

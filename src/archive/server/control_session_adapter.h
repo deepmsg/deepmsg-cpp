@@ -28,6 +28,92 @@ struct ConnectRequest
     const void* image{nullptr};
 };
 
+/// `StartRecordingRequest` / `StartRecordingRequest2`
+/// (`ControlSessionAdapter.java:880-915`).
+struct StartRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int32_t stream_id{0};
+    /// `SourceLocation.LOCAL` (0) / `REMOTE` (1).
+    std::int32_t source_location{0};
+    /// `StartRecordingRequest2.autoStop`; always false for the v1 request.
+    bool auto_stop{false};
+    std::string channel;
+    ControlSession* session{nullptr};
+};
+
+/// `StopRecordingRequest` (`ControlSessionAdapter.java:188-206`): stop every
+/// recording on this `streamId` + `channel`.
+struct StopRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int32_t stream_id{0};
+    std::string channel;
+    ControlSession* session{nullptr};
+};
+
+/// `StopRecordingSubscriptionRequest` (`ControlSessionAdapter.java:416-434`).
+struct StopRecordingSubscriptionRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t subscription_id{0};
+    ControlSession* session{nullptr};
+};
+
+/// `StopRecordingByIdentityRequest` (`ControlSessionAdapter.java:944-962`).
+struct StopRecordingByIdentityRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    ControlSession* session{nullptr};
+};
+
+/// `RecordingPositionRequest` (12), `StopPositionRequest` (15),
+/// `StartPositionRequest` (52) and `MaxRecordedPositionRequest` (67) all carry a
+/// `recordingId` (`ControlSessionAdapter.java:374-393`, `:437-456`, `:640-659`,
+/// `:1042-1061`).
+struct RecordingIdRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    ControlSession* session{nullptr};
+};
+
+/// `FindLastMatchingRecordingRequest` (`ControlSessionAdapter.java:458-487`).
+struct FindLastMatchingRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t min_recording_id{0};
+    std::int32_t session_id{0};
+    std::int32_t stream_id{0};
+    std::string channel_fragment;
+    ControlSession* session{nullptr};
+};
+
+/// `ListRecordingSubscriptionsRequest` (`ControlSessionAdapter.java:488-508`).
+struct ListRecordingSubscriptionsRequest
+{
+    std::int64_t correlation_id{0};
+    std::int32_t pseudo_index{0};
+    std::int32_t subscription_count{0};
+    bool apply_stream_id{false};
+    std::int32_t stream_id{0};
+    std::string channel_fragment;
+    ControlSession* session{nullptr};
+};
+
+/// `ExtendRecordingRequest2` (`ControlSessionAdapter.java:917-943`).
+struct ExtendRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    std::int32_t stream_id{0};
+    std::int32_t source_location{0};
+    bool auto_stop{false};
+    std::string channel;
+    ControlSession* session{nullptr};
+};
+
 /// What the adapter asks the conductor for.
 class ControlSessionHandler
 {
@@ -41,6 +127,34 @@ public:
     /// Create (or refuse) a session for a connect request. Returns nullptr when
     /// the request cannot be served; the adapter then drops it.
     virtual ControlSession* on_connect_request(const ConnectRequest& request) = 0;
+
+    /// `ControlSession.onStartRecording` (`ControlSession.java:340-348`).
+    virtual void on_start_recording(const StartRecordingRequest& request) = 0;
+
+    /// `ControlSession.onStopRecording` (`ControlSession.java:318-326`).
+    virtual void on_stop_recording(const StopRecordingRequest& request) = 0;
+
+    /// `ControlSession.onStopRecordingSubscription` (`ControlSession.java:328-336`).
+    virtual void on_stop_recording_subscription(const StopRecordingSubscriptionRequest& request) = 0;
+
+    /// `ControlSession.onStopRecordingByIdentity` (`ControlSession.java:570-578`).
+    virtual void on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request) = 0;
+
+    /// The four position queries (`ControlSession.java:436-484`, `:520-568`).
+    virtual void on_get_recording_position(const RecordingIdRequest& request) = 0;
+    virtual void on_get_stop_position(const RecordingIdRequest& request) = 0;
+    virtual void on_get_start_position(const RecordingIdRequest& request) = 0;
+    virtual void on_get_max_recorded_position(const RecordingIdRequest& request) = 0;
+
+    /// `ControlSession.onFindLastMatchingRecording` /
+    /// `onListRecording` / `onListRecordingSubscriptions`
+    /// (`ControlSession.java:486-572`).
+    virtual void on_find_last_matching_recording(const FindLastMatchingRecordingRequest& request) = 0;
+    virtual void on_list_recording(const RecordingIdRequest& request) = 0;
+    virtual void on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request) = 0;
+
+    /// `ControlSession.onExtendRecording` (`ControlSession.java:478-486`).
+    virtual void on_extend_recording(const ExtendRecordingRequest& request) = 0;
 
     /// `ArchiveConductor.logWarning` (`ArchiveConductor.java:442`).
     virtual void log_warning(std::string_view message) = 0;
@@ -68,6 +182,20 @@ public:
 
     // Template ids from `aeron-archive-codecs.xml`.
     static constexpr std::int32_t TEMPLATE_CLOSE_SESSION = 3;
+    /// `StartRecordingRequest` (v1, no `autoStop`) and `StartRecordingRequest2`.
+    static constexpr std::int32_t TEMPLATE_START_RECORDING = 4;
+    static constexpr std::int32_t TEMPLATE_START_RECORDING_2 = 63;
+    static constexpr std::int32_t TEMPLATE_STOP_RECORDING = 5;
+    static constexpr std::int32_t TEMPLATE_STOP_RECORDING_SUBSCRIPTION = 14;
+    static constexpr std::int32_t TEMPLATE_STOP_RECORDING_BY_IDENTITY = 65;
+    static constexpr std::int32_t TEMPLATE_RECORDING_POSITION = 12;
+    static constexpr std::int32_t TEMPLATE_STOP_POSITION = 15;
+    static constexpr std::int32_t TEMPLATE_START_POSITION = 52;
+    static constexpr std::int32_t TEMPLATE_MAX_RECORDED_POSITION = 67;
+    static constexpr std::int32_t TEMPLATE_LIST_RECORDING = 10;
+    static constexpr std::int32_t TEMPLATE_LIST_RECORDING_SUBSCRIPTIONS = 17;
+    static constexpr std::int32_t TEMPLATE_FIND_LAST_MATCHING_RECORDING = 16;
+    static constexpr std::int32_t TEMPLATE_EXTEND_RECORDING_2 = 64;
     static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;
