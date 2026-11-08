@@ -254,7 +254,7 @@ int ArchiveConductor::poll_pending_publications()
             continue;
         }
 
-        auto wrapper = std::make_unique<AeronExclusivePublication>(publication);
+        auto wrapper = std::make_unique<DeepmsgExclusivePublication>(publication);
         const auto found = sessions_by_id_.find(pending.control_session_id);
         if (found != sessions_by_id_.end())
         {

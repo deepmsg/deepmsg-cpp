@@ -3,7 +3,7 @@ axc_add_library(axc_archive_server
         module.cpp
         catalog.cpp
         archive_conductor.cpp
-        aeron_response_publication.cpp
+        deepmsg_response_publication.cpp
         control_session_adapter.cpp
         authenticator.cpp
         control_response_proxy.cpp

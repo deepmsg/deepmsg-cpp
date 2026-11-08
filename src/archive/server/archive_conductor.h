@@ -10,11 +10,11 @@
 
 #include <aeronc.h>
 
-#include "archive/server/aeron_response_publication.h"
 #include "archive/server/authenticator.h"
 #include "archive/server/control_response_proxy.h"
 #include "archive/server/control_session.h"
 #include "archive/server/control_session_adapter.h"
+#include "archive/server/deepmsg_response_publication.h"
 #include "archive/server/epoch_clock_source.h"
 #include "archive/server/session_worker.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -118,7 +118,7 @@ private:
     ControlResponseProxy proxy_;
     ControlSessionAdapter adapter_;
     SessionWorker<ControlSession> sessions_;
-    std::unordered_map<std::int64_t, std::unique_ptr<AeronExclusivePublication>> publications_;
+    std::unordered_map<std::int64_t, std::unique_ptr<DeepmsgExclusivePublication>> publications_;
     struct PendingPublication
     {
         std::int64_t control_session_id{0};

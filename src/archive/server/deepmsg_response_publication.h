@@ -19,18 +19,19 @@ namespace deepmsg::archive::server
 /// The publication is the session's control publication: the reference adds it
 /// asynchronously and the session waits for `is_connected()` in CONNECTING
 /// (`ControlSession.java:913`).
-class AeronExclusivePublication final : public ResponsePublication
+class DeepmsgExclusivePublication final : public ResponsePublication
 {
 public:
-    AeronExclusivePublication() = default;
-    ~AeronExclusivePublication() override;
+    DeepmsgExclusivePublication() = default;
+    ~DeepmsgExclusivePublication() override;
 
-    AeronExclusivePublication(const AeronExclusivePublication&) = delete;
-    AeronExclusivePublication& operator=(const AeronExclusivePublication&) = delete;
+    DeepmsgExclusivePublication(const DeepmsgExclusivePublication&) = delete;
+    DeepmsgExclusivePublication& operator=(const DeepmsgExclusivePublication&) = delete;
 
     /// Wraps a publication the caller obtained from
     /// `aeron_async_add_exclusive_publication` + `..._poll`.
-    explicit AeronExclusivePublication(aeron_exclusive_publication_t* publication) noexcept : publication_(publication)
+    explicit DeepmsgExclusivePublication(aeron_exclusive_publication_t* publication) noexcept
+        : publication_(publication)
     {
     }
 

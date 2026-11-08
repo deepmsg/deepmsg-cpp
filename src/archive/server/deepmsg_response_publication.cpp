@@ -1,4 +1,4 @@
-#include "archive/server/aeron_response_publication.h"
+#include "archive/server/deepmsg_response_publication.h"
 
 // The payload length lives on the internal struct; the public API has no
 // accessor for exclusive publications in 1.54.
@@ -7,40 +7,40 @@
 namespace deepmsg::archive::server
 {
 
-AeronExclusivePublication::~AeronExclusivePublication()
+DeepmsgExclusivePublication::~DeepmsgExclusivePublication()
 {
     close();
 }
 
-AeronExclusivePublication::OfferResult AeronExclusivePublication::offer(std::span<const std::uint8_t> buffer)
+DeepmsgExclusivePublication::OfferResult DeepmsgExclusivePublication::offer(std::span<const std::uint8_t> buffer)
 {
     return aeron_exclusive_publication_offer(publication_, buffer.data(), buffer.size(), nullptr, nullptr);
 }
 
-AeronExclusivePublication::OfferResult AeronExclusivePublication::try_claim(std::int32_t length, Claim& claim)
+DeepmsgExclusivePublication::OfferResult DeepmsgExclusivePublication::try_claim(std::int32_t length, Claim& claim)
 {
     const std::int64_t result =
         aeron_exclusive_publication_try_claim(publication_, static_cast<std::size_t>(length), &claim_);
     if (result > 0)
     {
         claim.buffer = {claim_.data, claim_.length};
-        claim.commit_fn = &AeronExclusivePublication::commit_claim;
+        claim.commit_fn = &DeepmsgExclusivePublication::commit_claim;
         claim.context = &claim_;
     }
     return result;
 }
 
-bool AeronExclusivePublication::is_connected() const
+bool DeepmsgExclusivePublication::is_connected() const
 {
     return 0 != aeron_exclusive_publication_is_connected(publication_);
 }
 
-std::int32_t AeronExclusivePublication::max_payload_length() const
+std::int32_t DeepmsgExclusivePublication::max_payload_length() const
 {
     return static_cast<std::int32_t>(publication_->max_payload_length);
 }
 
-void AeronExclusivePublication::close()
+void DeepmsgExclusivePublication::close()
 {
     if (nullptr != publication_)
     {
@@ -49,7 +49,7 @@ void AeronExclusivePublication::close()
     }
 }
 
-void AeronExclusivePublication::commit_claim(void* context) noexcept
+void DeepmsgExclusivePublication::commit_claim(void* context) noexcept
 {
     auto* claim = static_cast<aeron_buffer_claim_t*>(context);
     aeron_buffer_claim_commit(claim);
