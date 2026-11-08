@@ -21,6 +21,7 @@ using deepmsg::archive::server::ArchiveCounters;
 
 TEST(ArchiveCountersTest, replayTypeIdsMatchAeronCounters)
 {
+    EXPECT_EQ(102, ArchiveCounters::CONTROL_SESSIONS_TYPE_ID);
     EXPECT_EQ(108, ArchiveCounters::REPLAYER_MAX_READ_TIME_TYPE_ID);
     EXPECT_EQ(109, ArchiveCounters::REPLAYER_TOTAL_READ_BYTES_TYPE_ID);
     EXPECT_EQ(110, ArchiveCounters::REPLAYER_TOTAL_READ_TIME_TYPE_ID);
@@ -47,6 +48,8 @@ TEST(ArchiveCountersTest, replayLabelsMatchTheReference)
               ArchiveCounters::make_label(ArchiveCounters::REPLAYER_TOTAL_READ_TIME_NAME, 0));
     EXPECT_EQ("Archive Replay Sessions - archiveId=42",
               ArchiveCounters::make_label(ArchiveCounters::REPLAY_SESSION_COUNT_NAME, 42));
+    EXPECT_EQ("Archive Control Sessions - archiveId=42",
+              ArchiveCounters::make_label(ArchiveCounters::CONTROL_SESSIONS_NAME, 42));
 }
 
 }  // namespace

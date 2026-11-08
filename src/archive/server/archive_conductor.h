@@ -43,6 +43,10 @@ struct ArchiveConductorContext
     /// listens on for control requests.
     std::string control_channel{"aeron:ipc"};
     std::int32_t control_stream_id{10};
+    /// `Archive.LOCAL_CONTROL_CHANNEL_DEFAULT` / `..._STREAM_ID_DEFAULT`
+    /// (`Archive.java:484-500`): the privileged local control channel.
+    std::string local_control_channel{"aeron:ipc?term-length=64k"};
+    std::int32_t local_control_stream_id{10};
     /// Empty ⇒ the Aeron default (`/dev/shm/aeron-<user>`).
     std::string aeron_dir;
     std::int64_t connect_timeout_ms{3000};
@@ -273,6 +277,8 @@ private:
     ArchiveConductorContext context_;
     axc::core::DeepmsgClient client_;
     axc::core::SubPtr control_subscription_;
+    /// `ArchiveConductor.localControlSubscription` (`:238-239`).
+    axc::core::SubPtr local_control_subscription_;
     /// Control requests above one MTU arrive as several fragments; the
     /// controlled assembler hands complete messages to the adapter
     /// (`ControlSessionAdapter.java:126` wraps the handler in a
@@ -318,6 +324,7 @@ private:
     std::optional<axc::core::PositionWriterTarget> max_write_time_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_bytes_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_time_counter_;
+    std::optional<axc::core::PositionWriterTarget> control_sessions_counter_;
     std::optional<axc::core::PositionWriterTarget> recording_sessions_counter_;
     std::optional<axc::core::PositionWriterTarget> replay_session_counter_;
     std::optional<axc::core::PositionWriterTarget> total_read_bytes_counter_;

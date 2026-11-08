@@ -373,6 +373,8 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     conductor_context.archive_dir = config_.archive_dir;
     conductor_context.control_channel = config_.control_channel;
     conductor_context.control_stream_id = config_.control_stream_id;
+    conductor_context.local_control_channel = config_.local_control_channel;
+    conductor_context.local_control_stream_id = config_.local_control_stream_id;
     conductor_context.aeron_dir = config_.aeron_dir;
     conductor_context.connect_timeout_ms = config_.connect_timeout_ms;
     conductor_context.session_liveness_check_interval_ms = config_.session_liveness_check_interval_ms;

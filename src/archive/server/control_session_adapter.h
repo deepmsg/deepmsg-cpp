@@ -304,6 +304,13 @@ public:
     void register_session(std::int64_t control_session_id, const void* image, ControlSession* session);
     void unregister_session(std::int64_t control_session_id);
 
+    /// Drop every session pointer (archive teardown, before the sessions are
+    /// destroyed) so a late unavailable-image callback cannot dereference them.
+    void clear_sessions() noexcept
+    {
+        sessions_.clear();
+    }
+
     /// `ArchiveConductor.onUnavailableImage` (`ArchiveConductor.java:255`): the
     /// session's image went away, so every session created on it is aborted.
     void abort_sessions_for_image(const void* image, std::string_view reason);

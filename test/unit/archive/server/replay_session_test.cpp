@@ -774,6 +774,24 @@ TEST(ReplaySessionTest, anUnexpectedFrameTypeStallsAndThenFailsWithTheBound)
     EXPECT_EQ(ReplaySession::State::inactive, session->state());
 }
 
+TEST(ReplaySessionTest, anErroredSessionReachesDoneOnTheNextPass)
+{
+    const Recording recording = build_recording(1, 99);
+    Fixture fixture(recording);
+    FixedChecksum checksum{100};
+
+    auto session = fixture.make(nullptr, &checksum);
+    session->do_work();
+    ASSERT_EQ(ReplaySession::State::inactive, session->state());
+    ASSERT_FALSE(session->error_message().empty());
+
+    // The reference's throw only skips the rest of that pass; the next pass must
+    // still close the segment and report DONE (otherwise the conductor never
+    // sends the pending ERROR response).
+    session->do_work();
+    EXPECT_TRUE(session->is_done());
+}
+
 TEST(ReplaySessionTest, aNormalPassRaisesNoUnexpectedFrameWarning)
 {
     const Recording recording = build_recording(1);

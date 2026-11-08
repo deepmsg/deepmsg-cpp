@@ -197,6 +197,31 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
             axc::core::make_error(axc::core::ErrorCode::io_error, "control subscription did not complete"));
     }
 
+    // `ArchiveConductor.java:238-239`: the local (privileged) control channel.
+    auto local_subscription =
+        client_.add_subscription(context_.local_control_channel, context_.local_control_stream_id, handlers);
+    for (int attempt = 0; attempt < 5000; attempt++)
+    {
+        auto polled = local_subscription.poll();
+        if (!polled)
+        {
+            return std::unexpected(polled.error());
+        }
+        if (polled->has_value())
+        {
+            local_control_subscription_ = std::move(**polled);
+            break;
+        }
+        (void)client_.do_work();
+        ::usleep(1000);
+    }
+
+    if (!local_control_subscription_)
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::io_error, "local control subscription did not complete"));
+    }
+
     cached_clock_.update(epoch_clock_.time_ms());
 
     // `Archive.Context.conclude` (`Archive.java:1570-1700`): the catalog and the
@@ -224,6 +249,17 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     }
 
     const auto archive_id_key = ArchiveCounters::archive_id_key(context_.archive_id);
+
+    // `Archive.java:1626-1631`: the archive control sessions count.
+    auto control_sessions =
+        allocate_counter(ArchiveCounters::CONTROL_SESSIONS_TYPE_ID,
+                         std::span<const std::uint8_t>{archive_id_key.data(), archive_id_key.size()},
+                         ArchiveCounters::make_label(ArchiveCounters::CONTROL_SESSIONS_NAME, context_.archive_id));
+    if (!control_sessions)
+    {
+        return std::unexpected(control_sessions.error());
+    }
+    control_sessions_counter_.emplace(std::move(*control_sessions));
 
     auto max_write_time =
         allocate_counter(ArchiveCounters::MAX_WRITE_TIME_TYPE_ID,
@@ -375,13 +411,19 @@ std::expected<axc::core::PositionWriter, axc::core::Error> ArchiveConductor::all
 
 void ArchiveConductor::close()
 {
-    // Sessions first: their writers own segment files and their counters.
+    // The subscriptions close asynchronously and may deliver an
+    // unavailable-image callback, so the adapter must forget the sessions
+    // before they are destroyed.
+    adapter_.clear_sessions();
+    local_control_subscription_.reset();
+    control_subscription_.reset();
+
+    // Sessions next: their writers own segment files and their counters.
     recorder_.close();
     replayer_.close();
     replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
     sessions_ = SessionWorker<ControlSession>{};
     publications_.clear();
-    control_subscription_.reset();
     if (nullptr != control_assembler_)
     {
         (void)aeron_image_controlled_fragment_assembler_delete(control_assembler_);
@@ -393,6 +435,22 @@ void ArchiveConductor::close()
     }
     events_.reset();
     events_publication_.reset();
+
+    // Everything that owns a client resource must be released before the client
+    // itself: `aeron_close` deletes every registration, and a later close of the
+    // same handle is a use-after-free.
+    recording_subscriptions_.clear();
+    recording_subscription_keys_.clear();
+    recording_subscription_order_.clear();
+    pending_recording_subscriptions_.clear();
+    pending_control_counters_.clear();
+    pending_publications_.clear();
+    control_session_counters_.clear();
+    replay_session_by_id_.clear();
+    replay_tokens_.clear();
+    counter_by_id_.clear();
+
+    control_sessions_counter_.reset();
     recording_sessions_counter_.reset();
     replay_session_counter_.reset();
     max_read_time_counter_.reset();
@@ -428,6 +486,12 @@ int ArchiveConductor::do_work()
             adapter_.unregister_session(session.session_id());
             sessions_by_id_.erase(session.session_id());
             remove_replay_tokens_for_session(session.session_id());
+
+            // `ControlSessionAdapter.removeControlSession` (`:1167-1171`).
+            if (control_sessions_counter_)
+            {
+                control_sessions_counter_->set_value(control_sessions_counter_->value() - 1);
+            }
             control_session_counters_.erase(session.session_id());
             for (std::size_t index = 0; index < pending_control_counters_.size();)
             {
@@ -476,28 +540,34 @@ int ArchiveConductor::do_work()
 
 int ArchiveConductor::poll_control_subscription()
 {
-    if (!control_subscription_)
-    {
-        return 0;
-    }
-
     int work_count = 0;
-    const int image_count = aeron_subscription_image_count(control_subscription_.get());
-    for (int index = 0; index < image_count; index++)
+
+    // `ArchiveConductor.doWork` polls both subscriptions through the adapter
+    // (`:363-395`); the local one is privileged and shares the same sessions map.
+    aeron_subscription_t* subscriptions[] = {control_subscription_.get(), local_control_subscription_.get()};
+    for (aeron_subscription_t* subscription : subscriptions)
     {
-        aeron_image_t* image =
-            aeron_subscription_image_at_index(control_subscription_.get(), static_cast<std::size_t>(index));
-        if (nullptr == image)
+        if (nullptr == subscription)
         {
             continue;
         }
 
-        current_control_image_ = image;
-        work_count +=
-            aeron_image_controlled_poll(image, &aeron_image_controlled_fragment_assembler_handler, control_assembler_,
-                                        static_cast<std::size_t>(context_.fragment_limit));
-        current_control_image_ = nullptr;
-        aeron_image_release(image);
+        const int image_count = aeron_subscription_image_count(subscription);
+        for (int index = 0; index < image_count; index++)
+        {
+            aeron_image_t* image = aeron_subscription_image_at_index(subscription, static_cast<std::size_t>(index));
+            if (nullptr == image)
+            {
+                continue;
+            }
+
+            current_control_image_ = image;
+            work_count +=
+                aeron_image_controlled_poll(image, &aeron_image_controlled_fragment_assembler_handler,
+                                            control_assembler_, static_cast<std::size_t>(context_.fragment_limit));
+            current_control_image_ = nullptr;
+            aeron_image_release(image);
+        }
     }
 
     return work_count;
@@ -593,6 +663,12 @@ ControlSession* ArchiveConductor::on_connect_request(const ConnectRequest& reque
     sessions_by_id_[config.control_session_id] = raw_session;
     pending_publications_.push_back(PendingPublication{config.control_session_id, async});
     sessions_.add(std::move(session));
+
+    // `ArchiveConductor.java:519`: the control sessions counter.
+    if (control_sessions_counter_)
+    {
+        control_sessions_counter_->set_value(control_sessions_counter_->value() + 1);
+    }
 
     authenticator_->on_connect_request(config.control_session_id, request.encoded_credentials, cached_clock_.time_ms());
 

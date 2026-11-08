@@ -106,23 +106,24 @@ int ReplaySession::do_work()
     if (State::init == state_)
     {
         work_count += init();
-    }
 
-    // The reference throws out of doWork on error, skipping the INACTIVE
-    // cleanup in this pass (`raiseError`, `:532-542`).
-    if (!error_message_.empty())
-    {
-        return work_count;
+        // The reference throws out of doWork on error, skipping the INACTIVE
+        // cleanup in this pass (`raiseError`, `:532-542`). The next pass still
+        // has to reach DONE, so the guard is per phase, not global.
+        if (!error_message_.empty())
+        {
+            return work_count;
+        }
     }
 
     if (State::replay == state_)
     {
         work_count += replay();
-    }
 
-    if (!error_message_.empty())
-    {
-        return work_count;
+        if (!error_message_.empty())
+        {
+            return work_count;
+        }
     }
 
     if (State::inactive == state_)

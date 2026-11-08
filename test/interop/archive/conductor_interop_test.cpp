@@ -88,6 +88,11 @@ protected:
         context.aeron_dir = aeron_dir_;
         context.control_channel = "aeron:ipc";
         context.control_stream_id = CONTROL_STREAM_ID;
+        // The archive also serves its privileged local control channel; keep it
+        // on a different stream so the same request cannot arrive twice
+        // (`Archive.java` keeps them apart by media: UDP vs IPC).
+        context.local_control_channel = "aeron:ipc?term-length=64k";
+        context.local_control_stream_id = CONTROL_STREAM_ID + 2;
         context.archive_id = 42;
         context.authenticator = authenticator;
 
@@ -213,7 +218,8 @@ TEST_F(ConductorInteropTest, theClientConnectsWithTheDefaultAuthenticator)
     EXPECT_EQ(1u, conductor->session_count());
 
     // The client asked for the archive id once the connect completed.
-    EXPECT_TRUE(conductor->warnings().empty());
+    EXPECT_TRUE(conductor->warnings().empty())
+        << (conductor->warnings().empty() ? std::string{} : conductor->warnings().back());
 }
 
 TEST_F(ConductorInteropTest, theClientAuthenticatesThroughAChallenge)

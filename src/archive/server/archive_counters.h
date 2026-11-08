@@ -25,7 +25,8 @@ namespace deepmsg::archive::server
 class ArchiveCounters
 {
 public:
-    /// `AeronCounters.java:771-812`.
+    /// `AeronCounters.java:751-812`.
+    static constexpr std::int32_t CONTROL_SESSIONS_TYPE_ID = 102;
     static constexpr std::int32_t MAX_WRITE_TIME_TYPE_ID = 105;
     static constexpr std::int32_t TOTAL_WRITE_BYTES_TYPE_ID = 106;
     static constexpr std::int32_t TOTAL_WRITE_TIME_TYPE_ID = 107;
@@ -37,6 +38,7 @@ public:
     /// `AeronCounters.ARCHIVE_CONTROL_SESSION_TYPE_ID` (`AeronCounters.java:826`).
     static constexpr std::int32_t CONTROL_SESSION_TYPE_ID = 113;
 
+    static constexpr std::string_view CONTROL_SESSIONS_NAME{"Archive Control Sessions"};
     static constexpr std::string_view MAX_WRITE_TIME_NAME{"archive-recorder max write time in ns"};
     static constexpr std::string_view TOTAL_WRITE_BYTES_NAME{"archive-recorder total write bytes"};
     static constexpr std::string_view TOTAL_WRITE_TIME_NAME{"archive-recorder total write time in ns"};
