@@ -35,4 +35,14 @@ struct RecordingSettings
 /// suffix (`64k`, `128m`).
 [[nodiscard]] std::expected<std::int64_t, axc::core::Error> parse_size(std::string_view value) noexcept;
 
+/// `SystemUtil.parseDuration`: a non-negative decimal integer with an optional
+/// `ns` / `us` / `ms` / `s` suffix; a bare number is nanoseconds, and a lone
+/// `m`/`u`/`n` is milliseconds/microseconds/nanoseconds (Agrona 2.7.0, verified
+/// against its bytecode).
+[[nodiscard]] std::expected<std::int64_t, axc::core::Error> parse_duration_ns(std::string_view value) noexcept;
+
+/// `SystemUtil.formatDuration` (`SystemUtil.java`): whole seconds, milliseconds
+/// or microseconds when exactly divisible, otherwise nanoseconds; `0` is `0ns`.
+[[nodiscard]] std::string format_duration_ns(std::int64_t value);
+
 }  // namespace deepmsg::archive::server
