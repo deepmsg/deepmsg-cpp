@@ -49,6 +49,7 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/archive_launch_test.cpp
         archive/server/recording_pos_test.cpp
         archive/server/recording_session_test.cpp
+        archive/server/recording_events_test.cpp
     DEPS
         axc_archive_server
         GTest::gtest_main)

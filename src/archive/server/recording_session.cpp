@@ -100,6 +100,13 @@ int RecordingSession::do_work()
     {
         set_state(State::stopped, "");
         (void)writer_.close();
+
+        if (nullptr != config_.events)
+        {
+            // `RecordingSession.java:146-156`: after the writer is closed.
+            config_.events->stopped(config_.recording_id, config_.join_position, position_->value());
+        }
+
         work_count++;
     }
 
@@ -137,6 +144,12 @@ int RecordingSession::init()
         return 1;
     }
 
+    if (nullptr != config_.events)
+    {
+        config_.events->started(config_.recording_id, config_.join_position, config_.session_id, config_.stream_id,
+                                config_.original_channel, config_.source_identity);
+    }
+
     set_state(State::recording, "");
     return 1;
 }
@@ -157,6 +170,19 @@ int RecordingSession::record()
     if (work_count > 0)
     {
         position_->set_value(writer_.position());
+
+        if (nullptr != config_.events)
+        {
+            // `RecordingSession.java:243-254`: only a successful progress event
+            // advances `progressEventPosition`.
+            const std::int64_t recorded_position = writer_.position();
+            if (progress_event_position_ < recorded_position &&
+                config_.events->progress(config_.recording_id, config_.join_position, recorded_position))
+            {
+                progress_event_position_ = recorded_position;
+            }
+        }
+
         return work_count;
     }
 

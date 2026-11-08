@@ -205,6 +205,38 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     recording_sessions_counter_.emplace(std::move(*recording_sessions));
 
     recorder_.set_counters(&*total_write_bytes_counter_, &*total_write_time_counter_, &*max_write_time_counter_);
+
+    if (context_.recording.recording_events_enabled)
+    {
+        // `ArchiveConductor.java:224-225` and `Archive.Context` validation in
+        // `parse_recording_settings` (channel required when enabled).
+        auto async = client_.add_exclusive_publication(context_.recording.recording_events_channel,
+                                                       context_.recording.recording_events_stream_id);
+        for (int attempt = 0; attempt < 5000; attempt++)
+        {
+            auto polled = async.poll();
+            if (!polled)
+            {
+                return std::unexpected(polled.error());
+            }
+            if (polled->has_value())
+            {
+                auto handle = std::move(**polled);
+                events_publication_ = std::make_unique<DeepmsgExclusivePublication>(handle.release());
+                events_.emplace(*events_publication_);
+                break;
+            }
+            (void)client_.do_work();
+            ::usleep(1000);
+        }
+
+        if (!events_)
+        {
+            return std::unexpected(
+                axc::core::make_error(axc::core::ErrorCode::io_error, "recording events publication did not complete"));
+        }
+    }
+
     return {};
 }
 
@@ -243,6 +275,8 @@ void ArchiveConductor::close()
     {
         (void)catalog_.close();
     }
+    events_.reset();
+    events_publication_.reset();
     recording_sessions_counter_.reset();
     total_write_time_counter_.reset();
     total_write_bytes_counter_.reset();
@@ -820,6 +854,7 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     config.original_channel = subscription.original_channel;
     config.stripped_channel = subscription.stripped_channel;
     config.source_identity = source_identity;
+    config.events = events_ ? &*events_ : nullptr;
 
     RecordingWriter writer(recording_id, summary.start_position, summary.segment_file_length, term_buffer_length,
                            constants.join_position, std::move(writer_context), &recorder_);
@@ -1161,6 +1196,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     config.original_channel = subscription.original_channel;
     config.stripped_channel = subscription.stripped_channel;
     config.source_identity = source_identity;
+    config.events = events_ ? &*events_ : nullptr;
 
     RecordingWriter writer(*recording_id, constants.join_position, segment_file_length, term_buffer_length,
                            constants.join_position, std::move(writer_context), &recorder_);

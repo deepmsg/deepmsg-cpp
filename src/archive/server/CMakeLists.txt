@@ -9,6 +9,7 @@ axc_add_library(axc_archive_server
         channel_uri.cpp
         recording_pos.cpp
         recording_session.cpp
+        recording_events.cpp
         recorder.cpp
         deepmsg_response_publication.cpp
         control_session_adapter.cpp

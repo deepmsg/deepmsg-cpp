@@ -9,6 +9,7 @@
 
 #include <aeronc.h>
 
+#include "archive/server/recording_events.h"
 #include "archive/server/recording_writer.h"
 #include "core/counters/counter_target.h"
 #include "core/error/error.h"
@@ -96,6 +97,9 @@ public:
         /// Identity only: compared by the conductor, never dereferenced after
         /// `abort`.
         aeron_image_t* image{nullptr};
+        /// nullptr ⇒ recording events are disabled (`ctx.recordingEventsProxy()`
+        /// is null in the reference too).
+        RecordingEvents* events{nullptr};
         bool auto_stop{false};
         std::string original_channel;
         std::string stripped_channel;
@@ -193,6 +197,8 @@ private:
     State state_{State::init};
     std::string abort_reason_;
     std::string error_message_;
+    /// `RecordingSession.progressEventPosition` (`RecordingSession.java:79`).
+    std::int64_t progress_event_position_{0};
     bool aborted_{false};
 };
 

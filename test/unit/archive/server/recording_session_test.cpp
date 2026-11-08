@@ -14,7 +14,11 @@
 
 #include "archive/server/frame_layout.h"
 #include "archive/server/recorder.h"
+#include "archive/server/recording_events.h"
 #include "archive/server/recording_session.h"
+#include "io_aeron_archive_codecs/RecordingProgress.h"
+#include "io_aeron_archive_codecs/RecordingStarted.h"
+#include "io_aeron_archive_codecs/RecordingStopped.h"
 
 namespace
 {
@@ -24,10 +28,12 @@ using deepmsg::archive::server::DATA_HEADER_LENGTH;
 using deepmsg::archive::server::FRAME_LENGTH_OFFSET;
 using deepmsg::archive::server::FRAME_TYPE_OFFSET;
 using deepmsg::archive::server::Recorder;
+using deepmsg::archive::server::RecordingEvents;
 using deepmsg::archive::server::RecordingImage;
 using deepmsg::archive::server::RecordingSession;
 using deepmsg::archive::server::RecordingWriter;
 using deepmsg::archive::server::RecordingWriterContext;
+using deepmsg::archive::server::ResponsePublication;
 using deepmsg::archive::server::SESSION_ID_OFFSET;
 using deepmsg::archive::server::STREAM_ID_OFFSET;
 using deepmsg::archive::server::TERM_ID_OFFSET;
@@ -47,6 +53,38 @@ public:
 
 private:
     std::int64_t value_{0};
+};
+
+class FakeEventsPublication final : public ResponsePublication
+{
+public:
+    [[nodiscard]] OfferResult offer(std::span<const std::uint8_t> buffer) override
+    {
+        offered.assign(buffer.begin(), buffer.end());
+        return 1;
+    }
+
+    [[nodiscard]] OfferResult try_claim(std::int32_t length, Claim& claim) override
+    {
+        claim_buffer.assign(static_cast<std::size_t>(length), 0);
+        claim.buffer = claim_buffer;
+        claim.commit_fn = nullptr;
+        claim.context = nullptr;
+        return 1;
+    }
+
+    [[nodiscard]] bool is_connected() const override
+    {
+        return true;
+    }
+
+    [[nodiscard]] std::int32_t max_payload_length() const override
+    {
+        return 1408;
+    }
+
+    std::vector<std::uint8_t> offered;
+    std::vector<std::uint8_t> claim_buffer;
 };
 
 class FakeImage final : public RecordingImage
@@ -267,6 +305,68 @@ TEST_F(RecordingSessionTest, theRecorderPublishesOnlyOnAPassThatDidWork)
     EXPECT_EQ(128, bytes.value());
     EXPECT_EQ(50, total_time.value());
     EXPECT_EQ(50, max_time.value());
+}
+
+TEST_F(RecordingSessionTest, emitsStartedProgressAndStoppedEvents)
+{
+    FakeEventsPublication publication;
+    RecordingEvents events(publication);
+
+    auto image_owner = std::make_unique<FakeImage>(7, 1);
+    FakeImage& image = *image_owner;
+    image.add_block(32);
+
+    RecordingWriterContext context;
+    context.archive_dir = archive_dir_.string();
+    RecordingWriter writer(1, 0, 4096, 1024, 0, std::move(context), nullptr);
+
+    RecordingSession::Config config;
+    config.recording_id = 1;
+    config.join_position = 0;
+    config.segment_length = 4096;
+    config.term_length = 1024;
+    config.block_length_limit = 1024;
+    config.original_channel = "aeron:udp?endpoint=localhost:3333";
+    config.source_identity = "aeron:ipc";
+    config.session_id = 7;
+    config.stream_id = 33;
+    config.events = &events;
+
+    RecordingSession session(config, std::move(writer), std::make_unique<FakeCounter>(), std::move(image_owner));
+
+    // INIT and RECORDING in one pass: started, then progress for the block.
+    session.do_work();
+
+    deepmsg::archive::server::archive_codecs::RecordingStarted started;
+    started.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(publication.offered.data())), 8,
+                          deepmsg::archive::server::archive_codecs::RecordingStarted::sbeBlockLength(),
+                          deepmsg::archive::server::archive_codecs::RecordingStarted::sbeSchemaVersion(),
+                          publication.offered.size());
+    EXPECT_EQ(1, started.recordingId());
+    EXPECT_EQ(0, started.startPosition());
+    EXPECT_EQ(7, started.sessionId());
+    EXPECT_EQ(33, started.streamId());
+
+    std::vector<std::uint8_t> progress_bytes = publication.claim_buffer;
+    deepmsg::archive::server::archive_codecs::RecordingProgress progress;
+    progress.wrapForDecode(reinterpret_cast<char*>(progress_bytes.data()), 8,
+                           deepmsg::archive::server::archive_codecs::RecordingProgress::sbeBlockLength(),
+                           deepmsg::archive::server::archive_codecs::RecordingProgress::sbeSchemaVersion(),
+                           progress_bytes.size());
+    EXPECT_EQ(32, progress.position());
+
+    image.end_of_stream();
+    session.do_work();
+    ASSERT_TRUE(session.is_done());
+
+    deepmsg::archive::server::archive_codecs::RecordingStopped stopped;
+    stopped.wrapForDecode(reinterpret_cast<char*>(publication.claim_buffer.data()), 8,
+                          deepmsg::archive::server::archive_codecs::RecordingStopped::sbeBlockLength(),
+                          deepmsg::archive::server::archive_codecs::RecordingStopped::sbeSchemaVersion(),
+                          publication.claim_buffer.size());
+    EXPECT_EQ(1, stopped.recordingId());
+    EXPECT_EQ(0, stopped.startPosition());
+    EXPECT_EQ(32, stopped.stopPosition());
 }
 
 }  // namespace

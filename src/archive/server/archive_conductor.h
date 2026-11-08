@@ -21,6 +21,7 @@
 #include "archive/server/deepmsg_response_publication.h"
 #include "archive/server/epoch_clock_source.h"
 #include "archive/server/recorder.h"
+#include "archive/server/recording_events.h"
 #include "archive/server/session_worker.h"
 #include "core/counters/counter_target.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -227,6 +228,11 @@ private:
 
     // Recording (A2b).
     Catalog catalog_;
+    /// `ArchiveConductor.java:224-225`: one events publication for every
+    /// recording session (null when `aeron.archive.recording.events.enabled`
+    /// is false).
+    std::unique_ptr<DeepmsgExclusivePublication> events_publication_;
+    std::optional<RecordingEvents> events_;
     Recorder recorder_;
     std::optional<axc::core::PositionWriterTarget> max_write_time_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_bytes_counter_;
