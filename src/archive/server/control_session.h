@@ -137,6 +137,24 @@ public:
     void send_signal(std::int64_t correlation_id, std::int64_t recording_id, std::int64_t subscription_id,
                      std::int64_t position, archive_codecs::RecordingSignal::Value signal);
 
+    /// `ControlSession.sendDescriptor` (`ControlSession.java:747-761`): listing
+    /// sessions retry on the next pass when this returns false.
+    [[nodiscard]] bool send_descriptor(std::int64_t correlation_id, std::span<const std::uint8_t> descriptor);
+    [[nodiscard]] bool send_subscription_descriptor(std::int64_t correlation_id, std::int64_t subscription_id,
+                                                    std::int32_t stream_id, std::string_view channel);
+    void send_recording_unknown(std::int64_t correlation_id, std::int64_t recording_id);
+    void send_subscription_unknown(std::int64_t correlation_id);
+
+    [[nodiscard]] bool has_active_listing() const noexcept
+    {
+        return active_listing_;
+    }
+
+    void set_active_listing(bool value) noexcept
+    {
+        active_listing_ = value;
+    }
+
     [[nodiscard]] std::size_t pending_responses() const noexcept
     {
         return sync_response_queue_.size();
@@ -194,6 +212,7 @@ private:
     ResponsePublication* control_publication_{nullptr};
     State state_{State::init};
     std::int64_t correlation_id_{0};
+    bool active_listing_{false};
     std::int64_t resend_deadline_ms_{0};
     std::int64_t activity_deadline_ms_{0};
     std::int64_t session_liveness_check_deadline_ms_{0};

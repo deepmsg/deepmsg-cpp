@@ -110,6 +110,19 @@ public:
                                    archive_codecs::RecordingSignal::Value signal,
                                    ResponsePublication& publication) noexcept;
 
+    /// `ControlResponseProxy.sendDescriptor` (`ControlResponseProxy.java:54-89`):
+    /// the `RecordingDescriptor` message is the catalog frame body with the
+    /// archive's own control session id and correlation id in front of it.
+    [[nodiscard]] bool send_descriptor(std::int64_t control_session_id, std::int64_t correlation_id,
+                                       std::span<const std::uint8_t> descriptor, ResponsePublication& publication,
+                                       SessionAbort& session);
+
+    /// `ControlResponseProxy.sendSubscriptionDescriptor` (`:91-135`).
+    [[nodiscard]] bool send_subscription_descriptor(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                    std::int64_t subscription_id, std::int32_t stream_id,
+                                                    std::string_view channel, ResponsePublication& publication,
+                                                    SessionAbort& session);
+
     /// Bytes of the last encoded message (test observable).
     [[nodiscard]] std::span<const std::uint8_t> last_message() const noexcept
     {

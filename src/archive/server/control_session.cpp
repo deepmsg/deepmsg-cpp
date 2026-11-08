@@ -364,6 +364,51 @@ void ControlSession::send_signal(std::int64_t correlation_id, std::int64_t recor
     }
 }
 
+bool ControlSession::send_descriptor(std::int64_t correlation_id, std::span<const std::uint8_t> descriptor)
+{
+    // `ControlSession.sendDescriptor` (`ControlSession.java:747-761`).
+    const bool sent =
+        proxy_.send_descriptor(config_.control_session_id, correlation_id, descriptor, *control_publication_, *this);
+    if (!sent)
+    {
+        update_activity_deadline(clock_.time_ms());
+    }
+    else
+    {
+        activity_deadline_ms_ = NULL_VALUE;
+    }
+    return sent;
+}
+
+bool ControlSession::send_subscription_descriptor(std::int64_t correlation_id, std::int64_t subscription_id,
+                                                  std::int32_t stream_id, std::string_view channel)
+{
+    // `ControlSession.sendSubscriptionDescriptor` (`ControlSession.java:763-777`).
+    const bool sent = proxy_.send_subscription_descriptor(config_.control_session_id, correlation_id, subscription_id,
+                                                          stream_id, channel, *control_publication_, *this);
+    if (!sent)
+    {
+        update_activity_deadline(clock_.time_ms());
+    }
+    else
+    {
+        activity_deadline_ms_ = NULL_VALUE;
+    }
+    return sent;
+}
+
+void ControlSession::send_recording_unknown(std::int64_t correlation_id, std::int64_t recording_id)
+{
+    // `ControlSession.sendRecordingUnknown` (`ControlSession.java:703-706`).
+    send_response(correlation_id, recording_id, archive_codecs::ControlResponseCode::RECORDING_UNKNOWN, "");
+}
+
+void ControlSession::send_subscription_unknown(std::int64_t correlation_id)
+{
+    // `ControlSession.sendSubscriptionUnknown` (`ControlSession.java:708-711`).
+    send_response(correlation_id, 0, archive_codecs::ControlResponseCode::SUBSCRIPTION_UNKNOWN, "");
+}
+
 void ControlSession::queue_response(std::int64_t correlation_id, std::int64_t relevant_id,
                                     archive_codecs::ControlResponseCode::Value code, std::string_view message)
 {

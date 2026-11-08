@@ -8,7 +8,11 @@
 #include "io_aeron_archive_codecs/BooleanType.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
+#include "io_aeron_archive_codecs/ExtendRecordingRequest2.h"
+#include "io_aeron_archive_codecs/FindLastMatchingRecordingRequest.h"
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MessageHeader.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
@@ -426,6 +430,138 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (ControlSession::State::active == request.session->state())
             {
                 handler_.on_get_max_recorded_position(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_FIND_LAST_MATCHING_RECORDING:
+        {
+            // `ControlSessionAdapter.java:458-487`.
+            archive_codecs::FindLastMatchingRecordingRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            FindLastMatchingRecordingRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.channel_fragment) || !reader.at_end())
+            {
+                handler_.log_warning("malformed FindLastMatchingRecordingRequest");
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.min_recording_id = decoder.minRecordingId();
+            request.session_id = decoder.sessionId();
+            request.stream_id = decoder.streamId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_find_last_matching_recording(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_LIST_RECORDING:
+        {
+            // `ControlSessionAdapter.java:225-232`.
+            archive_codecs::ListRecordingRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_list_recording(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_LIST_RECORDING_SUBSCRIPTIONS:
+        {
+            // `ControlSessionAdapter.java:488-508`.
+            archive_codecs::ListRecordingSubscriptionsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ListRecordingSubscriptionsRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.channel_fragment) || !reader.at_end())
+            {
+                handler_.log_warning("malformed ListRecordingSubscriptionsRequest");
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.pseudo_index = decoder.pseudoIndex();
+            request.subscription_count = decoder.subscriptionCount();
+            request.apply_stream_id = archive_codecs::BooleanType::TRUE == decoder.applyStreamId();
+            request.stream_id = decoder.streamId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_list_recording_subscriptions(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_EXTEND_RECORDING_2:
+        {
+            // `ControlSessionAdapter.java:917-943`.
+            archive_codecs::ExtendRecordingRequest2 decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ExtendRecordingRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.channel) || !reader.at_end())
+            {
+                handler_.log_warning("malformed ExtendRecordingRequest2");
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+            request.stream_id = decoder.streamId();
+            request.source_location = decoder.sourceLocationRaw();
+            request.auto_stop = archive_codecs::BooleanType::TRUE == decoder.autoStop();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_extend_recording(request);
             }
             return 1;
         }

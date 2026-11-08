@@ -3,10 +3,14 @@
 #include <algorithm>
 #include <cstring>
 
+#include "archive/server/catalog.h"
+#include "io_aeron_archive_codecs/RecordingDescriptor.h"
+#include "io_aeron_archive_codecs/RecordingSubscriptionDescriptor.h"
+
 namespace deepmsg::archive::server
 {
 
-ControlResponseProxy::ControlResponseProxy() : buffer_(4096, 0) {}
+ControlResponseProxy::ControlResponseProxy() : buffer_(64 * 1024, 0) {}
 
 bool ControlResponseProxy::send_response(std::int64_t control_session_id, std::int64_t correlation_id,
                                          std::int64_t relevant_id, archive_codecs::ControlResponseCode::Value code,
@@ -90,6 +94,64 @@ bool ControlResponseProxy::send_signal(std::int64_t control_session_id, std::int
     }
 
     return false;
+}
+
+bool ControlResponseProxy::send_descriptor(std::int64_t control_session_id, std::int64_t correlation_id,
+                                           std::span<const std::uint8_t> descriptor, ResponsePublication& publication,
+                                           SessionAbort& session)
+{
+    // `ControlResponseProxy.sendDescriptor` (`ControlResponseProxy.java:54-89`):
+    // the message is the SBE header + the two ids + the catalog descriptor body
+    // (the catalog's own 32-byte `RecordingDescriptorHeader` is dropped).
+    // The catalog body carries `controlSessionId` + `correlationId` as its
+    // first two (zero) fields; the message replaces them with the archive's
+    // values, so the copy starts at `recordingId`
+    // (`DESCRIPTOR_CONTENT_OFFSET = RecordingDescriptorHeader.BLOCK_LENGTH +
+    // recordingIdEncodingOffset`, `ControlResponseProxy.java:42-46`).
+    const std::int32_t content_length = Catalog::descriptor_length(descriptor);
+    const auto recording_id_offset =
+        static_cast<std::int32_t>(archive_codecs::RecordingDescriptor::recordingIdEncodingOffset());
+    const auto source_offset = Catalog::DESCRIPTOR_HEADER_LENGTH + recording_id_offset;
+    if (content_length <= recording_id_offset || descriptor.size() < static_cast<std::size_t>(source_offset))
+    {
+        return false;
+    }
+    const auto copy_length = static_cast<std::size_t>(content_length - recording_id_offset);
+
+    archive_codecs::RecordingDescriptor encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer_.data()), 0, buffer_.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id);
+
+    // `encodedLength()` is the whole fixed block, not the two ids just written;
+    // the descriptor body follows the ids directly
+    // (`DESCRIPTOR_PREFIX_LENGTH`, `ControlResponseProxy.java:42`).
+    const auto content_offset = static_cast<std::size_t>(MESSAGE_HEADER_LENGTH) + 2 * sizeof(std::int64_t);
+    const auto length = content_offset + copy_length;
+    if (length > buffer_.size())
+    {
+        return false;
+    }
+
+    std::memcpy(buffer_.data() + content_offset, descriptor.data() + source_offset, copy_length);
+
+    return send(publication, session, static_cast<std::int32_t>(length));
+}
+
+bool ControlResponseProxy::send_subscription_descriptor(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                        std::int64_t subscription_id, std::int32_t stream_id,
+                                                        std::string_view channel, ResponsePublication& publication,
+                                                        SessionAbort& session)
+{
+    // `ControlResponseProxy.sendSubscriptionDescriptor` (`ControlResponseProxy.java:91-135`).
+    archive_codecs::RecordingSubscriptionDescriptor encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer_.data()), 0, buffer_.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .subscriptionId(subscription_id)
+        .streamId(stream_id);
+    encoder.putStrippedChannel(channel.data(), static_cast<std::uint32_t>(channel.size()));
+
+    return send(publication, session, MESSAGE_HEADER_LENGTH + static_cast<std::int32_t>(encoder.encodedLength()));
 }
 
 bool ControlResponseProxy::send(ResponsePublication& publication, SessionAbort& session, std::int32_t length)

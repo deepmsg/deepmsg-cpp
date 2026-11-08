@@ -55,10 +55,13 @@ namespace
 /// `ArchiveException` error codes carried as the relevant id of an ERROR
 /// response (`ArchiveException.java:29-84`); `GENERIC` (0) is the two-argument
 /// `send_error_response` overload.
+constexpr std::int64_t ACTIVE_LISTING = 1;
+constexpr std::int64_t ACTIVE_RECORDING = 2;
 constexpr std::int64_t ACTIVE_SUBSCRIPTION = 3;
 constexpr std::int64_t UNKNOWN_SUBSCRIPTION = 4;
 constexpr std::int64_t UNKNOWN_RECORDING = 5;
 constexpr std::int64_t MAX_RECORDINGS = 8;
+constexpr std::int64_t INVALID_EXTENSION = 9;
 constexpr std::int64_t STORAGE_SPACE = 11;
 
 /// `SourceLocation.LOCAL` (`SourceLocation.java`).
@@ -259,12 +262,20 @@ int ArchiveConductor::do_work()
     work_count += poll_pending_publications();
     work_count += poll_pending_recording_subscriptions();
     work_count += poll_recording_images();
+    work_count += poll_listings();
     work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
     work_count += sessions_.do_work(
         [this](ControlSession& session)
         {
             adapter_.unregister_session(session.session_id());
             sessions_by_id_.erase(session.session_id());
+            for (Listing& listing : listings_)
+            {
+                if (listing.control_session_id == session.session_id())
+                {
+                    listing.done = true;
+                }
+            }
             publications_.erase(session.session_id());
 
             // A session that ended before its publication add completed must not
@@ -530,6 +541,7 @@ void ArchiveConductor::on_start_recording(const StartRecordingRequest& request)
     pending.key = *key;
     pending.stripped_channel = *stripped;
     pending.original_channel = request.channel;
+    pending.subscription_channel = subscription_channel;
     pending.stream_id = request.stream_id;
     pending.control_session_id = session->session_id();
     pending.correlation_id = request.correlation_id;
@@ -569,15 +581,19 @@ int ArchiveConductor::poll_pending_recording_subscriptions()
         subscription.key = it->key;
         subscription.stripped_channel = it->stripped_channel;
         subscription.original_channel = it->original_channel;
+        subscription.subscription_channel = it->subscription_channel;
         subscription.stream_id = it->stream_id;
         subscription.control_session_id = it->control_session_id;
         subscription.correlation_id = it->correlation_id;
         subscription.auto_stop = it->auto_stop;
+        subscription.extend = it->extend;
+        subscription.extend_recording_id = it->extend_recording_id;
         subscription.registration_id = handle->registration_id;
         subscription.ref_count = 1;
         subscription.subscription = std::move(handle);
 
         recording_subscription_keys_[subscription.registration_id] = subscription.key;
+        recording_subscription_order_.push_back(subscription.key);
         recording_subscriptions_[subscription.key] = std::move(subscription);
 
         // The OK carries the registration id and is sent before any image
@@ -592,6 +608,427 @@ int ArchiveConductor::poll_pending_recording_subscriptions()
     }
 
     return work_count;
+}
+
+void ArchiveConductor::on_extend_recording(const ExtendRecordingRequest& request)
+{
+    // `ArchiveConductor.extendRecording` (`ArchiveConductor.java:1067-1157`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    const auto max_recordings = static_cast<std::size_t>(context_.recording.max_concurrent_recordings);
+    if (recording_subscriptions_.size() >= max_recordings || recorder_.size() >= max_recordings)
+    {
+        session->send_error_response(
+            request.correlation_id, MAX_RECORDINGS,
+            "max concurrent recordings reached at " + std::to_string(context_.recording.max_concurrent_recordings));
+        return;
+    }
+
+    if (!catalog_.has_recording(request.recording_id))
+    {
+        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
+                                     "unknown recording id: " + std::to_string(request.recording_id));
+        return;
+    }
+
+    const auto summary = catalog_.recording_summary(request.recording_id);
+    if (request.stream_id != summary.stream_id)
+    {
+        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
+                                     "cannot extend recording " + std::to_string(summary.recording_id) +
+                                         " with streamId=" + std::to_string(request.stream_id) +
+                                         " for existing streamId=" + std::to_string(summary.stream_id));
+        return;
+    }
+
+    if (sessions_by_recording_id_.find(request.recording_id) != sessions_by_recording_id_.end())
+    {
+        session->send_error_response(request.correlation_id, ACTIVE_RECORDING,
+                                     "cannot extend active recording " + std::to_string(request.recording_id));
+        return;
+    }
+
+    const std::int64_t usable = axc::core::usable_space(context_.archive_dir);
+    if (usable <= context_.recording.low_storage_space_threshold)
+    {
+        session->send_error_response(
+            request.correlation_id, STORAGE_SPACE,
+            "low storage threshold=" + std::to_string(context_.recording.low_storage_space_threshold) +
+                " <= usableSpace=" + std::to_string(usable));
+        return;
+    }
+
+    auto key = make_key(request.stream_id, request.channel);
+    if (!key)
+    {
+        session->send_error_response(request.correlation_id, std::string{key.error().message.view()});
+        return;
+    }
+
+    if (recording_subscriptions_.find(*key) != recording_subscriptions_.end())
+    {
+        session->send_error_response(
+            request.correlation_id, ACTIVE_SUBSCRIPTION,
+            "recording exists for streamId=" + std::to_string(request.stream_id) + " channel=" + request.channel);
+        return;
+    }
+
+    auto stripped = stripped_channel(request.channel);
+    if (!stripped)
+    {
+        session->send_error_response(request.correlation_id, std::string{stripped.error().message.view()});
+        return;
+    }
+
+    const std::string subscription_channel =
+        SOURCE_LOCATION_LOCAL == request.source_location && is_udp_channel(request.channel) ? "aeron-spy:" + *stripped
+                                                                                            : *stripped;
+
+    PendingRecordingSubscription pending;
+    pending.key = *key;
+    pending.stripped_channel = *stripped;
+    pending.original_channel = request.channel;
+    pending.subscription_channel = subscription_channel;
+    pending.stream_id = request.stream_id;
+    pending.control_session_id = session->session_id();
+    pending.correlation_id = request.correlation_id;
+    pending.auto_stop = request.auto_stop;
+    pending.extend = true;
+    pending.extend_recording_id = request.recording_id;
+    pending.subscription_add = client_.add_subscription(subscription_channel, request.stream_id, {});
+    pending_recording_subscriptions_.push_back(std::move(pending));
+}
+
+int ArchiveConductor::extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image)
+{
+    // `ArchiveConductor.extendRecordingSession` (`ArchiveConductor.java:2059-2170`).
+    const std::int64_t recording_id = subscription.extend_recording_id;
+    auto* control = control_session_by_id(subscription.control_session_id);
+
+    if (sessions_by_recording_id_.find(recording_id) != sessions_by_recording_id_.end())
+    {
+        if (nullptr != control)
+        {
+            control->send_error_response(subscription.correlation_id, ACTIVE_RECORDING,
+                                         "cannot extend active recording " + std::to_string(recording_id));
+        }
+        return 0;
+    }
+
+    if (recorder_.size() >= static_cast<std::size_t>(context_.recording.max_concurrent_recordings))
+    {
+        if (nullptr != control)
+        {
+            control->send_error_response(
+                subscription.correlation_id, MAX_RECORDINGS,
+                "max concurrent recordings reached at " + std::to_string(context_.recording.max_concurrent_recordings));
+        }
+        return 0;
+    }
+
+    const std::int64_t usable = axc::core::usable_space(context_.archive_dir);
+    if (usable <= context_.recording.low_storage_space_threshold)
+    {
+        if (nullptr != control)
+        {
+            control->send_error_response(
+                subscription.correlation_id, STORAGE_SPACE,
+                "low storage threshold=" + std::to_string(context_.recording.low_storage_space_threshold) +
+                    " <= usableSpace=" + std::to_string(usable));
+        }
+        return 0;
+    }
+
+    aeron_image_constants_t constants{};
+    if (0 != aeron_image_constants(image, &constants))
+    {
+        log_warning(std::string{"image constants unavailable: "} + aeron_errmsg());
+        return 0;
+    }
+
+    const auto summary = catalog_.recording_summary(recording_id);
+
+    // `validateImageForExtendRecording` (`ArchiveConductor.java:2190-2242`).
+    struct Field
+    {
+        std::int64_t image_value;
+        std::int64_t summary_value;
+        const char* name;
+    };
+    const Field fields[] = {
+        {constants.join_position, summary.stop_position, "joinPosition"},
+        {constants.initial_term_id, summary.initial_term_id, "initialTermId"},
+        {static_cast<std::int64_t>(constants.term_buffer_length), summary.term_buffer_length, "termBufferLength"},
+        {static_cast<std::int64_t>(constants.mtu_length), summary.mtu_length, "mtuLength"},
+    };
+    for (const Field& field : fields)
+    {
+        if (field.image_value != field.summary_value)
+        {
+            if (nullptr != control)
+            {
+                control->send_error_response(subscription.correlation_id, INVALID_EXTENSION,
+                                             "cannot extend recording " + std::to_string(recording_id) + " image." +
+                                                 field.name + "=" + std::to_string(field.image_value) + " != rec." +
+                                                 field.name + "=" + std::to_string(field.summary_value));
+            }
+            return 0;
+        }
+    }
+
+    const std::string source_identity = nullptr == constants.source_identity ? "" : constants.source_identity;
+    const auto position_key =
+        RecordingPos::make_key(context_.archive_id, recording_id, constants.session_id, source_identity);
+    const auto position_label = RecordingPos::make_label(context_.archive_id, recording_id, constants.session_id,
+                                                         subscription.stream_id, subscription.stripped_channel);
+
+    auto counter = allocate_counter(RecordingPos::TYPE_ID, position_key.view(), position_label);
+    if (!counter)
+    {
+        log_warning(std::string{"recording position counter failed: "} + std::string{counter.error().message.view()});
+        return 0;
+    }
+
+    axc::core::PositionWriter position = std::move(*counter);
+    position.set_release(constants.join_position);
+
+    RecordingWriterContext writer_context;
+    writer_context.archive_dir = context_.archive_dir;
+    writer_context.file_sync_level = context_.recording.file_sync_level;
+    writer_context.archive_dir_fd = -1;
+
+    const auto term_buffer_length = static_cast<std::int32_t>(constants.term_buffer_length);
+
+    RecordingSession::Config config;
+    config.correlation_id = subscription.correlation_id;
+    config.recording_id = recording_id;
+    config.control_session_id = subscription.control_session_id;
+    config.subscription_registration_id = subscription.registration_id;
+    config.start_position = summary.start_position;
+    config.join_position = constants.join_position;
+    config.segment_length = summary.segment_file_length;
+    config.term_length = term_buffer_length;
+    config.block_length_limit = std::min(term_buffer_length, context_.recording.file_io_max_length);
+    config.session_id = constants.session_id;
+    config.stream_id = subscription.stream_id;
+    config.image = image;
+    config.auto_stop = subscription.auto_stop;
+    config.original_channel = subscription.original_channel;
+    config.stripped_channel = subscription.stripped_channel;
+    config.source_identity = source_identity;
+
+    RecordingWriter writer(recording_id, summary.start_position, summary.segment_file_length, term_buffer_length,
+                           constants.join_position, std::move(writer_context), &recorder_);
+
+    auto session = std::make_unique<RecordingSession>(
+        std::move(config), std::move(writer), std::make_unique<axc::core::PositionWriterTarget>(std::move(position)),
+        std::make_unique<AeronRecordingImage>(image));
+
+    (void)catalog_.extend_recording(recording_id, subscription.control_session_id, subscription.correlation_id,
+                                    constants.session_id);
+
+    sessions_by_image_[image] = session.get();
+    sessions_by_recording_id_[recording_id] = session.get();
+    recorder_.add_session(std::move(session));
+    subscription.ref_count++;
+    increment_recording_sessions();
+
+    if (nullptr != control)
+    {
+        control->send_signal(subscription.correlation_id, recording_id, subscription.registration_id,
+                             constants.join_position, archive_codecs::RecordingSignal::EXTEND);
+    }
+
+    return 1;
+}
+
+int ArchiveConductor::poll_listings()
+{
+    int work_count = 0;
+
+    for (auto it = listings_.begin(); it != listings_.end();)
+    {
+        Listing& listing = *it;
+        ControlSession* control = control_session_by_id(listing.control_session_id);
+        if (nullptr == control || control->is_done())
+        {
+            listing.done = true;
+        }
+
+        if (!listing.done && Listing::Kind::recording_by_id == listing.kind)
+        {
+            // `ListRecordingByIdSession.doWork` (`ListRecordingByIdSession.java:72-96`).
+            const auto frame = catalog_.wrap_descriptor(listing.recording_id);
+            if (frame.empty())
+            {
+                control->send_recording_unknown(listing.correlation_id, listing.recording_id);
+                listing.done = true;
+            }
+            else if (control->send_descriptor(listing.correlation_id, frame))
+            {
+                listing.done = true;
+            }
+            work_count++;
+        }
+        else if (!listing.done)
+        {
+            // `ListRecordingSubscriptionsSession.doWork` (`ListRecordingSubscriptionsSession.java:96-131`).
+            std::int32_t cursor = listing.pseudo_index;
+            while (cursor < static_cast<std::int32_t>(recording_subscription_order_.size()) && !listing.done)
+            {
+                const std::string& key = recording_subscription_order_[static_cast<std::size_t>(cursor)];
+                const auto subscription = recording_subscriptions_.find(key);
+                if (subscription == recording_subscriptions_.end())
+                {
+                    cursor++;
+                    continue;
+                }
+
+                const RecordingSubscription& candidate = subscription->second;
+                if ((listing.apply_stream_id && candidate.stream_id != listing.stream_id) ||
+                    candidate.subscription_channel.find(listing.channel_fragment) == std::string::npos)
+                {
+                    cursor++;
+                    continue;
+                }
+
+                if (!control->send_subscription_descriptor(listing.correlation_id, candidate.registration_id,
+                                                           candidate.stream_id, candidate.subscription_channel))
+                {
+                    // Back-pressure: retry the same subscription on a later pass.
+                    work_count++;
+                    break;
+                }
+
+                cursor++;
+                listing.sent++;
+                work_count++;
+                if (listing.sent >= listing.subscription_count)
+                {
+                    listing.done = true;
+                }
+            }
+            listing.pseudo_index = cursor;
+
+            if (!listing.done &&
+                listing.pseudo_index >= static_cast<std::int32_t>(recording_subscription_order_.size()))
+            {
+                control->send_subscription_unknown(listing.correlation_id);
+                listing.done = true;
+                work_count++;
+            }
+        }
+
+        if (listing.done)
+        {
+            if (nullptr != control)
+            {
+                control->set_active_listing(false);
+            }
+            it = listings_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    return work_count;
+}
+
+void ArchiveConductor::on_find_last_matching_recording(const FindLastMatchingRecordingRequest& request)
+{
+    // `ArchiveConductor.findLastMatchingRecording` (`ArchiveConductor.java:742-761`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    if (request.min_recording_id < 0)
+    {
+        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
+                                     "minRecordingId=" + std::to_string(request.min_recording_id) + " < 0");
+        return;
+    }
+
+    const auto fragment = std::span<const std::uint8_t>{
+        reinterpret_cast<const std::uint8_t*>(request.channel_fragment.data()), request.channel_fragment.size()};
+    const std::int64_t recording_id =
+        catalog_.find_last(request.min_recording_id, request.session_id, request.stream_id, fragment);
+
+    // Not found is -1, which the client expects.
+    session->send_ok_response(request.correlation_id, recording_id);
+}
+
+void ArchiveConductor::on_list_recording(const RecordingIdRequest& request)
+{
+    // `ArchiveConductor.listRecording` (`ArchiveConductor.java:688-706`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    if (session->has_active_listing())
+    {
+        session->send_error_response(request.correlation_id, ACTIVE_LISTING, "active listing already in progress");
+        return;
+    }
+
+    if (!catalog_.has_recording(request.recording_id))
+    {
+        session->send_recording_unknown(request.correlation_id, request.recording_id);
+        return;
+    }
+
+    Listing listing;
+    listing.kind = Listing::Kind::recording_by_id;
+    listing.correlation_id = request.correlation_id;
+    listing.control_session_id = session->session_id();
+    listing.recording_id = request.recording_id;
+    listings_.push_back(std::move(listing));
+    session->set_active_listing(true);
+}
+
+void ArchiveConductor::on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request)
+{
+    // `ArchiveConductor.listRecordingSubscriptions` (`ArchiveConductor.java:1266-1299`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    if (session->has_active_listing())
+    {
+        session->send_error_response(request.correlation_id, ACTIVE_LISTING, "active listing already in progress");
+        return;
+    }
+
+    if (request.pseudo_index < 0 ||
+        request.pseudo_index >= static_cast<std::int32_t>(recording_subscriptions_.size()) ||
+        request.subscription_count <= 0)
+    {
+        session->send_subscription_unknown(request.correlation_id);
+        return;
+    }
+
+    Listing listing;
+    listing.kind = Listing::Kind::subscriptions;
+    listing.correlation_id = request.correlation_id;
+    listing.control_session_id = session->session_id();
+    listing.pseudo_index = request.pseudo_index;
+    listing.subscription_count = request.subscription_count;
+    listing.apply_stream_id = request.apply_stream_id;
+    listing.stream_id = request.stream_id;
+    listing.channel_fragment = request.channel_fragment;
+    listings_.push_back(std::move(listing));
+    session->set_active_listing(true);
 }
 
 int ArchiveConductor::poll_recording_images()
@@ -620,7 +1057,8 @@ int ArchiveConductor::poll_recording_images()
             seen.push_back(image);
             if (sessions_by_image_.find(image) == sessions_by_image_.end())
             {
-                work_count += start_recording_session(subscription, image);
+                work_count += subscription.extend ? extend_recording_session(subscription, image)
+                                                  : start_recording_session(subscription, image);
             }
 
             aeron_image_release(image);
@@ -767,6 +1205,9 @@ std::optional<ArchiveConductor::RecordingSubscription> ArchiveConductor::remove_
     RecordingSubscription removed = std::move(subscription->second);
     recording_subscriptions_.erase(subscription);
     recording_subscription_keys_.erase(key);
+    recording_subscription_order_.erase(
+        std::remove(recording_subscription_order_.begin(), recording_subscription_order_.end(), removed.key),
+        recording_subscription_order_.end());
     return removed;
 }
 
@@ -782,6 +1223,9 @@ std::optional<ArchiveConductor::RecordingSubscription> ArchiveConductor::remove_
     RecordingSubscription removed = std::move(subscription->second);
     recording_subscriptions_.erase(subscription);
     recording_subscription_keys_.erase(removed.registration_id);
+    recording_subscription_order_.erase(
+        std::remove(recording_subscription_order_.begin(), recording_subscription_order_.end(), removed.key),
+        recording_subscription_order_.end());
     return removed;
 }
 

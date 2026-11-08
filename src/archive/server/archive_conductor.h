@@ -98,6 +98,10 @@ public:
     void on_get_stop_position(const RecordingIdRequest& request) override;
     void on_get_start_position(const RecordingIdRequest& request) override;
     void on_get_max_recorded_position(const RecordingIdRequest& request) override;
+    void on_find_last_matching_recording(const FindLastMatchingRecordingRequest& request) override;
+    void on_list_recording(const RecordingIdRequest& request) override;
+    void on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request) override;
+    void on_extend_recording(const ExtendRecordingRequest& request) override;
     void log_warning(std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
@@ -132,11 +136,19 @@ private:
         std::string key;
         std::string stripped_channel;
         std::string original_channel;
+        /// The channel the subscription was actually added on (`aeron-spy:` for
+        /// LOCAL + UDP); the subscription descriptor reports this one
+        /// (`ControlResponseProxy.java:91-135`).
+        std::string subscription_channel;
         std::int32_t stream_id{0};
         std::int64_t control_session_id{0};
         std::int64_t correlation_id{0};
         std::int64_t registration_id{0};
         bool auto_stop{false};
+        /// `ExtendRecordingRequest2`: the image extends this recording instead
+        /// of starting a new one (`ArchiveConductor.java:2059-2170`).
+        bool extend{false};
+        std::int64_t extend_recording_id{0};
         int ref_count{0};
         axc::core::SubPtr subscription;
     };
@@ -148,10 +160,16 @@ private:
         std::string key;
         std::string stripped_channel;
         std::string original_channel;
+        /// The channel the subscription was actually added on (`aeron-spy:` for
+        /// LOCAL + UDP); the subscription descriptor reports this one
+        /// (`ControlResponseProxy.java:91-135`).
+        std::string subscription_channel;
         std::int32_t stream_id{0};
         std::int64_t control_session_id{0};
         std::int64_t correlation_id{0};
         bool auto_stop{false};
+        bool extend{false};
+        std::int64_t extend_recording_id{0};
         axc::core::AsyncAdd<axc::core::SubPtr> subscription_add;
     };
 
@@ -169,7 +187,9 @@ private:
     [[nodiscard]] int poll_pending_publications();
     [[nodiscard]] int poll_pending_recording_subscriptions();
     [[nodiscard]] int poll_recording_images();
+    [[nodiscard]] int poll_listings();
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
+    [[nodiscard]] int extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     void close_recording_session(RecordingSession& session);
     void abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason);
     [[nodiscard]] std::optional<RecordingSubscription> remove_recording_subscription(std::int64_t registration_id);
@@ -217,6 +237,35 @@ private:
     std::unordered_map<std::int64_t, std::string> recording_subscription_keys_;
     std::vector<PendingRecordingSubscription> pending_recording_subscriptions_;
     std::unordered_map<aeron_image_t*, RecordingSession*> sessions_by_image_;
+
+    /// A listing in progress (`ListRecordingByIdSession` /
+    /// `ListRecordingSubscriptionsSession`); the control session's
+    /// `active listing` points at it.
+    struct Listing
+    {
+        enum class Kind
+        {
+            recording_by_id,
+            subscriptions
+        };
+
+        Kind kind{Kind::recording_by_id};
+        std::int64_t correlation_id{0};
+        std::int64_t control_session_id{0};
+        std::int64_t recording_id{0};
+        std::int32_t pseudo_index{0};
+        std::int32_t subscription_count{0};
+        std::int32_t stream_id{0};
+        bool apply_stream_id{false};
+        std::string channel_fragment;
+        std::int32_t sent{0};
+        bool done{false};
+    };
+
+    std::vector<Listing> listings_;
+    /// `recording_subscription_by_key_map` iteration order (the reference's
+    /// `pseudoIndex` walks the map).
+    std::vector<std::string> recording_subscription_order_;
     std::unordered_map<std::int64_t, RecordingSession*> sessions_by_recording_id_;
 };
 

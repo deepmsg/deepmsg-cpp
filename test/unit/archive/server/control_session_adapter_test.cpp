@@ -18,7 +18,11 @@
 #include "io_aeron_archive_codecs/BooleanType.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
+#include "io_aeron_archive_codecs/ExtendRecordingRequest2.h"
+#include "io_aeron_archive_codecs/FindLastMatchingRecordingRequest.h"
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
 #include "io_aeron_archive_codecs/SourceLocation.h"
@@ -39,6 +43,9 @@ using deepmsg::archive::server::ControlSession;
 using deepmsg::archive::server::ControlSessionAdapter;
 using deepmsg::archive::server::ControlSessionHandler;
 using deepmsg::archive::server::DefaultAuthenticator;
+using deepmsg::archive::server::ExtendRecordingRequest;
+using deepmsg::archive::server::FindLastMatchingRecordingRequest;
+using deepmsg::archive::server::ListRecordingSubscriptionsRequest;
 using deepmsg::archive::server::RecordingIdRequest;
 using deepmsg::archive::server::ResponsePublication;
 using deepmsg::archive::server::StartRecordingRequest;
@@ -56,6 +63,10 @@ using RecordingPositionRequest = deepmsg::archive::server::archive_codecs::Recor
 using StartPositionRequest = deepmsg::archive::server::archive_codecs::StartPositionRequest;
 using StopPositionRequest = deepmsg::archive::server::archive_codecs::StopPositionRequest;
 using MaxRecordedPositionRequest = deepmsg::archive::server::archive_codecs::MaxRecordedPositionRequest;
+using ExtendRecordingEncoder = deepmsg::archive::server::archive_codecs::ExtendRecordingRequest2;
+using FindLastEncoder = deepmsg::archive::server::archive_codecs::FindLastMatchingRecordingRequest;
+using ListRecordingEncoder = deepmsg::archive::server::archive_codecs::ListRecordingRequest;
+using ListRecordingSubscriptionsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingSubscriptionsRequest;
 using StopRecordingByIdentityEncoder = deepmsg::archive::server::archive_codecs::StopRecordingByIdentityRequest;
 using StopRecordingEncoder = deepmsg::archive::server::archive_codecs::StopRecordingRequest;
 using StopRecordingSubscriptionEncoder = deepmsg::archive::server::archive_codecs::StopRecordingSubscriptionRequest;
@@ -145,6 +156,26 @@ public:
         max_recorded_position_requests.push_back(request);
     }
 
+    void on_find_last_matching_recording(const FindLastMatchingRecordingRequest& request) override
+    {
+        find_last_requests.push_back(request);
+    }
+
+    void on_list_recording(const RecordingIdRequest& request) override
+    {
+        list_recording_requests.push_back(request);
+    }
+
+    void on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request) override
+    {
+        list_recording_subscriptions_requests.push_back(request);
+    }
+
+    void on_extend_recording(const ExtendRecordingRequest& request) override
+    {
+        extend_recording_requests.push_back(request);
+    }
+
     void log_warning(std::string_view message) override
     {
         warnings.emplace_back(message);
@@ -166,6 +197,10 @@ public:
     std::vector<RecordingIdRequest> stop_position_requests;
     std::vector<RecordingIdRequest> start_position_requests;
     std::vector<RecordingIdRequest> max_recorded_position_requests;
+    std::vector<FindLastMatchingRecordingRequest> find_last_requests;
+    std::vector<RecordingIdRequest> list_recording_requests;
+    std::vector<ListRecordingSubscriptionsRequest> list_recording_subscriptions_requests;
+    std::vector<ExtendRecordingRequest> extend_recording_requests;
     std::vector<std::string> warnings;
     CachedEpochClock clock{10};
     ControlResponseProxy proxy;
@@ -253,6 +288,57 @@ public:
     StopRecordingByIdentityEncoder encoder;
     encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
     encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_list_recording_subscriptions(
+    std::int64_t control_session_id, std::int64_t correlation_id, std::int32_t pseudo_index,
+    std::int32_t subscription_count, bool apply_stream_id, std::int32_t stream_id, const std::string& channel_fragment)
+{
+    std::vector<std::uint8_t> buffer(256, 0);
+    ListRecordingSubscriptionsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .pseudoIndex(pseudo_index)
+        .subscriptionCount(subscription_count)
+        .applyStreamId(apply_stream_id ? BooleanType::TRUE : BooleanType::FALSE)
+        .streamId(stream_id);
+    encoder.putChannel(channel_fragment.data(), static_cast<std::uint32_t>(channel_fragment.size()));
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_find_last(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                         std::int64_t min_recording_id, std::int32_t session_id,
+                                                         std::int32_t stream_id, const std::string& channel_fragment)
+{
+    std::vector<std::uint8_t> buffer(256, 0);
+    FindLastEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).minRecordingId(min_recording_id);
+    encoder.sessionId(session_id).streamId(stream_id);
+    encoder.putChannel(channel_fragment.data(), static_cast<std::uint32_t>(channel_fragment.size()));
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_extend_recording(std::int64_t control_session_id,
+                                                                std::int64_t correlation_id, std::int64_t recording_id,
+                                                                std::int32_t stream_id, std::int32_t source_location,
+                                                                bool auto_stop, const std::string& channel)
+{
+    std::vector<std::uint8_t> buffer(256, 0);
+    ExtendRecordingEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .recordingId(recording_id)
+        .streamId(stream_id)
+        .sourceLocation(static_cast<SourceLocation::Value>(source_location))
+        .autoStop(auto_stop ? BooleanType::TRUE : BooleanType::FALSE);
+    encoder.putChannel(channel.data(), static_cast<std::uint32_t>(channel.size()));
     buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
     return buffer;
 }
@@ -472,20 +558,59 @@ TEST_F(ControlSessionAdapterTest, theFourRecordingIdQueriesReachTheHandler)
     EXPECT_EQ(handler_.session.get(), handler_.start_position_requests[0].session);
 }
 
+TEST_F(ControlSessionAdapterTest, findLastListAndExtendReachTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto find_last = encode_find_last(7, 50, 0, 11, 33, "endpoint=localhost:3333");
+    const auto list = encode_recording_id_request<ListRecordingEncoder>(7, 51, 7);
+    const auto list_subs = encode_list_recording_subscriptions(7, 52, 0, 3, true, 33, "localhost");
+    const auto extend =
+        encode_extend_recording(7, 53, 7, 33, SourceLocation::LOCAL, false, "aeron:udp?endpoint=localhost:3333");
+
+    EXPECT_EQ(1, adapter_->on_fragment(find_last.data(), static_cast<std::int32_t>(find_last.size()), &image_));
+    EXPECT_EQ(1, adapter_->on_fragment(list.data(), static_cast<std::int32_t>(list.size()), &image_));
+    EXPECT_EQ(1, adapter_->on_fragment(list_subs.data(), static_cast<std::int32_t>(list_subs.size()), &image_));
+    EXPECT_EQ(1, adapter_->on_fragment(extend.data(), static_cast<std::int32_t>(extend.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.find_last_requests.size());
+    EXPECT_EQ(0, handler_.find_last_requests[0].min_recording_id);
+    EXPECT_EQ(11, handler_.find_last_requests[0].session_id);
+    EXPECT_EQ(33, handler_.find_last_requests[0].stream_id);
+    EXPECT_EQ("endpoint=localhost:3333", handler_.find_last_requests[0].channel_fragment);
+
+    ASSERT_EQ(1u, handler_.list_recording_requests.size());
+    EXPECT_EQ(7, handler_.list_recording_requests[0].recording_id);
+
+    ASSERT_EQ(1u, handler_.list_recording_subscriptions_requests.size());
+    EXPECT_EQ(0, handler_.list_recording_subscriptions_requests[0].pseudo_index);
+    EXPECT_EQ(3, handler_.list_recording_subscriptions_requests[0].subscription_count);
+    EXPECT_TRUE(handler_.list_recording_subscriptions_requests[0].apply_stream_id);
+    EXPECT_EQ(33, handler_.list_recording_subscriptions_requests[0].stream_id);
+
+    ASSERT_EQ(1u, handler_.extend_recording_requests.size());
+    EXPECT_EQ(7, handler_.extend_recording_requests[0].recording_id);
+    EXPECT_EQ(33, handler_.extend_recording_requests[0].stream_id);
+    EXPECT_EQ("aeron:udp?endpoint=localhost:3333", handler_.extend_recording_requests[0].channel);
+}
+
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)
 {
     const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
     ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
 
     // Re-use a valid frame but claim a template id the adapter does not serve
-    // yet (`ExtendRecordingRequest2` = 64).
+    // yet (`StartReplayRequest` = 7).
     std::vector<std::uint8_t> frame = encode_keep_alive(7, 1);
-    frame[2] = 64;  // message header template id (offset 2), little endian
+    frame[2] = 7;  // message header template id (offset 2), little endian
     frame[3] = 0;
 
     EXPECT_EQ(0, adapter_->on_fragment(frame.data(), static_cast<std::int32_t>(frame.size()), &image_));
     ASSERT_FALSE(handler_.warnings.empty());
-    EXPECT_EQ("unsupported control request templateId=64", handler_.warnings.back());
+    EXPECT_EQ("unsupported control request templateId=7", handler_.warnings.back());
 }
 
 TEST_F(ControlSessionAdapterTest, aShortOrMalformedFrameIsRejectedBeforeDecode)
