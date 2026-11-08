@@ -33,6 +33,28 @@ jobs:
           sudo tar -C /opt -xzf /tmp/cmake.tar.gz
           echo "/opt/cmake-3.31.6-linux-x86_64/bin" >> "$GITHUB_PATH"
 
+      # The reference `aeron-all` jar is built through the pinned submodule's
+      # Gradle wrapper, which downloads gradle-9.8.2-all.zip with a 10 s network
+      # timeout and zero retries. Cache the distribution and warm it with
+      # retries so a slow runner does not fail the gate.
+      - name: Cache Gradle wrapper distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Warm Gradle wrapper (retry)
+        run: |
+          cd third_party/aeron
+          for attempt in 1 2 3 4 5; do
+            if ./gradlew --version; then
+              exit 0
+            fi
+            echo "gradle wrapper attempt $attempt failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
+
       - name: Fetch SBE tool
         run: scripts/fetch-sbe.sh
 
