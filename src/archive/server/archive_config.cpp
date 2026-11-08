@@ -306,4 +306,36 @@ std::expected<RecordingSettings, axc::core::Error> parse_recording_settings(
     return settings;
 }
 
+std::expected<ReplaySettings, axc::core::Error> parse_replay_settings(const axc::core::PropertySource& source) noexcept
+{
+    ReplaySettings settings;
+
+    // `Archive.Configuration.maxConcurrentReplays` (`Archive.java:474-481`).
+    auto max_concurrent = get_int32(source, "aeron.archive.max.concurrent.replays", settings.max_concurrent_replays);
+    if (!max_concurrent)
+    {
+        return std::unexpected(max_concurrent.error());
+    }
+    settings.max_concurrent_replays = *max_concurrent;
+
+    // `Archive.Configuration.replayLingerTimeoutNs` (`Archive.java:555-564`).
+    if (const auto linger = source.get("aeron.archive.replay.linger.timeout"); linger.has_value())
+    {
+        auto parsed = parse_duration_ns(*linger);
+        if (!parsed)
+        {
+            return std::unexpected(parsed.error());
+        }
+        settings.replay_linger_timeout_ns = *parsed;
+    }
+
+    // `Archive.Configuration.replayChecksum` (`Archive.java:676`).
+    if (const auto checksum = source.get("aeron.archive.replay.checksum"); checksum.has_value())
+    {
+        settings.replay_checksum_name = std::string{*checksum};
+    }
+
+    return settings;
+}
+
 }  // namespace deepmsg::archive::server

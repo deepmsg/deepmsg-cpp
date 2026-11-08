@@ -55,6 +55,8 @@ struct ArchiveConductorContext
     Authenticator* authenticator{nullptr};
     /// `Archive.Configuration` recording values (`Archive.java:328-438`).
     RecordingSettings recording;
+    /// `Archive.Configuration` replay values (`Archive.java:474-564`, `:676`).
+    ReplaySettings replay;
     /// `aeron.archive.catalog.capacity` (`Archive.java:508-516`).
     std::int64_t catalog_capacity{1024 * 1024};
     int catalog_file_sync_level{0};

@@ -31,6 +31,21 @@ struct RecordingSettings
 [[nodiscard]] std::expected<RecordingSettings, axc::core::Error> parse_recording_settings(
     const axc::core::PropertySource& source) noexcept;
 
+/// `Archive.Configuration` values the replay path reads
+/// (`Archive.java:474-481`, `:555-564`, `:676`, `:2461-2486`).
+struct ReplaySettings
+{
+    std::int32_t max_concurrent_replays{20};
+    /// `REPLAY_LINGER_TIMEOUT_DEFAULT_NS` = `publicationLingerTimeoutNs()` = 5 s.
+    std::int64_t replay_linger_timeout_ns{5'000'000'000};
+    /// `aeron.archive.replay.checksum`; empty ⇒ checksums are not verified.
+    std::string replay_checksum_name;
+};
+
+/// Reads the three replay names.
+[[nodiscard]] std::expected<ReplaySettings, axc::core::Error> parse_replay_settings(
+    const axc::core::PropertySource& source) noexcept;
+
 /// `SystemUtil.parseSize`: a decimal integer with an optional `k`/`m`/`g`
 /// suffix (`64k`, `128m`).
 [[nodiscard]] std::expected<std::int64_t, axc::core::Error> parse_size(std::string_view value) noexcept;

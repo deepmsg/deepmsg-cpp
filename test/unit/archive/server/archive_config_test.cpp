@@ -12,6 +12,7 @@ namespace
 
 using axc::core::PropertySource;
 using deepmsg::archive::server::parse_recording_settings;
+using deepmsg::archive::server::parse_replay_settings;
 using deepmsg::archive::server::parse_size;
 
 TEST(ArchiveConfigTest, defaultsMatchTheReference)
@@ -110,6 +111,43 @@ TEST(ArchiveConfigTest, enabledRecordingEventsRequireAChannel)
         "Archive.Context.recordingEventsChannel must be set if "
         "Archive.Context.recordingEventsEnabled is true",
         settings.error().message.view());
+}
+
+// A3b-2: the three replay names (`Archive.java:474-481`, `:555-564`, `:676`).
+
+TEST(ArchiveConfigTest, replayDefaultsMatchTheReference)
+{
+    PropertySource source;
+    const auto settings = parse_replay_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+
+    EXPECT_EQ(20, settings->max_concurrent_replays);
+    EXPECT_EQ(5'000'000'000, settings->replay_linger_timeout_ns);
+    EXPECT_TRUE(settings->replay_checksum_name.empty());
+}
+
+TEST(ArchiveConfigTest, replayValuesAreRead)
+{
+    PropertySource source;
+    source.set("aeron.archive.max.concurrent.replays", "100");
+    source.set("aeron.archive.replay.linger.timeout", "3s");
+    source.set("aeron.archive.replay.checksum", "crc32");
+
+    const auto settings = parse_replay_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+
+    EXPECT_EQ(100, settings->max_concurrent_replays);
+    EXPECT_EQ(3'000'000'000, settings->replay_linger_timeout_ns);
+    EXPECT_EQ("crc32", settings->replay_checksum_name);
+}
+
+TEST(ArchiveConfigTest, replayLingerRejectsAnInvalidDuration)
+{
+    PropertySource source;
+    source.set("aeron.archive.replay.linger.timeout", "5x");
+
+    const auto settings = parse_replay_settings(source);
+    EXPECT_FALSE(settings.has_value());
 }
 
 }  // namespace
