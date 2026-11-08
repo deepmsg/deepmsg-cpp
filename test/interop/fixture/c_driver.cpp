@@ -7,6 +7,12 @@ namespace axc::interop
 
 std::expected<CDriver, Error> CDriver::start(std::string_view aeronmd_path, std::string_view aeron_dir) noexcept
 {
+    return start(aeronmd_path, aeron_dir, {});
+}
+
+std::expected<CDriver, Error> CDriver::start(std::string_view aeronmd_path, std::string_view aeron_dir,
+                                             const std::vector<std::string>& environment) noexcept
+{
     auto created = core::create_directories(aeron_dir);
     if (!created)
     {
@@ -14,7 +20,7 @@ std::expected<CDriver, Error> CDriver::start(std::string_view aeronmd_path, std:
     }
 
     const std::string dir{aeron_dir};
-    auto process = ChildProcess::spawn(aeronmd_path, {"-Daeron.dir=" + dir});
+    auto process = ChildProcess::spawn(aeronmd_path, {"-Daeron.dir=" + dir}, environment);
     if (!process)
     {
         return std::unexpected(process.error());

@@ -57,6 +57,15 @@ public:
         return sessions_.size();
     }
 
+    template <class F>
+    void for_each(F&& function)
+    {
+        for (auto& session : sessions_)
+        {
+            function(*session);
+        }
+    }
+
 private:
     std::vector<SessionPtr> sessions_;
 };

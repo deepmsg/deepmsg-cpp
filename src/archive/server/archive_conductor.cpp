@@ -56,6 +56,8 @@ namespace
 /// response (`ArchiveException.java:29-84`); `GENERIC` (0) is the two-argument
 /// `send_error_response` overload.
 constexpr std::int64_t ACTIVE_SUBSCRIPTION = 3;
+constexpr std::int64_t UNKNOWN_SUBSCRIPTION = 4;
+constexpr std::int64_t UNKNOWN_RECORDING = 5;
 constexpr std::int64_t MAX_RECORDINGS = 8;
 constexpr std::int64_t STORAGE_SPACE = 11;
 
@@ -730,6 +732,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
         std::make_unique<AeronRecordingImage>(image));
 
     sessions_by_image_[image] = session.get();
+    sessions_by_recording_id_[*recording_id] = session.get();
     recorder_.add_session(std::move(session));
     subscription.ref_count++;
     increment_recording_sessions();
@@ -744,10 +747,161 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     return 1;
 }
 
+std::optional<ArchiveConductor::RecordingSubscription> ArchiveConductor::remove_recording_subscription(
+    std::int64_t registration_id)
+{
+    // `ArchiveConductor.removeRecordingSubscription` (`ArchiveConductor.java:2174-2188`).
+    const auto key = recording_subscription_keys_.find(registration_id);
+    if (key == recording_subscription_keys_.end())
+    {
+        return std::nullopt;
+    }
+
+    auto subscription = recording_subscriptions_.find(key->second);
+    if (subscription == recording_subscriptions_.end())
+    {
+        recording_subscription_keys_.erase(key);
+        return std::nullopt;
+    }
+
+    RecordingSubscription removed = std::move(subscription->second);
+    recording_subscriptions_.erase(subscription);
+    recording_subscription_keys_.erase(key);
+    return removed;
+}
+
+std::optional<ArchiveConductor::RecordingSubscription> ArchiveConductor::remove_recording_subscription_by_key(
+    std::string_view key)
+{
+    auto subscription = recording_subscriptions_.find(std::string{key});
+    if (subscription == recording_subscriptions_.end())
+    {
+        return std::nullopt;
+    }
+
+    RecordingSubscription removed = std::move(subscription->second);
+    recording_subscriptions_.erase(subscription);
+    recording_subscription_keys_.erase(removed.registration_id);
+    return removed;
+}
+
+void ArchiveConductor::abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason)
+{
+    // `abortRecordingSessionAndCloseSubscription` (`ArchiveConductor.java:1766-1787`).
+    recorder_.for_each_session(
+        [&](RecordingSession& session)
+        {
+            if (session.subscription_registration_id() == registration_id)
+            {
+                session.abort(reason);
+            }
+        });
+}
+
+void ArchiveConductor::on_stop_recording(const StopRecordingRequest& request)
+{
+    // `ArchiveConductor.stopRecording` (`ArchiveConductor.java:585-610`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    auto key = make_key(request.stream_id, request.channel);
+    if (!key)
+    {
+        session->send_error_response(request.correlation_id, std::string{key.error().message.view()});
+        return;
+    }
+
+    auto subscription = remove_recording_subscription_by_key(*key);
+    if (!subscription)
+    {
+        session->send_error_response(
+            request.correlation_id, UNKNOWN_SUBSCRIPTION,
+            "no recording found for streamId=" + std::to_string(request.stream_id) + " channel=" + request.channel);
+        return;
+    }
+
+    abort_sessions_for_subscription(subscription->registration_id, "stop recording");
+    if (0 >= --subscription->ref_count)
+    {
+        subscription->subscription.reset();
+    }
+
+    session->send_ok_response(request.correlation_id, 0);
+}
+
+void ArchiveConductor::on_stop_recording_subscription(const StopRecordingSubscriptionRequest& request)
+{
+    // `ArchiveConductor.stopRecordingSubscription` (`ArchiveConductor.java:612-636`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    auto subscription = remove_recording_subscription(request.subscription_id);
+    if (!subscription)
+    {
+        session->send_error_response(
+            request.correlation_id, UNKNOWN_SUBSCRIPTION,
+            "no recording subscription found for subscriptionId=" + std::to_string(request.subscription_id));
+        return;
+    }
+
+    abort_sessions_for_subscription(subscription->registration_id, "stop recording");
+    if (0 >= --subscription->ref_count)
+    {
+        subscription->subscription.reset();
+    }
+
+    session->send_ok_response(request.correlation_id, 0);
+}
+
+void ArchiveConductor::on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request)
+{
+    // `ArchiveConductor.stopRecordingByIdentity` (`ArchiveConductor.java:1301-1327`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    if (!catalog_.has_recording(request.recording_id))
+    {
+        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
+                                     "unknown recording id: " + std::to_string(request.recording_id));
+        return;
+    }
+
+    std::int64_t found = 0;
+    const auto active = sessions_by_recording_id_.find(request.recording_id);
+    if (active != sessions_by_recording_id_.end())
+    {
+        RecordingSession* recording_session = active->second;
+        recording_session->abort("stop recording by identity");
+
+        const auto registration_id = recording_session->subscription_registration_id();
+        auto subscription = remove_recording_subscription(registration_id);
+        if (subscription)
+        {
+            found = 1;
+            if (0 >= --subscription->ref_count)
+            {
+                subscription->subscription.reset();
+            }
+        }
+    }
+
+    session->send_ok_response(request.correlation_id, found);
+}
+
 void ArchiveConductor::close_recording_session(RecordingSession& session)
 {
     // `ArchiveConductor.closeRecordingSession` (`ArchiveConductor.java:1329-1363`).
     sessions_by_image_.erase(session.image_handle());
+    sessions_by_recording_id_.erase(session.recording_id());
 
     const std::int64_t position = session.recorded_position();
 

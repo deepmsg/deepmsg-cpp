@@ -42,6 +42,32 @@ struct StartRecordingRequest
     ControlSession* session{nullptr};
 };
 
+/// `StopRecordingRequest` (`ControlSessionAdapter.java:188-206`): stop every
+/// recording on this `streamId` + `channel`.
+struct StopRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int32_t stream_id{0};
+    std::string channel;
+    ControlSession* session{nullptr};
+};
+
+/// `StopRecordingSubscriptionRequest` (`ControlSessionAdapter.java:416-434`).
+struct StopRecordingSubscriptionRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t subscription_id{0};
+    ControlSession* session{nullptr};
+};
+
+/// `StopRecordingByIdentityRequest` (`ControlSessionAdapter.java:944-962`).
+struct StopRecordingByIdentityRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    ControlSession* session{nullptr};
+};
+
 /// What the adapter asks the conductor for.
 class ControlSessionHandler
 {
@@ -58,6 +84,15 @@ public:
 
     /// `ControlSession.onStartRecording` (`ControlSession.java:340-348`).
     virtual void on_start_recording(const StartRecordingRequest& request) = 0;
+
+    /// `ControlSession.onStopRecording` (`ControlSession.java:318-326`).
+    virtual void on_stop_recording(const StopRecordingRequest& request) = 0;
+
+    /// `ControlSession.onStopRecordingSubscription` (`ControlSession.java:328-336`).
+    virtual void on_stop_recording_subscription(const StopRecordingSubscriptionRequest& request) = 0;
+
+    /// `ControlSession.onStopRecordingByIdentity` (`ControlSession.java:570-578`).
+    virtual void on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request) = 0;
 
     /// `ArchiveConductor.logWarning` (`ArchiveConductor.java:442`).
     virtual void log_warning(std::string_view message) = 0;
@@ -88,6 +123,9 @@ public:
     /// `StartRecordingRequest` (v1, no `autoStop`) and `StartRecordingRequest2`.
     static constexpr std::int32_t TEMPLATE_START_RECORDING = 4;
     static constexpr std::int32_t TEMPLATE_START_RECORDING_2 = 63;
+    static constexpr std::int32_t TEMPLATE_STOP_RECORDING = 5;
+    static constexpr std::int32_t TEMPLATE_STOP_RECORDING_SUBSCRIPTION = 14;
+    static constexpr std::int32_t TEMPLATE_STOP_RECORDING_BY_IDENTITY = 65;
     static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;

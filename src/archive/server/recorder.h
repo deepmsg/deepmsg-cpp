@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 #include "archive/server/recording_session.h"
 #include "archive/server/recording_writer.h"
@@ -72,6 +73,12 @@ public:
     [[nodiscard]] std::size_t size() const noexcept
     {
         return sessions_.size();
+    }
+
+    template <class F>
+    void for_each_session(F&& function)
+    {
+        sessions_.for_each(std::forward<F>(function));
     }
 
 private:

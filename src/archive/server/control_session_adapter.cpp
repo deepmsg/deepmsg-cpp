@@ -12,6 +12,9 @@
 #include "io_aeron_archive_codecs/MessageHeader.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
+#include "io_aeron_archive_codecs/StopRecordingByIdentityRequest.h"
+#include "io_aeron_archive_codecs/StopRecordingRequest.h"
+#include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 
 namespace deepmsg::archive::server
 {
@@ -234,6 +237,91 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (ControlSession::State::active == request.session->state())
             {
                 handler_.on_start_recording(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_RECORDING:
+        {
+            // `ControlSessionAdapter.java:188-206`.
+            archive_codecs::StopRecordingRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            StopRecordingRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.channel) || !reader.at_end())
+            {
+                handler_.log_warning("malformed StopRecordingRequest");
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.stream_id = decoder.streamId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_stop_recording(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_RECORDING_SUBSCRIPTION:
+        {
+            // `ControlSessionAdapter.java:416-434`.
+            archive_codecs::StopRecordingSubscriptionRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            StopRecordingSubscriptionRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.subscription_id = decoder.subscriptionId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_stop_recording_subscription(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_RECORDING_BY_IDENTITY:
+        {
+            // `ControlSessionAdapter.java:944-962`.
+            archive_codecs::StopRecordingByIdentityRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            StopRecordingByIdentityRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_stop_recording_by_identity(request);
             }
             return 1;
         }

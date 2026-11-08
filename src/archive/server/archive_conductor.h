@@ -91,6 +91,9 @@ public:
 
     ControlSession* on_connect_request(const ConnectRequest& request) override;
     void on_start_recording(const StartRecordingRequest& request) override;
+    void on_stop_recording(const StopRecordingRequest& request) override;
+    void on_stop_recording_subscription(const StopRecordingSubscriptionRequest& request) override;
+    void on_stop_recording_by_identity(const StopRecordingByIdentityRequest& request) override;
     void log_warning(std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
@@ -164,6 +167,9 @@ private:
     [[nodiscard]] int poll_recording_images();
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     void close_recording_session(RecordingSession& session);
+    void abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason);
+    [[nodiscard]] std::optional<RecordingSubscription> remove_recording_subscription(std::int64_t registration_id);
+    [[nodiscard]] std::optional<RecordingSubscription> remove_recording_subscription_by_key(std::string_view key);
     [[nodiscard]] ControlSession* control_session_by_id(std::int64_t id) noexcept;
     void increment_recording_sessions() noexcept;
     void decrement_recording_sessions() noexcept;
@@ -207,6 +213,7 @@ private:
     std::unordered_map<std::int64_t, std::string> recording_subscription_keys_;
     std::vector<PendingRecordingSubscription> pending_recording_subscriptions_;
     std::unordered_map<aeron_image_t*, RecordingSession*> sessions_by_image_;
+    std::unordered_map<std::int64_t, RecordingSession*> sessions_by_recording_id_;
 };
 
 }  // namespace deepmsg::archive::server
