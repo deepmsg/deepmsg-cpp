@@ -105,6 +105,13 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     }
     client_ = std::move(*client);
 
+    if (0 != aeron_image_controlled_fragment_assembler_create(&control_assembler_,
+                                                              &ArchiveConductor::assembled_trampoline, this))
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::internal_error, "control fragment assembler create failed"));
+    }
+
     axc::core::ImageHandlers handlers;
     handlers.on_unavailable = &ArchiveConductor::unavailable_image_trampoline;
     handlers.on_unavailable_clientd = this;
@@ -271,6 +278,11 @@ void ArchiveConductor::close()
     sessions_ = SessionWorker<ControlSession>{};
     publications_.clear();
     control_subscription_.reset();
+    if (nullptr != control_assembler_)
+    {
+        (void)aeron_image_controlled_fragment_assembler_delete(control_assembler_);
+        control_assembler_ = nullptr;
+    }
     if (!catalog_.is_closed())
     {
         (void)catalog_.close();
@@ -295,6 +307,7 @@ int ArchiveConductor::do_work()
     work_count += poll_control_subscription();
     work_count += poll_pending_publications();
     work_count += poll_pending_recording_subscriptions();
+    work_count += poll_pending_control_counters();
     work_count += poll_recording_images();
     work_count += poll_listings();
     work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
@@ -303,6 +316,19 @@ int ArchiveConductor::do_work()
         {
             adapter_.unregister_session(session.session_id());
             sessions_by_id_.erase(session.session_id());
+            control_session_counters_.erase(session.session_id());
+            for (std::size_t index = 0; index < pending_control_counters_.size();)
+            {
+                if (pending_control_counters_[index].control_session_id == session.session_id())
+                {
+                    pending_control_counters_.erase(pending_control_counters_.begin() +
+                                                    static_cast<std::ptrdiff_t>(index));
+                }
+                else
+                {
+                    index++;
+                }
+            }
             for (Listing& listing : listings_)
             {
                 if (listing.control_session_id == session.session_id())
@@ -354,21 +380,25 @@ int ArchiveConductor::poll_control_subscription()
             continue;
         }
 
-        PollContext poll_context{this, image};
-        work_count += aeron_image_poll(image, &ArchiveConductor::fragment_trampoline, &poll_context,
-                                       static_cast<std::size_t>(context_.fragment_limit));
+        current_control_image_ = image;
+        work_count +=
+            aeron_image_controlled_poll(image, &aeron_image_controlled_fragment_assembler_handler, control_assembler_,
+                                        static_cast<std::size_t>(context_.fragment_limit));
+        current_control_image_ = nullptr;
         aeron_image_release(image);
     }
 
     return work_count;
 }
 
-void ArchiveConductor::fragment_trampoline(void* clientd, const std::uint8_t* buffer, size_t length,
-                                           aeron_header_t* header)
+aeron_controlled_fragment_handler_action_t ArchiveConductor::assembled_trampoline(void* clientd,
+                                                                                  const std::uint8_t* buffer,
+                                                                                  size_t length, aeron_header_t* header)
 {
     (void)header;
-    auto* poll_context = static_cast<PollContext*>(clientd);
-    poll_context->conductor->adapter_.on_fragment(buffer, static_cast<std::int32_t>(length), poll_context->image);
+    auto* conductor = static_cast<ArchiveConductor*>(clientd);
+    conductor->adapter_.on_fragment(buffer, static_cast<std::int32_t>(length), conductor->current_control_image_);
+    return AERON_ACTION_CONTINUE;
 }
 
 void ArchiveConductor::unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription,
@@ -443,6 +473,33 @@ ControlSession* ArchiveConductor::on_connect_request(const ConnectRequest& reque
     sessions_.add(std::move(session));
 
     authenticator_->on_connect_request(config.control_session_id, request.encoded_credentials, cached_clock_.time_ms());
+
+    // `ArchiveConductor.newControlSession` (`ArchiveConductor.java:502-508`):
+    // the type-113 control-session counter, labelled with the client info.
+    std::string client_info = request.client_info;
+    aeron_image_constants_t counter_image_constants{};
+    if (nullptr != request.image &&
+        0 == aeron_image_constants(const_cast<aeron_image_t*>(static_cast<const aeron_image_t*>(request.image)),
+                                   &counter_image_constants))
+    {
+        std::string image_info = "sourceIdentity=";
+        image_info += nullptr == counter_image_constants.source_identity ? "" : counter_image_constants.source_identity;
+        image_info += " sessionId=" + std::to_string(counter_image_constants.session_id);
+        if (!client_info.empty())
+        {
+            client_info += " ";
+        }
+        client_info += image_info;
+    }
+
+    const auto counter_key = ArchiveCounters::control_session_key(context_.archive_id, config.control_session_id);
+    PendingControlCounter pending_counter;
+    pending_counter.control_session_id = config.control_session_id;
+    pending_counter.add =
+        client_.add_counter(ArchiveCounters::CONTROL_SESSION_TYPE_ID, {counter_key.data(), counter_key.size()},
+                            ArchiveCounters::control_session_label(client_info, context_.archive_id));
+    pending_control_counters_.push_back(std::move(pending_counter));
+
     return raw_session;
 }
 
@@ -879,6 +936,34 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     }
 
     return 1;
+}
+
+int ArchiveConductor::poll_pending_control_counters()
+{
+    int work_count = 0;
+
+    for (auto it = pending_control_counters_.begin(); it != pending_control_counters_.end();)
+    {
+        auto polled = it->add.poll();
+        if (!polled)
+        {
+            log_warning(std::string{"control session counter failed: "} + std::string{polled.error().message.view()});
+            it = pending_control_counters_.erase(it);
+            continue;
+        }
+
+        if (!polled->has_value())
+        {
+            ++it;
+            continue;
+        }
+
+        control_session_counters_.emplace(it->control_session_id, axc::core::PositionWriter{std::move(**polled)});
+        it = pending_control_counters_.erase(it);
+        work_count++;
+    }
+
+    return work_count;
 }
 
 int ArchiveConductor::poll_listings()

@@ -187,6 +187,7 @@ private:
     [[nodiscard]] int poll_control_subscription();
     [[nodiscard]] int poll_pending_publications();
     [[nodiscard]] int poll_pending_recording_subscriptions();
+    [[nodiscard]] int poll_pending_control_counters();
     [[nodiscard]] int poll_recording_images();
     [[nodiscard]] int poll_listings();
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
@@ -201,12 +202,19 @@ private:
     [[nodiscard]] std::expected<axc::core::PositionWriter, axc::core::Error> allocate_counter(
         std::int32_t type_id, std::span<const std::uint8_t> key, std::string_view label);
 
-    static void fragment_trampoline(void* clientd, const std::uint8_t* buffer, size_t length, aeron_header_t* header);
+    static aeron_controlled_fragment_handler_action_t assembled_trampoline(void* clientd, const std::uint8_t* buffer,
+                                                                           size_t length, aeron_header_t* header);
     static void unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription, aeron_image_t* image);
 
     ArchiveConductorContext context_;
     axc::core::DeepmsgClient client_;
     axc::core::SubPtr control_subscription_;
+    /// Control requests above one MTU arrive as several fragments; the
+    /// controlled assembler hands complete messages to the adapter
+    /// (`ControlSessionAdapter.java:126` wraps the handler in a
+    /// `FragmentAssembler` for the same reason).
+    aeron_image_controlled_fragment_assembler_t* control_assembler_{nullptr};
+    const void* current_control_image_{nullptr};
     SystemEpochClock epoch_clock_;
     CachedEpochClock cached_clock_;
     DefaultAuthenticator default_authenticator_;
@@ -222,6 +230,15 @@ private:
     };
 
     std::unordered_map<std::int64_t, ControlSession*> sessions_by_id_;
+    /// `ControlSessionCounter` (type 113): presence/lookup marker per control
+    /// session; its value is unused (`ControlSessionCounter.java:63-81`).
+    struct PendingControlCounter
+    {
+        std::int64_t control_session_id{0};
+        axc::core::AsyncAdd<axc::core::CounterPtr> add;
+    };
+    std::vector<PendingControlCounter> pending_control_counters_;
+    std::unordered_map<std::int64_t, axc::core::PositionWriter> control_session_counters_;
     std::vector<PendingPublication> pending_publications_;
     std::int64_t next_session_id_{0};
     std::vector<std::string> warnings_;

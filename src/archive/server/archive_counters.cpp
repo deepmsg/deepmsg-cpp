@@ -19,6 +19,25 @@ std::array<std::uint8_t, sizeof(std::int64_t)> ArchiveCounters::archive_id_key(s
     return key;
 }
 
+std::array<std::uint8_t, 2 * sizeof(std::int64_t)> ArchiveCounters::control_session_key(
+    std::int64_t archive_id, std::int64_t control_session_id) noexcept
+{
+    std::array<std::uint8_t, 2 * sizeof(std::int64_t)> key{};
+    std::memcpy(key.data(), &archive_id, sizeof(archive_id));
+    std::memcpy(key.data() + sizeof(archive_id), &control_session_id, sizeof(control_session_id));
+    return key;
+}
+
+std::string ArchiveCounters::control_session_label(std::string_view client_info, std::int64_t archive_id)
+{
+    std::string label{CONTROL_SESSION_NAME};
+    label += ": ";
+    label += client_info;
+    label += ARCHIVE_ID_LABEL_SUFFIX;
+    label += std::to_string(archive_id);
+    return label;
+}
+
 std::string ArchiveCounters::make_label(std::string_view name, std::int64_t archive_id)
 {
     std::string label{name};
