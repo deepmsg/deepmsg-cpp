@@ -22,6 +22,8 @@ axc_add_library(axc_archive_server
         segment_files.cpp
         recording_writer.cpp
         recording_reader.cpp
+        replay_publication.cpp
+        replay_session.cpp
     DEPS
         axc_core
         axc_sbe
