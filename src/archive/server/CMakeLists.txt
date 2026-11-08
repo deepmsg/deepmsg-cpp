@@ -3,6 +3,10 @@ axc_add_library(axc_archive_server
         module.cpp
         catalog.cpp
         archive_conductor.cpp
+        archive_config.cpp
+        archive_counters.cpp
+        channel_uri.cpp
+        recording_pos.cpp
         deepmsg_response_publication.cpp
         control_session_adapter.cpp
         authenticator.cpp
