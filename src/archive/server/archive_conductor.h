@@ -93,7 +93,8 @@ class ArchiveConductor final : public ControlSessionHandler,
                                public CreateReplayPublicationSessionHandler,
                                public DeleteSegmentsControl,
                                public DeleteSegmentsResponder,
-                               public ListRecordingsResponses
+                               public ListRecordingsResponses,
+                               public ReplicationControl
 {
 public:
     /// `AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION`.
@@ -165,6 +166,37 @@ public:
                             std::unique_ptr<ReplayPublication> publication) override;
 
     void log_warning(std::string_view message) override;
+
+    // ReplicationControl (`ReplicationSession`'s view of the conductor).
+    void send_replication_signal(std::int64_t control_session_id, std::int64_t replication_id,
+                                 std::int64_t recording_id, std::int64_t subscription_id, std::int64_t position,
+                                 archive_codecs::RecordingSignal::Value signal) override;
+    void send_replication_error(std::int64_t control_session_id, std::int64_t replication_id, std::int64_t error_code,
+                                std::string_view message) override;
+    [[nodiscard]] bool stop_recording_subscription(std::int64_t registration_id) override;
+    [[nodiscard]] std::int64_t catalog_stop_position(std::int64_t recording_id) override;
+    [[nodiscard]] std::expected<std::int64_t, std::string> add_new_recording(
+        std::int64_t start_position, std::int64_t stop_position, std::int64_t start_timestamp,
+        std::int64_t stop_timestamp, std::int32_t image_initial_term_id, std::int32_t segment_file_length,
+        std::int32_t term_buffer_length, std::int32_t mtu_length, std::int32_t session_id, std::int32_t stream_id,
+        std::string_view stripped_channel, std::string_view original_channel,
+        std::string_view source_identity) override;
+    [[nodiscard]] std::expected<void, std::string> replace_recording(
+        std::int64_t recording_id, std::int64_t start_position, std::int64_t stop_position,
+        std::int64_t start_timestamp, std::int64_t stop_timestamp, std::int32_t image_initial_term_id,
+        std::int32_t segment_file_length, std::int32_t term_buffer_length, std::int32_t mtu_length,
+        std::int32_t session_id, std::int32_t stream_id, std::string_view stripped_channel,
+        std::string_view original_channel, std::string_view source_identity) override;
+    [[nodiscard]] std::expected<std::int64_t, std::string> start_extend_recording(
+        std::int64_t control_session_id, std::int64_t correlation_id, std::int64_t recording_id, std::int32_t stream_id,
+        std::int32_t source_location, bool auto_stop, std::string_view original_channel) override;
+    [[nodiscard]] std::optional<ExtendRecordingOutcome> take_extend_recording_outcome(std::int64_t token) override;
+    void cancel_extend_recording(std::int64_t token) override;
+    [[nodiscard]] aeron_image_t* image_by_session_id(std::int64_t registration_id, std::int32_t session_id) override;
+    [[nodiscard]] std::int64_t image_position(aeron_image_t* image) override;
+    [[nodiscard]] bool image_is_closed(aeron_image_t* image) override;
+    [[nodiscard]] bool image_is_end_of_stream(aeron_image_t* image) override;
+    [[nodiscard]] std::optional<std::string> subscription_resolved_endpoint(std::int64_t registration_id) override;
 
     // DeleteSegmentsControl (`ControlSession.archiveConductor()`).
     [[nodiscard]] bool has_in_progress_replays(std::int64_t recording_id) override;
@@ -313,12 +345,6 @@ private:
         std::int64_t correlation_id, std::int64_t recording_id, std::int32_t stream_id, std::int32_t source_location,
         bool auto_stop, std::string_view original_channel, ControlSession& session);
 
-    /// Consumes the token's outcome; `nullopt` while the add is in flight.
-    [[nodiscard]] std::optional<ExtendRecordingOutcome> take_extend_recording_outcome(std::int64_t token);
-
-    /// Drops an in-flight add (the `AsyncAdd` destructor cancels the driver
-    /// request, so no OK is sent for a token nobody waits on).
-    void cancel_extend_recording(std::int64_t token);
     void close_recording_session(RecordingSession& session);
     void abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason);
     [[nodiscard]] std::optional<RecordingSubscription> remove_recording_subscription(std::int64_t registration_id);

@@ -182,6 +182,11 @@ TEST_F(ReplicationInteropTest, replicateReturnsAReplicationIdAndTryStopSeesIt)
     ASSERT_EQ(0, aeron_archive_replication_params_init(&params));
     params.replication_channel = REPLICATION_CHANNEL;
     params.file_io_max_length = 4096;
+    // The conductor's own control channel here is IPC, so there is no endpoint
+    // to derive a response channel from; the client supplies one, exactly like
+    // a real client replicating from a destination with an IPC control
+    // channel.
+    params.src_response_channel = "aeron:udp?endpoint=localhost:0";
 
     std::int64_t replication_id = -1;
     ASSERT_EQ(0, aeron_archive_replicate(&replication_id, client_archive_, 1, SRC_CONTROL_CHANNEL,

@@ -11,6 +11,7 @@
 
 #include <aeronc.h>
 
+#include "archive/server/replication_source.h"
 #include "core/error/error.h"
 
 struct aeron_archive_context_stct;
@@ -21,30 +22,9 @@ struct aeron_archive_recording_descriptor_stct;
 namespace deepmsg::archive::server
 {
 
-/// A recording descriptor as the source archive reports it
-/// (`RecordingDescriptor` template 22).
-struct SourceRecordingDescriptor
-{
-    std::int64_t control_session_id{0};
-    std::int64_t correlation_id{0};
-    std::int64_t recording_id{0};
-    std::int64_t start_timestamp{0};
-    std::int64_t stop_timestamp{0};
-    std::int64_t start_position{0};
-    std::int64_t stop_position{0};
-    std::int32_t initial_term_id{0};
-    std::int32_t segment_file_length{0};
-    std::int32_t term_buffer_length{0};
-    std::int32_t mtu_length{0};
-    std::int32_t session_id{0};
-    std::int32_t stream_id{0};
-    std::string stripped_channel;
-    std::string original_channel;
-    std::string source_identity;
-};
-
 /// The source-side client a replication runs against
-/// (`ReplicationSession.java`'s embedded `AeronArchive`).
+/// (`ReplicationSession.java`'s embedded `AeronArchive`) — the product
+/// implementation of `ReplicationSource`.
 ///
 /// It is the **official C archive client's non-blocking pieces** — async
 /// connect, the archive proxy's offers and the two pollers — driven from the
@@ -52,7 +32,7 @@ struct SourceRecordingDescriptor
 /// `test/interop/archive/replication_client_probe_test.cpp` measures the
 /// shared-client shape). Nothing here blocks: `do_work` advances one step and
 /// every request sender only offers.
-class SourceArchiveClient
+class SourceArchiveClient final : public ReplicationSource
 {
 public:
     struct Config
@@ -84,72 +64,50 @@ public:
     SourceArchiveClient(const SourceArchiveClient&) = delete;
     SourceArchiveClient& operator=(const SourceArchiveClient&) = delete;
 
-    /// Advances the connect state machine and the response subscription.
-    /// Returns the number of things that changed this pass.
-    int do_work();
+    // `ReplicationSource`.
+    int do_work() override;
 
-    [[nodiscard]] bool is_connected() const noexcept
+    [[nodiscard]] bool is_connected() const noexcept override
     {
         return nullptr != archive_;
     }
 
-    [[nodiscard]] bool is_failed() const noexcept
+    [[nodiscard]] bool is_failed() const noexcept override
     {
         return failed_;
     }
 
-    [[nodiscard]] std::string_view error_message() const noexcept
+    [[nodiscard]] std::string_view error_message() const noexcept override
     {
         return error_;
     }
 
-    [[nodiscard]] std::int64_t control_session_id() const;
+    [[nodiscard]] std::int64_t control_session_id() const override;
 
-    [[nodiscard]] std::int64_t next_correlation_id();
+    [[nodiscard]] std::int64_t next_correlation_id() override;
 
     // Offers (`AeronArchive.archiveProxy()`), all non-blocking.
-    [[nodiscard]] bool list_recording(std::int64_t correlation_id, std::int64_t recording_id);
-    [[nodiscard]] bool replay(std::int64_t correlation_id, std::int64_t recording_id, std::string_view replay_channel,
-                              std::int32_t replay_stream_id, std::int64_t position, std::int64_t length,
-                              std::int32_t file_io_max_length);
-    [[nodiscard]] bool stop_replay(std::int64_t correlation_id, std::int64_t replay_session_id);
-    [[nodiscard]] bool get_recording_position(std::int64_t correlation_id, std::int64_t recording_id);
-
-    /// `ControlResponse` / `Challenge` from the source
-    /// (`ControlResponsePoller.poll()`).
-    struct Response
-    {
-        enum class Kind
-        {
-            none,
-            ok,
-            error,
-            challenged
-        };
-
-        Kind kind{Kind::none};
-        std::int64_t control_session_id{0};
-        std::int64_t correlation_id{0};
-        std::int64_t relevant_id{0};
-        std::int32_t code{0};
-        std::string error_message;
-        std::string encoded_challenge;
-    };
+    bool list_recording(std::int64_t correlation_id, std::int64_t recording_id) override;
+    bool replay(std::int64_t correlation_id, std::int64_t recording_id, std::string_view replay_channel,
+                std::int32_t replay_stream_id, std::int64_t position, std::int64_t length,
+                std::int32_t file_io_max_length) override;
+    bool stop_replay(std::int64_t correlation_id, std::int64_t replay_session_id) override;
+    bool get_recording_position(std::int64_t correlation_id, std::int64_t recording_id) override;
 
     /// One pass of the control response poller.
-    [[nodiscard]] std::expected<Response, axc::core::Error> poll_response();
+    [[nodiscard]] std::expected<Response, axc::core::Error> poll_response() override;
 
     /// Arms the descriptor poller for one `list_recording`
     /// (`RecordingDescriptorPoller.reset(correlationId, 1, consumer)`); the
     /// consumer is called from `poll_descriptors`.
     void reset_descriptor_poller(std::int64_t correlation_id, std::int32_t record_count,
-                                 std::function<void(SourceRecordingDescriptor&)> consumer);
+                                 std::function<void(SourceRecordingDescriptor&)> consumer) override;
 
     /// One pass of the descriptor poller.
-    [[nodiscard]] std::expected<int, axc::core::Error> poll_descriptors();
+    [[nodiscard]] std::expected<int, axc::core::Error> poll_descriptors() override;
 
-    [[nodiscard]] bool descriptor_dispatch_complete() const noexcept;
-    [[nodiscard]] std::int32_t descriptor_remaining_record_count() const noexcept;
+    [[nodiscard]] bool descriptor_dispatch_complete() const noexcept override;
+    [[nodiscard]] std::int32_t descriptor_remaining_record_count() const noexcept override;
 
 private:
     SourceArchiveClient(aeron_t* archive_aeron, const Config& config);

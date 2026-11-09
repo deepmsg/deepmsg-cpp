@@ -71,6 +71,25 @@ struct ReplayChannelOptions
 [[nodiscard]] std::expected<std::string, axc::core::Error> replay_channel(std::string_view channel,
                                                                           const ReplayChannelOptions& options);
 
+/// `Archive.java:1587-1610`: the client response channel derived from the
+/// archive's own control channel — `<host>:0` on a UDP channel.
+[[nodiscard]] std::expected<std::string, axc::core::Error> replication_response_channel(
+    std::string_view control_channel);
+
+/// `ReplicationSession.extend` (`ReplicationSession.java:527-545`): the
+/// replication channel with `rejoin=false`, plus `session-id=<replaySessionId>`
+/// when the channel is not a response channel.
+[[nodiscard]] std::expected<std::string, axc::core::Error> replication_extend_channel(
+    std::string_view replication_channel, std::int32_t replay_session_id, bool response_mode);
+
+/// `ReplicationSession.replay` (`ReplicationSession.java:727-744`): the
+/// replication channel with the subscription's resolved endpoint substituted
+/// for a wildcard port and `session-id=<replaySessionId>` when the channel is
+/// not a response channel.
+[[nodiscard]] std::expected<std::string, axc::core::Error> replication_replay_channel(
+    std::string_view replication_channel, std::string_view resolved_endpoint, std::int32_t replay_session_id,
+    bool response_mode);
+
 /// `ArchiveConductor.makeKey` (`ArchiveConductor.java:1914-1953`): the in-process
 /// `streamId:media?endpoint=|interface=|control=|session-id=|tags=` key with the
 /// trailing character chopped off (unconditionally, `:1945`).

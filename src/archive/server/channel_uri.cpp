@@ -214,6 +214,14 @@ struct BuildOptions
     bool copy_linger{false};
     bool has_response_correlation_id{false};
     std::int64_t response_correlation_id{0};
+    /// Replication rewrites force the endpoint / session id / rejoin rather
+    /// than copying them (`ChannelUri.put`).
+    bool has_endpoint{false};
+    std::string endpoint;
+    bool has_session_id{false};
+    std::int32_t session_id{0};
+    bool has_rejoin{false};
+    bool rejoin{false};
 };
 
 /// `ChannelUriStringBuilder.build()` order (`ChannelUriStringBuilder.java:2514-2552`),
@@ -227,7 +235,14 @@ struct BuildOptions
     out.push_back('?');
 
     append_param(out, "tags", tags_value(uri));
-    append_param(out, "endpoint", param(uri, "endpoint"));
+    if (options.has_endpoint)
+    {
+        append_param(out, "endpoint", options.endpoint);
+    }
+    else
+    {
+        append_param(out, "endpoint", param(uri, "endpoint"));
+    }
     append_param(out, "interface", param(uri, "interface"));
     append_param(out, "control", param(uri, "control"));
     append_param(out, "control-mode", param(uri, "control-mode"));
@@ -254,7 +269,14 @@ struct BuildOptions
         append_int(out, "term-id", options.term_id);
         append_int(out, "term-offset", options.term_offset);
     }
-    append_param(out, "session-id", param(uri, "session-id"));
+    if (options.has_session_id)
+    {
+        append_int(out, "session-id", options.session_id);
+    }
+    else
+    {
+        append_param(out, "session-id", param(uri, "session-id"));
+    }
     append_param(out, "ttl", param(uri, "ttl"));
     if (options.has_linger)
     {
@@ -282,7 +304,14 @@ struct BuildOptions
     }
     append_param(out, "tether", param(uri, "tether"));
     append_param(out, "group", param(uri, "group"));
-    append_param(out, "rejoin", param(uri, "rejoin"));
+    if (options.has_rejoin)
+    {
+        append_param(out, "rejoin", options.rejoin ? "true" : "false");
+    }
+    else
+    {
+        append_param(out, "rejoin", param(uri, "rejoin"));
+    }
     append_param(out, "so-sndbuf", param(uri, "so-sndbuf"));
     append_param(out, "so-rcvbuf", param(uri, "so-rcvbuf"));
     append_param(out, "rcv-wnd", param(uri, "rcv-wnd"));
@@ -428,6 +457,129 @@ std::expected<std::string, axc::core::Error> replay_channel(std::string_view cha
 
     build.has_response_correlation_id = options.has_response_correlation_id;
     build.response_correlation_id = options.response_correlation_id;
+    return build_channel(**uri, build);
+}
+
+std::expected<std::string, axc::core::Error> replication_response_channel(std::string_view control_channel)
+{
+    auto uri = parse_channel(control_channel);
+    if (!uri)
+    {
+        return std::unexpected(uri.error());
+    }
+
+    // `Archive.java:1587-1607`: only a UDP control channel carries an
+    // `<host>:<port>` endpoint to derive `<host>:0` from.
+    if (AERON_URI_UDP != (*uri)->type)
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                  "Unable to derive Archive.Context.archiveClientContext.controlResponseChannel as "
+                                  "Archive.Context.controlChannel.endpoint is not in the <host>:<port> format"));
+    }
+
+    const char* endpoint = param(**uri, "endpoint");
+    const std::string_view endpoint_value{nullptr == endpoint ? "" : endpoint};
+    const auto separator = endpoint_value.rfind(':');
+    if (endpoint_value.empty() || std::string_view::npos == separator)
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                  "Unable to derive Archive.Context.archiveClientContext.controlResponseChannel as "
+                                  "Archive.Context.controlChannel.endpoint=" +
+                                      std::string{endpoint_value} + " and is not in the <host>:<port> format"));
+    }
+
+    return "aeron:udp?endpoint=" + std::string{endpoint_value.substr(0, separator)} + ":0";
+}
+
+std::expected<std::string, axc::core::Error> replication_extend_channel(std::string_view replication_channel,
+                                                                        std::int32_t replay_session_id,
+                                                                        bool response_mode)
+{
+    auto uri = parse_channel(replication_channel);
+    if (!uri)
+    {
+        return std::unexpected(uri.error());
+    }
+
+    // `ReplicationSession.java:531-536`: `rejoin=false` always; the session id
+    // only on a non-response channel (a response channel is keyed by its
+    // response correlation id instead).
+    BuildOptions build;
+    build.copy_mtu = true;
+    build.copy_term_length = true;
+    build.copy_sparse = true;
+    build.copy_eos = true;
+    build.copy_linger = true;
+    build.has_rejoin = true;
+    build.rejoin = false;
+    if (!response_mode)
+    {
+        build.has_session_id = true;
+        build.session_id = replay_session_id;
+    }
+    return build_channel(**uri, build);
+}
+
+std::expected<std::string, axc::core::Error> replication_replay_channel(std::string_view replication_channel,
+                                                                        std::string_view resolved_endpoint,
+                                                                        std::int32_t replay_session_id,
+                                                                        bool response_mode)
+{
+    auto uri = parse_channel(replication_channel);
+    if (!uri)
+    {
+        return std::unexpected(uri.error());
+    }
+
+    BuildOptions build;
+    build.copy_mtu = true;
+    build.copy_term_length = true;
+    build.copy_sparse = true;
+    build.copy_eos = true;
+    build.copy_linger = true;
+
+    // `ChannelUri.replaceEndpointWildcardPort` (`ChannelUri.java:613-636`).
+    const char* existing_endpoint = param(**uri, "endpoint");
+    if (!resolved_endpoint.empty())
+    {
+        const auto separator = resolved_endpoint.rfind(':');
+        if (std::string_view::npos == separator)
+        {
+            return std::unexpected(
+                axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                      "No port specified on resolvedEndpoint=" + std::string{resolved_endpoint}));
+        }
+        if (resolved_endpoint.size() >= 2 && resolved_endpoint.substr(resolved_endpoint.size() - 2) == ":0")
+        {
+            return std::unexpected(
+                axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                      "Wildcard port specified on resolvedEndpoint=" + std::string{resolved_endpoint}));
+        }
+
+        if (nullptr == existing_endpoint || '\0' == *existing_endpoint)
+        {
+            build.has_endpoint = true;
+            build.endpoint = std::string{resolved_endpoint};
+        }
+        else
+        {
+            const std::string_view endpoint_value{existing_endpoint};
+            if (endpoint_value.size() >= 2 && endpoint_value.substr(endpoint_value.size() - 2) == ":0")
+            {
+                build.has_endpoint = true;
+                build.endpoint = std::string{endpoint_value.substr(0, endpoint_value.size() - 2)} +
+                                 std::string{resolved_endpoint.substr(separator)};
+            }
+        }
+    }
+
+    if (!response_mode)
+    {
+        build.has_session_id = true;
+        build.session_id = replay_session_id;
+    }
     return build_channel(**uri, build);
 }
 
