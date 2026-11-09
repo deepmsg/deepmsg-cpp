@@ -264,6 +264,13 @@ public:
         std::int32_t session_id, std::int32_t stream_id, std::string_view stripped_channel,
         std::string_view original_channel, std::string_view source_identity);
 
+    /// `UpdateChannelSession.doWork` (`UpdateChannelSession.java:84-127`): read
+    /// the whole descriptor and write it back with only the two channel fields
+    /// replaced.
+    [[nodiscard]] std::expected<void, axc::core::Error> replace_recording_channels(std::int64_t recording_id,
+                                                                                   std::string_view stripped_channel,
+                                                                                   std::string_view original_channel);
+
     // `Catalog.java:751-818`.
     [[nodiscard]] std::int64_t start_position(std::int64_t recording_id) const;
     [[nodiscard]] std::expected<void, axc::core::Error> start_position(std::int64_t recording_id,

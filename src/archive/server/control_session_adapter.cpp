@@ -7,11 +7,14 @@
 
 #include "archive/server/channel_uri.h"
 #include "io_aeron_archive_codecs/ArchiveIdRequest.h"
+#include "io_aeron_archive_codecs/AttachSegmentsRequest.h"
 #include "io_aeron_archive_codecs/AuthConnectRequest.h"
 #include "io_aeron_archive_codecs/BooleanType.h"
 #include "io_aeron_archive_codecs/BoundedReplayRequest.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
+#include "io_aeron_archive_codecs/DeleteDetachedSegmentsRequest.h"
+#include "io_aeron_archive_codecs/DetachSegmentsRequest.h"
 #include "io_aeron_archive_codecs/ExtendRecordingRequest2.h"
 #include "io_aeron_archive_codecs/FindLastMatchingRecordingRequest.h"
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
@@ -19,6 +22,9 @@
 #include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MessageHeader.h"
+#include "io_aeron_archive_codecs/MigrateSegmentsRequest.h"
+#include "io_aeron_archive_codecs/PurgeRecordingRequest.h"
+#include "io_aeron_archive_codecs/PurgeSegmentsRequest.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
 #include "io_aeron_archive_codecs/ReplayRequest.h"
 #include "io_aeron_archive_codecs/ReplayTokenRequest.h"
@@ -31,6 +37,8 @@
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 #include "io_aeron_archive_codecs/StopReplayRequest.h"
+#include "io_aeron_archive_codecs/TruncateRecordingRequest.h"
+#include "io_aeron_archive_codecs/UpdateChannelRequest.h"
 
 namespace deepmsg::archive::server
 {
@@ -798,6 +806,218 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             {
                 found->second.session->abort(ControlSession::SESSION_CLOSED_MSG);
             }
+            return 1;
+        }
+
+        case TEMPLATE_TRUNCATE_RECORDING:
+        {
+            // `ControlSessionAdapter.java:395-416`.
+            archive_codecs::TruncateRecordingRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            TruncateRecordingRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+            request.position = decoder.position();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_truncate_recording(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_PURGE_RECORDING:
+        {
+            // `ControlSessionAdapter.java:684-702`.
+            archive_codecs::PurgeRecordingRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            PurgeRecordingRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_purge_recording(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_DETACH_SEGMENTS:
+        {
+            // `ControlSessionAdapter.java:631-651`.
+            archive_codecs::DetachSegmentsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            SegmentStartPositionRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+            request.new_start_position = decoder.newStartPosition();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_detach_segments(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_DELETE_DETACHED_SEGMENTS:
+        {
+            // `ControlSessionAdapter.java:653-672`.
+            archive_codecs::DeleteDetachedSegmentsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_delete_detached_segments(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_PURGE_SEGMENTS:
+        {
+            // `ControlSessionAdapter.java:674-702`.
+            archive_codecs::PurgeSegmentsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            SegmentStartPositionRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+            request.new_start_position = decoder.newStartPosition();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_purge_segments(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_ATTACH_SEGMENTS:
+        {
+            // `ControlSessionAdapter.java:724-744`.
+            archive_codecs::AttachSegmentsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            RecordingIdRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_attach_segments(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_MIGRATE_SEGMENTS:
+        {
+            // `ControlSessionAdapter.java:745-767`.
+            archive_codecs::MigrateSegmentsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            MigrateSegmentsRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.src_recording_id = decoder.srcRecordingId();
+            request.dst_recording_id = decoder.dstRecordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_migrate_segments(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_UPDATE_CHANNEL:
+        {
+            // `ControlSessionAdapter.java:1107-1128`: no `attemptToActivate`;
+            // the conductor is called directly.
+            archive_codecs::UpdateChannelRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ControlSession* session =
+                control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == session)
+            {
+                return 0;
+            }
+
+            UpdateChannelRequest request;
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+            request.channel = decoder.getChannelAsString();
+            request.session = session;
+
+            handler_.on_update_channel(request);
             return 1;
         }
 

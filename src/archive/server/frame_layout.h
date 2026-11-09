@@ -41,4 +41,16 @@ inline constexpr std::int64_t TERM_MAX_LENGTH = 1024LL * 1024 * 1024;
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+/// `LogBufferDescriptor.positionBitsToShift(termLength)` (`LogBufferDescriptor.java:321`):
+/// log2 of a term length that is a power of two.
+[[nodiscard]] constexpr std::int32_t position_bits_to_shift(std::int32_t term_length) noexcept
+{
+    std::int32_t bits = 0;
+    while ((1 << bits) < term_length)
+    {
+        bits++;
+    }
+    return bits;
+}
+
 }  // namespace deepmsg::archive::server

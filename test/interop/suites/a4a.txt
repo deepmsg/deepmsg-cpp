@@ -1,0 +1,61 @@
+# A4a (segment management) criteria: the reference C suite cases this card is
+# judged by, run against our binary with test/interop/run-c-suite.sh.
+#
+# The reference C suite is built once against the shim (see a2b.txt); the shim
+# maps `io.aeron.archive.ArchivingMediaDriver` to build/<preset>/apps/
+# deepmsg-archive-server/deepmsg-archive-server.
+#
+# Segment subset (6/6 green at the A4a close, 2026-11-09):
+#
+#   test/interop/run-c-suite.sh debug --gtest_filter='\
+#     AeronCArchiveTest.shouldRecordThenReplayThenTruncate:\
+#     AeronCArchiveTest.shouldPurgeStoppedRecording:\
+#     AeronCArchiveTest.shouldPurgeSegments:\
+#     AeronCArchiveTest.shouldDetachAndDeleteSegments:\
+#     AeronCArchiveTest.shouldDetachAndReattachSegments:\
+#     AeronCArchiveTest.shouldUpdateChannel'
+#
+# Full AeronCArchiveTest round (45 cases, still excluding the merge-from-live
+# case): 41 green / 4 red. The reds are A3a (2 URI listings) and A4b (2
+# replication cases) -- none of them segment management.
+#
+# Persistent subscription regression (card DoD): 78/80 and 50/50, unchanged
+# from the A3b close; the two reds are the upstream drop-wait race named in
+# a3b.txt.
+#
+# Not expressible in the C suite (unit tests instead):
+#   * AWAIT_REPLAYS_STOP (deleting while a replay is still in flight)
+#   * the `.del` fallback for an interrupted delete
+#   * maxDeletePosition and the startReplay guard
+#   * truncating inside a segment (the tail erase), the C case only checks the
+#     catalog fields
+#   * migrate (template 57): no C case at all
+#
+# Extra end-to-end criterion: `RecordingInteropTest
+# .truncateAndPurgeLeaveADirectoryTheReferenceToolVerifies` records, truncates
+# one recording to 0 and purges another, then runs the reference
+# `ArchiveTool verify` over the directory (the only check that looks at the
+# segment files after a delete).
+
+# Recording then truncate to the start position: start == stop, all files gone.
+AeronCArchiveTest.shouldRecordThenReplayThenTruncate
+
+# Purge: the catalog entry disappears and the one segment file is deleted.
+AeronCArchiveTest.shouldPurgeStoppedRecording
+
+# Detach + purge segments: delete the detached files, DELETE signal, new start.
+AeronCArchiveTest.shouldPurgeSegments
+
+# Detach + delete detached: three files, DELETE signal, new start.
+AeronCArchiveTest.shouldDetachAndDeleteSegments
+
+# Detach + attach: four segments re-attached, start back at 0.
+AeronCArchiveTest.shouldDetachAndReattachSegments
+
+# Update channel: original channel replaced, stripped channel loses
+# pub-wnd/term-length/mtu and keeps alias/ttl/rejoin.
+AeronCArchiveTest.shouldUpdateChannel
+
+# Known red until a later card (kept here so the gap is named, not silent):
+#   shouldFindMultipleRecordingDescriptors / shouldFindRecordingDescriptorForUri -> A3a
+#   shouldRecordReplicateThenReplay / shouldRecordReplicateTwice               -> A4b

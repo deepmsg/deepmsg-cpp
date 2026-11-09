@@ -169,6 +169,51 @@ struct ReplayTokenRequest
     ControlSession* session{nullptr};
 };
 
+/// `TruncateRecordingRequest` (13) (`ControlSessionAdapter.java:395-416`).
+struct TruncateRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    std::int64_t position{0};
+    ControlSession* session{nullptr};
+};
+
+/// `PurgeRecordingRequest` (104) (`ControlSessionAdapter.java:684-702`).
+struct PurgeRecordingRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    ControlSession* session{nullptr};
+};
+
+/// `DetachSegmentsRequest` (53) and `PurgeSegmentsRequest` (55)
+/// (`ControlSessionAdapter.java:631-702`).
+struct SegmentStartPositionRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    std::int64_t new_start_position{0};
+    ControlSession* session{nullptr};
+};
+
+/// `MigrateSegmentsRequest` (57) (`ControlSessionAdapter.java:745-767`).
+struct MigrateSegmentsRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t src_recording_id{0};
+    std::int64_t dst_recording_id{0};
+    ControlSession* session{nullptr};
+};
+
+/// `UpdateChannelRequest` (107) (`ControlSessionAdapter.java:1107-1128`).
+struct UpdateChannelRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    std::string channel;
+    ControlSession* session{nullptr};
+};
+
 /// What the adapter asks the conductor for.
 class ControlSessionHandler
 {
@@ -210,6 +255,16 @@ public:
 
     /// `ControlSession.onExtendRecording` (`ControlSession.java:478-486`).
     virtual void on_extend_recording(const ExtendRecordingRequest& request) = 0;
+
+    // Segment management (`ControlSession.java:505-578`, `:637-683`).
+    virtual void on_truncate_recording(const TruncateRecordingRequest& request) = 0;
+    virtual void on_purge_recording(const PurgeRecordingRequest& request) = 0;
+    virtual void on_detach_segments(const SegmentStartPositionRequest& request) = 0;
+    virtual void on_delete_detached_segments(const RecordingIdRequest& request) = 0;
+    virtual void on_purge_segments(const SegmentStartPositionRequest& request) = 0;
+    virtual void on_attach_segments(const RecordingIdRequest& request) = 0;
+    virtual void on_update_channel(const UpdateChannelRequest& request) = 0;
+    virtual void on_migrate_segments(const MigrateSegmentsRequest& request) = 0;
 
     /// `ControlSession.onStartReplay` / `onStartBoundedReplay` /
     /// `onStopReplay` / `onStopAllReplays` (`ControlSession.java:412-479`).
@@ -273,6 +328,14 @@ public:
     static constexpr std::int32_t TEMPLATE_STOP_ALL_REPLAYS = 19;
     static constexpr std::int32_t TEMPLATE_REPLAY_TOKEN = 105;
     static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
+    static constexpr std::int32_t TEMPLATE_TRUNCATE_RECORDING = 13;
+    static constexpr std::int32_t TEMPLATE_PURGE_RECORDING = 104;
+    static constexpr std::int32_t TEMPLATE_DETACH_SEGMENTS = 53;
+    static constexpr std::int32_t TEMPLATE_DELETE_DETACHED_SEGMENTS = 54;
+    static constexpr std::int32_t TEMPLATE_PURGE_SEGMENTS = 55;
+    static constexpr std::int32_t TEMPLATE_ATTACH_SEGMENTS = 56;
+    static constexpr std::int32_t TEMPLATE_MIGRATE_SEGMENTS = 57;
+    static constexpr std::int32_t TEMPLATE_UPDATE_CHANNEL = 107;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;
     static constexpr std::int32_t TEMPLATE_KEEP_ALIVE = 61;

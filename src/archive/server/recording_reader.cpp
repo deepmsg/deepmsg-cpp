@@ -22,12 +22,6 @@ template <typename T>
     return value;
 }
 
-/// `LogBufferDescriptor.positionBitsToShift` = `BitUtil.numberOfTrailingZeros`.
-[[nodiscard]] std::int32_t position_bits_to_shift(std::int32_t term_length) noexcept
-{
-    return __builtin_ctz(static_cast<unsigned>(term_length));
-}
-
 [[nodiscard]] axc::core::Error invalid(std::string_view message)
 {
     return axc::core::make_error(axc::core::ErrorCode::invalid_argument, message);

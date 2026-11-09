@@ -17,11 +17,13 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "archive/server/archive_conductor.h"
 #include "archive/server/catalog.h"
@@ -29,9 +31,14 @@
 #include "client/aeron_archive.h"
 #include "client/aeron_archive_async_connect.h"
 #include "fixture/c_driver.h"
+#include "fixture/java_process.h"
 
 #ifndef AXC_AERONMD_DEFAULT
 #define AXC_AERONMD_DEFAULT "aeronmd"
+#endif
+
+#ifndef AXC_AERON_JAR
+#define AXC_AERON_JAR ""
 #endif
 
 namespace
@@ -49,6 +56,31 @@ constexpr std::int32_t RECORDING_STREAM_ID = 33;
 constexpr std::int64_t ARCHIVE_ID = 42;
 constexpr std::int32_t MESSAGE_COUNT = 10;
 constexpr std::int32_t MESSAGE_LENGTH = 64;
+
+/// The reference `aeron-all` jar, or "" when it was not built.
+[[nodiscard]] std::string aeron_jar()
+{
+    if (const char* from_env = std::getenv("AXC_AERON_JAR"); nullptr != from_env && '\0' != *from_env)
+    {
+        return from_env;
+    }
+    return AXC_AERON_JAR;
+}
+
+/// `ArchiveTool`'s arguments (`CatalogInteropTest.archive_tool_arguments`).
+[[nodiscard]] std::vector<std::string> archive_tool_arguments(const std::string& jar, const std::string& archive_dir)
+{
+    return {"--add-opens",
+            "java.base/jdk.internal.misc=ALL-UNNAMED",
+            "--add-opens",
+            "java.base/sun.nio.ch=ALL-UNNAMED",
+            "--add-opens",
+            "java.base/java.util.zip=ALL-UNNAMED",
+            "-cp",
+            jar,
+            "io.aeron.archive.ArchiveTool",
+            archive_dir};
+}
 
 class RecordingInteropTest : public ::testing::Test
 {
@@ -110,6 +142,11 @@ protected:
         context.aeron_dir = aeron_dir_;
         context.control_channel = "aeron:ipc";
         context.control_stream_id = CONTROL_STREAM_ID;
+        // Same test-side split as `ConductorInteropTest`: the local control
+        // channel defaults to IPC and the same stream id, which would deliver
+        // every request twice.
+        context.local_control_channel = "aeron:ipc?term-length=64k";
+        context.local_control_stream_id = CONTROL_STREAM_ID + 2;
         context.archive_id = ARCHIVE_ID;
         context.recording.segment_file_length = 128 * 1024;
         context.recording.file_io_max_length = 64 * 1024;
@@ -275,6 +312,21 @@ protected:
         return published;
     }
 
+    [[nodiscard]] std::expected<axc::interop::ProcessResult, axc::core::Error> run_archive_tool(
+        const std::string& subcommand)
+    {
+        const std::string jar = aeron_jar();
+        if (jar.empty() || !std::filesystem::exists(jar))
+        {
+            return std::unexpected(axc::core::make_error(axc::core::ErrorCode::not_found,
+                                                         "reference jar not found (set AXC_AERON_JAR): " + jar));
+        }
+
+        std::vector<std::string> arguments = archive_tool_arguments(jar, archive_dir_);
+        arguments.push_back(subcommand);
+        return java_.run(arguments, std::chrono::seconds(60));
+    }
+
     [[nodiscard]] std::int64_t catalog_stop_position(std::int64_t recording_id)
     {
         CatalogOpenOptions options;
@@ -303,6 +355,7 @@ protected:
     aeron_archive_async_connect_t* async_{nullptr};
     aeron_t* aeron_{nullptr};
     aeron_context_t* aeron_context_{nullptr};
+    axc::interop::JavaProcess java_{};
 };
 
 TEST_F(RecordingInteropTest, stopBySubscriptionEndsTheRecordingAndWritesTheStopPosition)
@@ -432,6 +485,78 @@ TEST_F(RecordingInteropTest, stopByIdentityEndsTheRecordingAndReportsFound)
     EXPECT_EQ(published.position, catalog_stop_position(recording_id));
 
     (void)aeron_publication_close(published.publication, nullptr, nullptr);
+}
+
+TEST_F(RecordingInteropTest, truncateAndPurgeLeaveADirectoryTheReferenceToolVerifies)
+{
+    if (aeron_jar().empty() || !std::filesystem::exists(aeron_jar()))
+    {
+        GTEST_SKIP() << "reference jar not found (set AXC_AERON_JAR): " << aeron_jar();
+    }
+
+    start_conductor();
+    connect_client();
+    start_local_aeron();
+
+    // Recording A: stop it, then truncate it to position 0 (all files gone).
+    std::int64_t subscription_id = 0;
+    ASSERT_EQ(0, aeron_archive_start_recording(&subscription_id, client_archive_, recording_channel().c_str(),
+                                               RECORDING_STREAM_ID, AERON_ARCHIVE_SOURCE_LOCATION_LOCAL, false));
+    std::int64_t recording_a = -1;
+    {
+        const Published published = publish_messages();
+        const std::int64_t counter_id = wait_for_recording_counter(published.session_id);
+        ASSERT_NE(static_cast<std::int64_t>(AERON_NULL_COUNTER_ID), counter_id);
+        recording_a = recording_id_of(static_cast<std::int32_t>(counter_id));
+        ASSERT_EQ(published.position, wait_for_position(static_cast<std::int32_t>(counter_id), published.position));
+        (void)aeron_publication_close(published.publication, nullptr, nullptr);
+    }
+    ASSERT_GE(recording_a, 0);
+    ASSERT_EQ(0, aeron_archive_stop_recording_subscription(client_archive_, subscription_id));
+    for (int iteration = 0; iteration < 20'000 && conductor_->recording_session_count() > 0; iteration++)
+    {
+        ::usleep(200);
+    }
+    ASSERT_EQ(0u, conductor_->recording_session_count());
+
+    std::int64_t truncated = -1;
+    ASSERT_EQ(0, aeron_archive_truncate_recording(&truncated, client_archive_, recording_a, 0));
+    EXPECT_EQ(1, truncated) << "the ten messages live in one segment";
+
+    // Recording B: stop it, then purge it (the catalog entry disappears).
+    std::int64_t second_subscription_id = 0;
+    ASSERT_EQ(0, aeron_archive_start_recording(&second_subscription_id, client_archive_, recording_channel().c_str(),
+                                               RECORDING_STREAM_ID, AERON_ARCHIVE_SOURCE_LOCATION_LOCAL, false));
+    std::int64_t recording_b = -1;
+    {
+        const Published published = publish_messages();
+        const std::int64_t counter_id = wait_for_recording_counter(published.session_id);
+        ASSERT_NE(static_cast<std::int64_t>(AERON_NULL_COUNTER_ID), counter_id);
+        recording_b = recording_id_of(static_cast<std::int32_t>(counter_id));
+        ASSERT_EQ(published.position, wait_for_position(static_cast<std::int32_t>(counter_id), published.position));
+        (void)aeron_publication_close(published.publication, nullptr, nullptr);
+    }
+    ASSERT_GT(recording_b, recording_a);
+    ASSERT_EQ(0, aeron_archive_stop_recording_subscription(client_archive_, second_subscription_id));
+    for (int iteration = 0; iteration < 20'000 && conductor_->recording_session_count() > 0; iteration++)
+    {
+        ::usleep(200);
+    }
+    ASSERT_EQ(0u, conductor_->recording_session_count());
+
+    std::int64_t purged = -1;
+    ASSERT_EQ(0, aeron_archive_purge_recording(&purged, client_archive_, recording_b));
+    EXPECT_EQ(1, purged);
+
+    stop_conductor();
+
+    // The reference tool's own consistency pass: catalog fields against the
+    // segment files that are actually on disk.
+    auto verified = run_archive_tool("verify");
+    ASSERT_TRUE(verified) << verified.error().message.view();
+    ASSERT_EQ(0, verified->exit_code) << verified->output;
+    EXPECT_NE(std::string::npos, verified->output.find("recordingId=" + std::to_string(recording_a)))
+        << verified->output;
 }
 
 }  // namespace

@@ -21,11 +21,13 @@
 #include "archive/server/control_session_adapter.h"
 #include "archive/server/create_replay_publication_session.h"
 #include "archive/server/deepmsg_response_publication.h"
+#include "archive/server/delete_segments_session.h"
 #include "archive/server/epoch_clock_source.h"
 #include "archive/server/recorder.h"
 #include "archive/server/recording_events.h"
 #include "archive/server/replay_session.h"
 #include "archive/server/replayer.h"
+#include "archive/server/segment_validation.h"
 #include "archive/server/session_worker.h"
 #include "core/counters/counter_target.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -84,7 +86,9 @@ struct ArchiveConductorContext
 class ArchiveConductor final : public ControlSessionHandler,
                                public ReplayControlResponses,
                                public ReplayWarningSink,
-                               public CreateReplayPublicationSessionHandler
+                               public CreateReplayPublicationSessionHandler,
+                               public DeleteSegmentsControl,
+                               public DeleteSegmentsResponder
 {
 public:
     /// `AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION`.
@@ -118,6 +122,14 @@ public:
     void on_list_recording(const RecordingIdRequest& request) override;
     void on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request) override;
     void on_extend_recording(const ExtendRecordingRequest& request) override;
+    void on_truncate_recording(const TruncateRecordingRequest& request) override;
+    void on_purge_recording(const PurgeRecordingRequest& request) override;
+    void on_detach_segments(const SegmentStartPositionRequest& request) override;
+    void on_delete_detached_segments(const RecordingIdRequest& request) override;
+    void on_purge_segments(const SegmentStartPositionRequest& request) override;
+    void on_attach_segments(const RecordingIdRequest& request) override;
+    void on_update_channel(const UpdateChannelRequest& request) override;
+    void on_migrate_segments(const MigrateSegmentsRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;
@@ -144,6 +156,16 @@ public:
                             std::unique_ptr<ReplayPublication> publication) override;
 
     void log_warning(std::string_view message) override;
+
+    // DeleteSegmentsControl (`ControlSession.archiveConductor()`).
+    [[nodiscard]] bool has_in_progress_replays(std::int64_t recording_id) override;
+    void remove_delete_segments_session(std::int64_t recording_id) override;
+    void log_error(std::string_view message) override;
+
+    // DeleteSegmentsResponder (`ControlSession.sendSignal` / `sendErrorResponse`).
+    void send_delete_signal(std::int64_t control_session_id, std::int64_t correlation_id,
+                            std::int64_t recording_id) override;
+    void send_error(std::int64_t control_session_id, std::int64_t correlation_id, std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
     {
@@ -344,7 +366,11 @@ private:
         enum class Kind
         {
             recording_by_id,
-            subscriptions
+            subscriptions,
+            /// `UpdateChannelSession` (`UpdateChannelSession.java:29-148`): a
+            /// one-pass session that occupies the control session's active
+            /// listing slot.
+            update_channel
         };
 
         Kind kind{Kind::recording_by_id};
@@ -356,6 +382,9 @@ private:
         std::int32_t stream_id{0};
         bool apply_stream_id{false};
         std::string channel_fragment;
+        /// `update_channel` only: the request's channel and its stripped form.
+        std::string original_channel;
+        std::string stripped_channel;
         std::int32_t sent{0};
         bool done{false};
     };
@@ -384,6 +413,33 @@ private:
     /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
     std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
+
+    // Segment management (A4a).
+    /// `ArchiveConductor.deleteSegmentsSessionByIdMap` (`:270`): keyed by
+    /// **recordingId**, exactly like the reference.
+    SessionWorker<DeleteSegmentsSession> delete_sessions_;
+    std::unordered_map<std::int64_t, DeleteSegmentsSession*> delete_session_by_recording_id_;
+
+    /// `ArchiveConductor.deleteSegments` (`:2654-2670`): create the session,
+    /// send the OK with the file count and emit DELETE itself when the list is
+    /// empty (no session would ever close).
+    void delete_segments(ControlSession& session, std::int64_t correlation_id, std::int64_t recording_id,
+                         std::vector<std::string> files, bool await_replays_stop);
+
+    /// `ArchiveConductor.isDeleteAllowed` (`:1969-1979`).
+    [[nodiscard]] bool is_delete_allowed(ControlSession& session, std::int64_t correlation_id,
+                                         std::int64_t recording_id);
+
+    /// `ArchiveConductor.stopAllReplays(recordingId)` (`:1048-1062`): abort the
+    /// recording's replay sessions; no OK response.
+    void stop_all_replays(std::int64_t recording_id);
+
+    /// `RecordingSession.recordedPosition()` for the live session, else
+    /// `Aeron.NULL_POSITION`.
+    [[nodiscard]] std::int64_t recorded_position_for(std::int64_t recording_id) const;
+
+    /// The live replays of one recording, in the shape `isValidDetach` reads.
+    [[nodiscard]] std::vector<ReplayInProgressInfo> replays_for(std::int64_t recording_id) const;
 };
 
 }  // namespace deepmsg::archive::server

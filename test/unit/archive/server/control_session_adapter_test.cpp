@@ -14,17 +14,23 @@
 #include "archive/server/control_session.h"
 #include "archive/server/control_session_adapter.h"
 #include "archive/server/epoch_clock_source.h"
+#include "io_aeron_archive_codecs/AttachSegmentsRequest.h"
 #include "io_aeron_archive_codecs/AuthConnectRequest.h"
 #include "io_aeron_archive_codecs/BooleanType.h"
 #include "io_aeron_archive_codecs/BoundedReplayRequest.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
+#include "io_aeron_archive_codecs/DeleteDetachedSegmentsRequest.h"
+#include "io_aeron_archive_codecs/DetachSegmentsRequest.h"
 #include "io_aeron_archive_codecs/ExtendRecordingRequest2.h"
 #include "io_aeron_archive_codecs/FindLastMatchingRecordingRequest.h"
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
 #include "io_aeron_archive_codecs/ListRecordingRequest.h"
 #include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
+#include "io_aeron_archive_codecs/MigrateSegmentsRequest.h"
+#include "io_aeron_archive_codecs/PurgeRecordingRequest.h"
+#include "io_aeron_archive_codecs/PurgeSegmentsRequest.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
 #include "io_aeron_archive_codecs/ReplayRequest.h"
 #include "io_aeron_archive_codecs/ReplayTokenRequest.h"
@@ -37,6 +43,8 @@
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 #include "io_aeron_archive_codecs/StopReplayRequest.h"
+#include "io_aeron_archive_codecs/TruncateRecordingRequest.h"
+#include "io_aeron_archive_codecs/UpdateChannelRequest.h"
 
 namespace
 {
@@ -54,16 +62,21 @@ using deepmsg::archive::server::DefaultAuthenticator;
 using deepmsg::archive::server::ExtendRecordingRequest;
 using deepmsg::archive::server::FindLastMatchingRecordingRequest;
 using deepmsg::archive::server::ListRecordingSubscriptionsRequest;
+using deepmsg::archive::server::MigrateSegmentsRequest;
+using deepmsg::archive::server::PurgeRecordingRequest;
 using deepmsg::archive::server::RecordingIdRequest;
 using deepmsg::archive::server::ReplayRequest;
 using deepmsg::archive::server::ReplayTokenRequest;
 using deepmsg::archive::server::ResponsePublication;
+using deepmsg::archive::server::SegmentStartPositionRequest;
 using deepmsg::archive::server::StartRecordingRequest;
 using deepmsg::archive::server::StopAllReplaysRequest;
 using deepmsg::archive::server::StopRecordingByIdentityRequest;
 using deepmsg::archive::server::StopRecordingRequest;
 using deepmsg::archive::server::StopRecordingSubscriptionRequest;
 using deepmsg::archive::server::StopReplayRequest;
+using deepmsg::archive::server::TruncateRecordingRequest;
+using deepmsg::archive::server::UpdateChannelRequest;
 using deepmsg::archive::server::archive_codecs::AuthConnectRequest;
 using deepmsg::archive::server::archive_codecs::BooleanType;
 using deepmsg::archive::server::archive_codecs::ChallengeResponse;
@@ -75,10 +88,18 @@ using RecordingPositionRequest = deepmsg::archive::server::archive_codecs::Recor
 using StartPositionRequest = deepmsg::archive::server::archive_codecs::StartPositionRequest;
 using StopPositionRequest = deepmsg::archive::server::archive_codecs::StopPositionRequest;
 using MaxRecordedPositionRequest = deepmsg::archive::server::archive_codecs::MaxRecordedPositionRequest;
+using AttachSegmentsEncoder = deepmsg::archive::server::archive_codecs::AttachSegmentsRequest;
+using DeleteDetachedSegmentsEncoder = deepmsg::archive::server::archive_codecs::DeleteDetachedSegmentsRequest;
+using DetachSegmentsEncoder = deepmsg::archive::server::archive_codecs::DetachSegmentsRequest;
 using ExtendRecordingEncoder = deepmsg::archive::server::archive_codecs::ExtendRecordingRequest2;
+using PurgeRecordingEncoder = deepmsg::archive::server::archive_codecs::PurgeRecordingRequest;
+using PurgeSegmentsEncoder = deepmsg::archive::server::archive_codecs::PurgeSegmentsRequest;
+using TruncateRecordingEncoder = deepmsg::archive::server::archive_codecs::TruncateRecordingRequest;
+using UpdateChannelEncoder = deepmsg::archive::server::archive_codecs::UpdateChannelRequest;
 using FindLastEncoder = deepmsg::archive::server::archive_codecs::FindLastMatchingRecordingRequest;
 using ListRecordingEncoder = deepmsg::archive::server::archive_codecs::ListRecordingRequest;
 using ListRecordingSubscriptionsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingSubscriptionsRequest;
+using MigrateSegmentsEncoder = deepmsg::archive::server::archive_codecs::MigrateSegmentsRequest;
 using StopRecordingByIdentityEncoder = deepmsg::archive::server::archive_codecs::StopRecordingByIdentityRequest;
 using StopRecordingEncoder = deepmsg::archive::server::archive_codecs::StopRecordingRequest;
 using StopRecordingSubscriptionEncoder = deepmsg::archive::server::archive_codecs::StopRecordingSubscriptionRequest;
@@ -188,6 +209,46 @@ public:
         extend_recording_requests.push_back(request);
     }
 
+    void on_truncate_recording(const TruncateRecordingRequest& request) override
+    {
+        truncate_recording_requests.push_back(request);
+    }
+
+    void on_purge_recording(const PurgeRecordingRequest& request) override
+    {
+        purge_recording_requests.push_back(request);
+    }
+
+    void on_detach_segments(const SegmentStartPositionRequest& request) override
+    {
+        detach_segments_requests.push_back(request);
+    }
+
+    void on_delete_detached_segments(const RecordingIdRequest& request) override
+    {
+        delete_detached_segments_requests.push_back(request);
+    }
+
+    void on_purge_segments(const SegmentStartPositionRequest& request) override
+    {
+        purge_segments_requests.push_back(request);
+    }
+
+    void on_attach_segments(const RecordingIdRequest& request) override
+    {
+        attach_segments_requests.push_back(request);
+    }
+
+    void on_update_channel(const UpdateChannelRequest& request) override
+    {
+        update_channel_requests.push_back(request);
+    }
+
+    void on_migrate_segments(const MigrateSegmentsRequest& request) override
+    {
+        migrate_segments_requests.push_back(request);
+    }
+
     void on_start_replay(const ReplayRequest& request) override
     {
         start_replay_requests.push_back(request);
@@ -252,6 +313,14 @@ public:
     std::vector<RecordingIdRequest> list_recording_requests;
     std::vector<ListRecordingSubscriptionsRequest> list_recording_subscriptions_requests;
     std::vector<ExtendRecordingRequest> extend_recording_requests;
+    std::vector<TruncateRecordingRequest> truncate_recording_requests;
+    std::vector<PurgeRecordingRequest> purge_recording_requests;
+    std::vector<SegmentStartPositionRequest> detach_segments_requests;
+    std::vector<RecordingIdRequest> delete_detached_segments_requests;
+    std::vector<SegmentStartPositionRequest> purge_segments_requests;
+    std::vector<RecordingIdRequest> attach_segments_requests;
+    std::vector<UpdateChannelRequest> update_channel_requests;
+    std::vector<MigrateSegmentsRequest> migrate_segments_requests;
     std::vector<ReplayRequest> start_replay_requests;
     std::vector<BoundedReplayRequest> bounded_replay_requests;
     std::vector<StopReplayRequest> stop_replay_requests;
@@ -345,6 +414,113 @@ public:
     StopRecordingByIdentityEncoder encoder;
     encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
     encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_truncate(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                        std::int64_t recording_id, std::int64_t position)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    TruncateRecordingEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .recordingId(recording_id)
+        .position(position);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_purge_recording(std::int64_t control_session_id,
+                                                               std::int64_t correlation_id, std::int64_t recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    PurgeRecordingEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_detach_segments(std::int64_t control_session_id,
+                                                               std::int64_t correlation_id, std::int64_t recording_id,
+                                                               std::int64_t new_start_position)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    DetachSegmentsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .recordingId(recording_id)
+        .newStartPosition(new_start_position);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_delete_detached_segments(std::int64_t control_session_id,
+                                                                        std::int64_t correlation_id,
+                                                                        std::int64_t recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    DeleteDetachedSegmentsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_purge_segments(std::int64_t control_session_id,
+                                                              std::int64_t correlation_id, std::int64_t recording_id,
+                                                              std::int64_t new_start_position)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    PurgeSegmentsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .recordingId(recording_id)
+        .newStartPosition(new_start_position);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_attach_segments(std::int64_t control_session_id,
+                                                               std::int64_t correlation_id, std::int64_t recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    AttachSegmentsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_migrate_segments(std::int64_t control_session_id,
+                                                                std::int64_t correlation_id,
+                                                                std::int64_t src_recording_id,
+                                                                std::int64_t dst_recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    MigrateSegmentsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .srcRecordingId(src_recording_id)
+        .dstRecordingId(dst_recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_update_channel(std::int64_t control_session_id,
+                                                              std::int64_t correlation_id, std::int64_t recording_id,
+                                                              const std::string& channel)
+{
+    std::vector<std::uint8_t> buffer(256, 0);
+    UpdateChannelEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    encoder.putChannel(channel.data(), static_cast<std::uint32_t>(channel.size()));
     buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
     return buffer;
 }
@@ -823,6 +999,94 @@ TEST_F(ControlSessionAdapterTest, aResponseModeReplayResolvesTheSessionThroughTh
     EXPECT_EQ(1, handler_.token_lookups);
     ASSERT_EQ(1u, handler_.start_replay_requests.size());
     EXPECT_NE(std::string::npos, handler_.start_replay_requests[0].replay_channel.find("response-correlation-id=0"));
+}
+
+TEST_F(ControlSessionAdapterTest, theSegmentManagementRequestsReachTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto truncate = encode_truncate(7, 50, 9, 4096);
+    EXPECT_EQ(1, adapter_->on_fragment(truncate.data(), static_cast<std::int32_t>(truncate.size()), &image_));
+    ASSERT_EQ(1u, handler_.truncate_recording_requests.size());
+    EXPECT_EQ(50, handler_.truncate_recording_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.truncate_recording_requests[0].recording_id);
+    EXPECT_EQ(4096, handler_.truncate_recording_requests[0].position);
+    EXPECT_EQ(ControlSession::State::active, handler_.session->state());
+
+    const auto purge = encode_purge_recording(7, 51, 9);
+    EXPECT_EQ(1, adapter_->on_fragment(purge.data(), static_cast<std::int32_t>(purge.size()), &image_));
+    ASSERT_EQ(1u, handler_.purge_recording_requests.size());
+    EXPECT_EQ(51, handler_.purge_recording_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.purge_recording_requests[0].recording_id);
+
+    const auto detach = encode_detach_segments(7, 52, 9, 262144);
+    EXPECT_EQ(1, adapter_->on_fragment(detach.data(), static_cast<std::int32_t>(detach.size()), &image_));
+    ASSERT_EQ(1u, handler_.detach_segments_requests.size());
+    EXPECT_EQ(52, handler_.detach_segments_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.detach_segments_requests[0].recording_id);
+    EXPECT_EQ(262144, handler_.detach_segments_requests[0].new_start_position);
+
+    const auto delete_detached = encode_delete_detached_segments(7, 53, 9);
+    EXPECT_EQ(
+        1, adapter_->on_fragment(delete_detached.data(), static_cast<std::int32_t>(delete_detached.size()), &image_));
+    ASSERT_EQ(1u, handler_.delete_detached_segments_requests.size());
+    EXPECT_EQ(53, handler_.delete_detached_segments_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.delete_detached_segments_requests[0].recording_id);
+
+    const auto purge_segments = encode_purge_segments(7, 54, 9, 262144);
+    EXPECT_EQ(1,
+              adapter_->on_fragment(purge_segments.data(), static_cast<std::int32_t>(purge_segments.size()), &image_));
+    ASSERT_EQ(1u, handler_.purge_segments_requests.size());
+    EXPECT_EQ(54, handler_.purge_segments_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.purge_segments_requests[0].recording_id);
+    EXPECT_EQ(262144, handler_.purge_segments_requests[0].new_start_position);
+
+    const auto attach = encode_attach_segments(7, 55, 9);
+    EXPECT_EQ(1, adapter_->on_fragment(attach.data(), static_cast<std::int32_t>(attach.size()), &image_));
+    ASSERT_EQ(1u, handler_.attach_segments_requests.size());
+    EXPECT_EQ(55, handler_.attach_segments_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.attach_segments_requests[0].recording_id);
+    EXPECT_EQ(handler_.session.get(), handler_.attach_segments_requests[0].session);
+}
+
+TEST_F(ControlSessionAdapterTest, anUpdateChannelRequestDoesNotActivateItsSession)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto update = encode_update_channel(7, 60, 9, "aeron:ipc?alias=test42|rejoin=false");
+    EXPECT_EQ(1, adapter_->on_fragment(update.data(), static_cast<std::int32_t>(update.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.update_channel_requests.size());
+    EXPECT_EQ(60, handler_.update_channel_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.update_channel_requests[0].recording_id);
+    EXPECT_EQ("aeron:ipc?alias=test42|rejoin=false", handler_.update_channel_requests[0].channel);
+    EXPECT_EQ(handler_.session.get(), handler_.update_channel_requests[0].session);
+    // `ControlSessionAdapter.java:1107-1128` skips `attemptToActivate`.
+    EXPECT_EQ(ControlSession::State::authenticated, handler_.session->state());
+}
+
+TEST_F(ControlSessionAdapterTest, aMigrateSegmentsRequestReachesTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto migrate = encode_migrate_segments(7, 61, 9, 10);
+    EXPECT_EQ(1, adapter_->on_fragment(migrate.data(), static_cast<std::int32_t>(migrate.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.migrate_segments_requests.size());
+    EXPECT_EQ(61, handler_.migrate_segments_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.migrate_segments_requests[0].src_recording_id);
+    EXPECT_EQ(10, handler_.migrate_segments_requests[0].dst_recording_id);
+    EXPECT_EQ(handler_.session.get(), handler_.migrate_segments_requests[0].session);
+    EXPECT_EQ(ControlSession::State::active, handler_.session->state());
 }
 
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)

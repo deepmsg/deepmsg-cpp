@@ -20,12 +20,14 @@ axc_add_library(axc_archive_server
         checksum.cpp
         epoch_clock_source.cpp
         segment_files.cpp
+        segment_validation.cpp
         recording_writer.cpp
         recording_reader.cpp
         replay_publication.cpp
         replay_session.cpp
         replayer.cpp
         create_replay_publication_session.cpp
+        delete_segments_session.cpp
     DEPS
         axc_core
         axc_sbe
