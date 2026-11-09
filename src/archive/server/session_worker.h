@@ -82,6 +82,18 @@ public:
         return work_count;
     }
 
+    /// Shutdown of a worker that does not close its sessions itself: hands every
+    /// remaining session's ownership to `on_session` and empties the worker.
+    template <class OnSession>
+    void drain(const OnSession& on_session)
+    {
+        for (SessionPtr& session : sessions_)
+        {
+            on_session(std::move(session));
+        }
+        sessions_.clear();
+    }
+
     [[nodiscard]] std::size_t size() const noexcept
     {
         return sessions_.size();

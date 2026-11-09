@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -207,11 +208,14 @@ private:
     std::unique_ptr<axc::core::CounterTarget> position_;
     std::unique_ptr<RecordingImage> image_;
     State state_{State::init};
-    std::string abort_reason_;
+    /// Written by the conductor, read by the recorder thread: the flag is the
+    /// release/acquire edge for the fixed reason buffer (`abort()` can run on
+    /// another thread in DEDICATED mode).
+    std::atomic<bool> aborted_{false};
+    char abort_reason_[64]{};
     std::string error_message_;
     /// `RecordingSession.progressEventPosition` (`RecordingSession.java:79`).
     std::int64_t progress_event_position_{0};
-    bool aborted_{false};
 };
 
 }  // namespace deepmsg::archive::server

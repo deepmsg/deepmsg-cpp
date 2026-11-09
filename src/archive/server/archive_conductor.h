@@ -32,7 +32,9 @@
 #include "archive/server/segment_validation.h"
 #include "archive/server/session_worker.h"
 #include "archive/server/threading.h"
+#include "core/collections/many_to_one_queue.h"
 #include "core/counters/counter_target.h"
+#include "core/counters/duty_cycle_tracker.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error.h"
 
@@ -64,8 +66,10 @@ struct ArchiveConductorContext
     /// (`AeronArchive.java:2674-2692`).
     std::int64_t message_timeout_ms{10'000};
     std::int32_t message_retry_attempts{3};
-    /// `aeron.archive.threading.mode` plus the three agent settings.
-    ThreadingSettings threading;
+    /// `aeron.archive.threading.mode` plus the three agent settings. The bare
+    /// conductor defaults to the caller-driven shape; the launch layer passes
+    /// the reference default (DEDICATED) in.
+    ThreadingSettings threading{ThreadingSettings::caller_driven()};
     /// `Archive.Context.replicationChannel` (`Archive.java:1301-1303`).
     std::string replication_channel;
     /// Empty ⇒ the Aeron default (`/dev/shm/aeron-<user>`).
@@ -255,6 +259,23 @@ public:
 
     [[nodiscard]] std::int64_t recording_sessions_counter_value() const noexcept;
 
+    [[nodiscard]] bool is_dedicated() const noexcept
+    {
+        return ArchiveThreadingMode::dedicated == context_.threading.mode;
+    }
+
+    /// The two worker agents (`DedicatedModeArchiveConductor.newRecorder` /
+    /// `newReplayer`); the runtime starts them on their own threads.
+    [[nodiscard]] Recorder& recorder() noexcept
+    {
+        return recorder_;
+    }
+
+    [[nodiscard]] Replayer& replayer() noexcept
+    {
+        return replayer_;
+    }
+
     [[nodiscard]] const std::vector<std::string>& warnings() const noexcept
     {
         return warnings_;
@@ -348,6 +369,23 @@ private:
     void mark_counter_closed(std::int32_t counter_id);
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     [[nodiscard]] int extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
+
+    /// DEDICATED handoff (`DedicatedModeArchiveConductor.java:79-137`): the
+    /// conductor owns creation and closing, the worker owns running.
+    void add_recording_session(std::unique_ptr<RecordingSession> session);
+    void add_replay_session(std::unique_ptr<ReplaySession> session);
+    [[nodiscard]] int process_close_queue();
+
+    /// Duty-cycle counters 103/104 for one agent (`Archive.java:1470-1545`).
+    struct DutyCycleTrackers
+    {
+        std::optional<axc::core::PositionWriterTarget> max_cycle_time;
+        std::optional<axc::core::PositionWriterTarget> threshold_exceeded;
+        axc::core::DutyCycleTracker tracker;
+    };
+    [[nodiscard]] std::expected<void, axc::core::Error> allocate_duty_cycle(DutyCycleTrackers& trackers,
+                                                                            std::string_view role,
+                                                                            std::int64_t threshold_ns);
 
     /// `ArchiveConductor.extendRecording` (`ArchiveConductor.java:1067-1151`):
     /// validation, the recording-subscription add and the OK/ERROR, shared by
@@ -498,6 +536,15 @@ private:
     /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
     std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
+
+    // DEDICATED handoff (A5a).
+    axc::core::ManyToOneQueue<RecordingSession> recording_inbox_;
+    axc::core::ManyToOneQueue<ReplaySession> replay_inbox_;
+    axc::core::ManyToOneQueue<RecordingSession> recording_close_queue_;
+    axc::core::ManyToOneQueue<ReplaySession> replay_close_queue_;
+    DutyCycleTrackers conductor_duty_cycle_;
+    DutyCycleTrackers recorder_duty_cycle_;
+    DutyCycleTrackers replayer_duty_cycle_;
 
     // Replication (A4b).
     SessionWorker<ReplicationSession> replication_sessions_;

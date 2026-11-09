@@ -46,6 +46,9 @@ enum class AgentRole
 /// `CommonContext.threadName(newName, classicName)` (`CommonContext.java:582-591`).
 [[nodiscard]] std::string_view thread_name(ThreadNaming naming, AgentRole role) noexcept;
 
+/// `ArchiveThreadingMode.name()`: the duty-cycle labels carry it.
+[[nodiscard]] std::string_view threading_mode_name(ArchiveThreadingMode mode) noexcept;
+
 /// The three idle strategies, three affinities and three cycle thresholds
 /// (`Archive.java:404-449`, `:571-601`, `:1489-1545`).
 struct ThreadingSettings
@@ -65,6 +68,18 @@ struct ThreadingSettings
     std::int64_t conductor_cycle_threshold_ns{100'000'000};
     std::int64_t recorder_cycle_threshold_ns{100'000'000};
     std::int64_t replayer_cycle_threshold_ns{100'000'000};
+
+    /// The bare `ArchiveConductorContext` default: the conductor object on its
+    /// own is caller-driven (the reference's INVOKER shape), so a library user
+    /// that never reads `aeron.archive.threading.mode` must not be moved onto
+    /// three threads. The launch layer applies the reference default
+    /// (`DEDICATED`) from `parse_threading_settings`.
+    [[nodiscard]] static ThreadingSettings caller_driven() noexcept
+    {
+        ThreadingSettings settings;
+        settings.mode = ArchiveThreadingMode::shared;
+        return settings;
+    }
 };
 
 /// Reads `aeron.archive.threading.mode`, the three idle names, the three

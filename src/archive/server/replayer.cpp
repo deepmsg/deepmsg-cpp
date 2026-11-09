@@ -1,6 +1,10 @@
 #include "archive/server/replayer.h"
 
+#include <sched.h>
+
 #include <utility>
+
+#include "core/time/clock.h"
 
 namespace deepmsg::archive::server
 {
@@ -32,6 +36,65 @@ void Replayer::close()
     total_read_bytes_ = 0;
     total_read_time_ns_ = 0;
     max_read_time_ns_ = 0;
+}
+
+void Replayer::set_queues(axc::core::ManyToOneQueue<ReplaySession>* inbox,
+                          axc::core::ManyToOneQueue<ReplaySession>* close_queue) noexcept
+{
+    inbox_ = inbox;
+    close_queue_ = close_queue;
+}
+
+void Replayer::hand_back(ReplaySession* session) noexcept
+{
+    // `DedicatedModeReplayer.closeSession` (`DedicatedModeArchiveConductor.java:388-414`).
+    while (!close_queue_->push(session))
+    {
+        ::sched_yield();
+    }
+}
+
+void Replayer::on_start_threaded() noexcept
+{
+    if (nullptr != duty_cycle_)
+    {
+        duty_cycle_->update(axc::core::NanoClock::now());
+    }
+}
+
+int Replayer::do_work_threaded()
+{
+    // `DedicatedModeReplayer.doWork` (`DedicatedModeArchiveConductor.java:330-360`).
+    int work_count = 0;
+
+    if (nullptr != duty_cycle_)
+    {
+        duty_cycle_->measure_and_update(axc::core::NanoClock::now());
+    }
+
+    while (auto* session = inbox_->pop())
+    {
+        sessions_.add(std::unique_ptr<ReplaySession>(session));
+        ++work_count;
+    }
+
+    work_count +=
+        sessions_.do_work_releasing([this](std::unique_ptr<ReplaySession> session) { hand_back(session.release()); });
+
+    if (work_count > 0)
+    {
+        publish();
+    }
+    return work_count;
+}
+
+void Replayer::close_threaded()
+{
+    while (auto* session = inbox_->pop())
+    {
+        sessions_.add(std::unique_ptr<ReplaySession>(session));
+    }
+    sessions_.drain([this](std::unique_ptr<ReplaySession> session) { hand_back(session.release()); });
 }
 
 void Replayer::bytes_read(std::int64_t bytes) noexcept

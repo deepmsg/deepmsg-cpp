@@ -9,9 +9,12 @@
 // i.e. an **empty environment**, so environment-driven launchers cannot be used
 // for it; see records/a2b.md.)
 
+#include <pthread.h>
+
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -78,6 +81,11 @@ bool takes_value(std::string_view option) noexcept
            option == "-agentlib";
 }
 
+/// `io.aeron.archive.Archive` is the standalone shape (`Archive.launch`),
+/// `ArchivingMediaDriver` embeds the driver; anything else keeps the historical
+/// embedded behaviour.
+constexpr std::string_view STANDALONE_MAIN_CLASS{"io.aeron.archive.Archive"};
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -88,9 +96,15 @@ int main(int argc, char** argv)
         fail(std::string{properties.error().message.view()});
     }
 
+    bool standalone = false;
     for (int index = 1; index < argc; index++)
     {
         const std::string_view argument{argv[index]};
+        if (argument == STANDALONE_MAIN_CLASS)
+        {
+            standalone = true;
+            continue;
+        }
         if (argument.empty() || argument.substr(0, 2) == "-D")
         {
             // Consumed by `PropertySource::from_args`.
@@ -140,40 +154,79 @@ int main(int argc, char** argv)
     std::signal(SIGINT, &on_signal);
     std::signal(SIGTERM, &on_signal);
 
+    // The embedded shape starts the driver in this process; the standalone
+    // shape (`io.aeron.archive.Archive`) connects to the driver already running
+    // in `aeron.dir` and never closes it.
     aeron_driver_context_t* driver_context = nullptr;
-    if (0 != aeron_driver_context_init(&driver_context))
-    {
-        fail(std::string{"driver context init: "} + aeron_errmsg());
-    }
-    (void)aeron_driver_context_set_driver_termination_hook(driver_context, &on_driver_termination, nullptr);
-
     aeron_driver_t* driver = nullptr;
-    if (0 != aeron_driver_init(&driver, driver_context))
+    if (!standalone)
     {
-        fail(std::string{"driver init: "} + aeron_errmsg());
-    }
-    // The driver runs its agents on its own threads; the main thread is the
-    // archive conductor.
-    if (0 != aeron_driver_start(driver, false))
-    {
-        fail(std::string{"driver start: "} + aeron_errmsg());
+        if (0 != aeron_driver_context_init(&driver_context))
+        {
+            fail(std::string{"driver context init: "} + aeron_errmsg());
+        }
+        (void)aeron_driver_context_set_driver_termination_hook(driver_context, &on_driver_termination, nullptr);
+
+        if (0 != aeron_driver_init(&driver, driver_context))
+        {
+            fail(std::string{"driver init: "} + aeron_errmsg());
+        }
+        // The driver runs its agents on its own threads.
+        if (0 != aeron_driver_start(driver, false))
+        {
+            fail(std::string{"driver start: "} + aeron_errmsg());
+        }
     }
 
     auto created = deepmsg::archive::server::ArchiveServer::create(*config);
     if (!created)
     {
-        (void)aeron_driver_close(driver);
-        (void)aeron_driver_context_close(driver_context);
+        if (!standalone)
+        {
+            (void)aeron_driver_close(driver);
+            (void)aeron_driver_context_close(driver_context);
+        }
         fail(std::string{created.error().message.view()});
     }
     std::unique_ptr<deepmsg::archive::server::ArchiveServer> server = std::move(*created);
 
-    while (0 != g_running)
+    if (auto started = server->start(); !started)
     {
-        const int work_count = server->do_work();
-        if (0 == work_count)
+        server.reset();
+        if (!standalone)
         {
-            ::sched_yield();
+            (void)aeron_driver_close(driver);
+            (void)aeron_driver_context_close(driver_context);
+        }
+        fail(std::string{started.error().message.view()});
+    }
+
+    if (deepmsg::archive::server::ArchiveThreadingMode::dedicated == server->threading_mode())
+    {
+        // `DedicatedModeArchiveConductor`: the three agents have their own
+        // threads; the launcher only keeps the mark file alive and waits for a
+        // signal.
+        while (0 != g_running)
+        {
+            (void)server->do_work();
+            ::usleep(10000);
+        }
+    }
+    else
+    {
+        if (deepmsg::archive::server::ArchiveThreadingMode::shared == server->threading_mode())
+        {
+            // `Archive.java:148-160`: SHARED runs the conductor on a named
+            // thread; this binary's caller loop is that thread.
+            const char* name = deepmsg::archive::server::thread_name(config->threading.naming,
+                                                                     deepmsg::archive::server::AgentRole::shared)
+                                   .data();
+            (void)::pthread_setname_np(::pthread_self(), std::string{name}.substr(0, 15).c_str());
+        }
+        axc::core::IdleStrategy idle = server->idle_strategy();
+        while (0 != g_running)
+        {
+            idle.idle(server->do_work());
         }
     }
 
@@ -181,12 +234,12 @@ int main(int argc, char** argv)
     server.reset();
 
     int exit_status = EXIT_SUCCESS;
-    if (0 != aeron_driver_close(driver))
+    if (!standalone && 0 != aeron_driver_close(driver))
     {
         std::fprintf(stderr, "deepmsg-archive-server: driver close: %s\n", aeron_errmsg());
         exit_status = EXIT_FAILURE;
     }
-    if (0 != aeron_driver_context_close(driver_context))
+    if (!standalone && 0 != aeron_driver_context_close(driver_context))
     {
         std::fprintf(stderr, "deepmsg-archive-server: driver context close: %s\n", aeron_errmsg());
         exit_status = EXIT_FAILURE;

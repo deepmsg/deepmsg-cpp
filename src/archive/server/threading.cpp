@@ -87,6 +87,20 @@ std::expected<ThreadNaming, axc::core::Error> parse_thread_naming(std::string_vi
                                                  std::string{"Unknown thread naming mode: "} + std::string{value}));
 }
 
+std::string_view threading_mode_name(ArchiveThreadingMode mode) noexcept
+{
+    switch (mode)
+    {
+        case ArchiveThreadingMode::invoker:
+            return "INVOKER";
+        case ArchiveThreadingMode::shared:
+            return "SHARED";
+        case ArchiveThreadingMode::dedicated:
+            return "DEDICATED";
+    }
+    return "SHARED";
+}
+
 std::string_view thread_name(ThreadNaming naming, AgentRole role) noexcept
 {
     if (ThreadNaming::new_names == naming)

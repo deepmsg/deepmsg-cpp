@@ -7,7 +7,9 @@
 
 #include "archive/server/replay_session.h"
 #include "archive/server/session_worker.h"
+#include "core/collections/many_to_one_queue.h"
 #include "core/counters/counter_target.h"
+#include "core/counters/duty_cycle_tracker.h"
 
 namespace deepmsg::archive::server
 {
@@ -34,6 +36,31 @@ public:
     Replayer& operator=(const Replayer&) = delete;
 
     void add_session(std::unique_ptr<ReplaySession> session);
+
+    /// DEDICATED mode (`DedicatedModeArchiveConductor.java:285-434`).
+    void set_queues(axc::core::ManyToOneQueue<ReplaySession>* inbox,
+                    axc::core::ManyToOneQueue<ReplaySession>* close_queue) noexcept;
+
+    void set_duty_cycle_tracker(axc::core::DutyCycleTracker* tracker) noexcept
+    {
+        duty_cycle_ = tracker;
+    }
+
+    /// `DedicatedModeReplayer.onStart` (`DedicatedModeArchiveConductor.java:330-336`).
+    void on_start_threaded() noexcept;
+
+    [[nodiscard]] bool threaded() const noexcept
+    {
+        return nullptr != inbox_;
+    }
+
+    /// One replayer-agent pass: drain the inbox, run the sessions, hand the
+    /// finished ones back.
+    int do_work_threaded();
+
+    /// Shutdown: drain the inbox, hand every remaining session back, empty the
+    /// worker.
+    void close_threaded();
 
     /// Close every session (publication + segment file) and empty the worker.
     void close();
@@ -82,8 +109,12 @@ public:
 
 private:
     void publish() noexcept;
+    void hand_back(ReplaySession* session) noexcept;
 
     SessionWorker<ReplaySession> sessions_;
+    axc::core::ManyToOneQueue<ReplaySession>* inbox_{nullptr};
+    axc::core::ManyToOneQueue<ReplaySession>* close_queue_{nullptr};
+    axc::core::DutyCycleTracker* duty_cycle_{nullptr};
     axc::core::CounterTarget* total_read_bytes_counter_{nullptr};
     axc::core::CounterTarget* total_read_time_counter_{nullptr};
     axc::core::CounterTarget* max_read_time_counter_{nullptr};
