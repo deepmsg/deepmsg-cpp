@@ -111,11 +111,18 @@ protected:
         {
             return {};
         }
+        ssize_t read_count = 0;
         if (!bytes.empty())
         {
-            (void)::pread(fd, bytes.data(), bytes.size(), 0);
+            // glibc marks `pread` warn_unused_result; an unreachable-under-test
+            // short read is treated as a failed read, not ignored.
+            read_count = ::pread(fd, bytes.data(), bytes.size(), 0);
         }
         (void)::close(fd);
+        if (read_count < 0 || static_cast<std::size_t>(read_count) != bytes.size())
+        {
+            return {};
+        }
         return bytes;
     }
 
