@@ -1253,6 +1253,60 @@ std::expected<void, axc::core::Error> Catalog::replace_recording(
     return force_writes();
 }
 
+std::expected<void, axc::core::Error> Catalog::replace_recording_channels(std::int64_t recording_id,
+                                                                          std::string_view stripped_channel,
+                                                                          std::string_view original_channel)
+{
+    // `UpdateChannelSession.doWork` (`UpdateChannelSession.java:84-127`): every
+    // field is read back out of the descriptor and only the two channel values
+    // change. `sourceIdentity` is copied first because the write below reuses
+    // the same catalog memory.
+    std::int64_t start_position_value = 0;
+    std::int64_t stop_position_value = 0;
+    std::int64_t start_timestamp = 0;
+    std::int64_t stop_timestamp = 0;
+    std::int32_t initial_term_id = 0;
+    std::int32_t segment_file_length = 0;
+    std::int32_t term_buffer_length = 0;
+    std::int32_t mtu_length = 0;
+    std::int32_t session_id = 0;
+    std::int32_t stream_id = 0;
+    std::string source_identity;
+
+    const bool found = for_entry(recording_id,
+                                 [&](CatalogEntry& entry)
+                                 {
+                                     RecordingDescriptor& descriptor = entry.descriptor;
+                                     start_position_value = descriptor.startPosition();
+                                     stop_position_value = descriptor.stopPosition();
+                                     start_timestamp = descriptor.startTimestamp();
+                                     stop_timestamp = descriptor.stopTimestamp();
+                                     initial_term_id = descriptor.initialTermId();
+                                     segment_file_length = descriptor.segmentFileLength();
+                                     term_buffer_length = descriptor.termBufferLength();
+                                     mtu_length = descriptor.mtuLength();
+                                     session_id = descriptor.sessionId();
+                                     stream_id = descriptor.streamId();
+                                     // SBE's variable-length getters advance the
+                                     // decoder position, so they must be read in
+                                     // schema order (`UpdateChannelSession`'s
+                                     // `skipStrippedChannel`/`skipOriginalChannel`
+                                     // does the same).
+                                     (void)descriptor.getStrippedChannelAsString();
+                                     (void)descriptor.getOriginalChannelAsString();
+                                     source_identity = descriptor.getSourceIdentityAsString();
+                                 });
+    if (!found)
+    {
+        return std::unexpected(
+            message_error(axc::core::ErrorCode::not_found, "unknown recording id: " + std::to_string(recording_id)));
+    }
+
+    return replace_recording(recording_id, start_position_value, stop_position_value, start_timestamp, stop_timestamp,
+                             initial_term_id, segment_file_length, term_buffer_length, mtu_length, session_id,
+                             stream_id, stripped_channel, original_channel, source_identity);
+}
+
 std::int64_t Catalog::start_position(std::int64_t recording_id) const
 {
     const std::int32_t offset = recording_descriptor_offset(recording_id) + DESCRIPTOR_HEADER_LENGTH +

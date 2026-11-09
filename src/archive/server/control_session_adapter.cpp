@@ -37,6 +37,7 @@
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 #include "io_aeron_archive_codecs/StopReplayRequest.h"
 #include "io_aeron_archive_codecs/TruncateRecordingRequest.h"
+#include "io_aeron_archive_codecs/UpdateChannelRequest.h"
 
 namespace deepmsg::archive::server
 {
@@ -963,6 +964,32 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             {
                 handler_.on_attach_segments(request);
             }
+            return 1;
+        }
+
+        case TEMPLATE_UPDATE_CHANNEL:
+        {
+            // `ControlSessionAdapter.java:1107-1128`: no `attemptToActivate`;
+            // the conductor is called directly.
+            archive_codecs::UpdateChannelRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ControlSession* session =
+                control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == session)
+            {
+                return 0;
+            }
+
+            UpdateChannelRequest request;
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+            request.channel = decoder.getChannelAsString();
+            request.session = session;
+
+            handler_.on_update_channel(request);
             return 1;
         }
 

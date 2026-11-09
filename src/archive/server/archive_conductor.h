@@ -128,6 +128,7 @@ public:
     void on_delete_detached_segments(const RecordingIdRequest& request) override;
     void on_purge_segments(const SegmentStartPositionRequest& request) override;
     void on_attach_segments(const RecordingIdRequest& request) override;
+    void on_update_channel(const UpdateChannelRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;
@@ -364,7 +365,11 @@ private:
         enum class Kind
         {
             recording_by_id,
-            subscriptions
+            subscriptions,
+            /// `UpdateChannelSession` (`UpdateChannelSession.java:29-148`): a
+            /// one-pass session that occupies the control session's active
+            /// listing slot.
+            update_channel
         };
 
         Kind kind{Kind::recording_by_id};
@@ -376,6 +381,9 @@ private:
         std::int32_t stream_id{0};
         bool apply_stream_id{false};
         std::string channel_fragment;
+        /// `update_channel` only: the request's channel and its stripped form.
+        std::string original_channel;
+        std::string stripped_channel;
         std::int32_t sent{0};
         bool done{false};
     };

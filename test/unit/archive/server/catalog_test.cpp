@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -1335,6 +1336,107 @@ TEST(CatalogRetryForceTest, theRetryGivesUpAfterMaxAttempts)
 
     EXPECT_FALSE(result);
     EXPECT_EQ(Catalog::MAX_CLOSE_FSYNC_ATTEMPTS, attempts);
+}
+
+TEST_F(CatalogTest, replacingTheChannelsKeepsEveryOtherField)
+{
+    // `UpdateChannelSession.doWork` (`UpdateChannelSession.java:84-127`): only
+    // the two channel fields change; every other field is read back out.
+    struct Fields
+    {
+        std::int64_t start_position{0};
+        std::int64_t stop_position{0};
+        std::int64_t start_timestamp{0};
+        std::int64_t stop_timestamp{0};
+        std::int32_t initial_term_id{0};
+        std::int32_t segment_file_length{0};
+        std::int32_t term_buffer_length{0};
+        std::int32_t mtu_length{0};
+        std::int32_t session_id{0};
+        std::int32_t stream_id{0};
+        std::string source_identity;
+    };
+
+    auto catalog = create_writer();
+    ASSERT_TRUE(catalog) << catalog.error().message.view();
+
+    std::string before_stripped;
+    std::string before_original;
+    std::optional<Fields> before;
+    ASSERT_TRUE(catalog->for_entry(recording_two_id_,
+                                   [&](CatalogEntry& entry)
+                                   {
+                                       RecordingDescriptor& descriptor = entry.descriptor;
+                                       // Variable-length getters advance the decoder
+                                       // position, so read them in schema order.
+                                       before_stripped = descriptor.getStrippedChannelAsString();
+                                       before_original = descriptor.getOriginalChannelAsString();
+                                       const std::string source_identity = descriptor.getSourceIdentityAsString();
+
+                                       before = Fields{descriptor.startPosition(),
+                                                       descriptor.stopPosition(),
+                                                       descriptor.startTimestamp(),
+                                                       descriptor.stopTimestamp(),
+                                                       descriptor.initialTermId(),
+                                                       descriptor.segmentFileLength(),
+                                                       descriptor.termBufferLength(),
+                                                       descriptor.mtuLength(),
+                                                       descriptor.sessionId(),
+                                                       descriptor.streamId(),
+                                                       source_identity};
+                                   }));
+    ASSERT_TRUE(before.has_value());
+    EXPECT_EQ("channelH", before_stripped);
+    EXPECT_EQ("channelH?tag=f", before_original);
+
+    const auto replaced = catalog->replace_recording_channels(recording_two_id_, "newStripped", "newOriginal");
+    ASSERT_TRUE(replaced) << replaced.error().message.view();
+
+    std::optional<Fields> after;
+    ASSERT_TRUE(catalog->for_entry(recording_two_id_,
+                                   [&](CatalogEntry& entry)
+                                   {
+                                       RecordingDescriptor& descriptor = entry.descriptor;
+                                       EXPECT_EQ("newStripped", descriptor.getStrippedChannelAsString());
+                                       EXPECT_EQ("newOriginal", descriptor.getOriginalChannelAsString());
+                                       const std::string source_identity = descriptor.getSourceIdentityAsString();
+
+                                       after = Fields{descriptor.startPosition(),
+                                                      descriptor.stopPosition(),
+                                                      descriptor.startTimestamp(),
+                                                      descriptor.stopTimestamp(),
+                                                      descriptor.initialTermId(),
+                                                      descriptor.segmentFileLength(),
+                                                      descriptor.termBufferLength(),
+                                                      descriptor.mtuLength(),
+                                                      descriptor.sessionId(),
+                                                      descriptor.streamId(),
+                                                      source_identity};
+                                   }));
+    ASSERT_TRUE(after.has_value());
+
+    EXPECT_EQ(before->start_position, after->start_position);
+    EXPECT_EQ(before->stop_position, after->stop_position);
+    EXPECT_EQ(before->start_timestamp, after->start_timestamp);
+    EXPECT_EQ(before->stop_timestamp, after->stop_timestamp);
+    EXPECT_EQ(before->initial_term_id, after->initial_term_id);
+    EXPECT_EQ(before->segment_file_length, after->segment_file_length);
+    EXPECT_EQ(before->term_buffer_length, after->term_buffer_length);
+    EXPECT_EQ(before->mtu_length, after->mtu_length);
+    EXPECT_EQ(before->session_id, after->session_id);
+    EXPECT_EQ(before->stream_id, after->stream_id);
+    EXPECT_EQ(before->source_identity, after->source_identity);
+
+    // The rewrite also has to keep the descriptor checksum/repair pass happy.
+    ASSERT_TRUE(catalog->close());
+    auto reopened = open_catalog();
+    ASSERT_TRUE(reopened) << reopened.error().message.view();
+    EXPECT_TRUE(reopened->for_entry(recording_two_id_,
+                                    [](CatalogEntry& entry)
+                                    {
+                                        EXPECT_EQ("newStripped", entry.descriptor.getStrippedChannelAsString());
+                                        EXPECT_EQ("newOriginal", entry.descriptor.getOriginalChannelAsString());
+                                    }));
 }
 
 }  // namespace

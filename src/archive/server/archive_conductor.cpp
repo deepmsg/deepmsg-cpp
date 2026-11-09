@@ -1218,6 +1218,30 @@ int ArchiveConductor::poll_listings()
             }
             work_count++;
         }
+        else if (!listing.done && Listing::Kind::update_channel == listing.kind)
+        {
+            // `UpdateChannelSession.doWork` (`UpdateChannelSession.java:73-133`).
+            auto replaced = catalog_.replace_recording_channels(listing.recording_id, listing.stripped_channel,
+                                                                listing.original_channel);
+            if (!replaced)
+            {
+                if (axc::core::ErrorCode::not_found == replaced.error().code)
+                {
+                    control->send_recording_unknown(listing.correlation_id, listing.recording_id);
+                }
+                else
+                {
+                    control->send_error_response(listing.correlation_id, std::string{replaced.error().message.view()});
+                }
+            }
+            else
+            {
+                control->send_ok_response(listing.correlation_id, 0);
+            }
+
+            listing.done = true;
+            work_count++;
+        }
         else if (!listing.done)
         {
             // `ListRecordingSubscriptionsSession.doWork` (`ListRecordingSubscriptionsSession.java:96-131`).
@@ -2650,6 +2674,48 @@ void ArchiveConductor::on_attach_segments(const RecordingIdRequest& request)
     }
 
     session->send_ok_response(request.correlation_id, count);
+}
+
+void ArchiveConductor::on_update_channel(const UpdateChannelRequest& request)
+{
+    // `ArchiveConductor.updateChannel` (`:707-735`); the adapter calls this
+    // directly, without `ControlSession.attemptToActivate`.
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    if (session->has_active_listing())
+    {
+        session->send_error_response(request.correlation_id, ACTIVE_LISTING, "active listing already in progress");
+        return;
+    }
+
+    if (!catalog_.has_recording(request.recording_id))
+    {
+        session->send_recording_unknown(request.correlation_id, request.recording_id);
+        return;
+    }
+
+    auto stripped = stripped_channel(request.channel);
+    if (!stripped)
+    {
+        // The reference's `ChannelUri.parse` throws and the agent logs it; no
+        // response is sent. Same outward behaviour.
+        log_warning(std::string{stripped.error().message.view()});
+        return;
+    }
+
+    Listing listing;
+    listing.kind = Listing::Kind::update_channel;
+    listing.correlation_id = request.correlation_id;
+    listing.control_session_id = session->session_id();
+    listing.recording_id = request.recording_id;
+    listing.original_channel = request.channel;
+    listing.stripped_channel = std::move(*stripped);
+    listings_.push_back(std::move(listing));
+    session->set_active_listing(true);
 }
 
 bool ArchiveConductor::is_delete_allowed(ControlSession& session, std::int64_t correlation_id,

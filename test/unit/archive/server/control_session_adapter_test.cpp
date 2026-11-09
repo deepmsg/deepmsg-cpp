@@ -43,6 +43,7 @@
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 #include "io_aeron_archive_codecs/StopReplayRequest.h"
 #include "io_aeron_archive_codecs/TruncateRecordingRequest.h"
+#include "io_aeron_archive_codecs/UpdateChannelRequest.h"
 
 namespace
 {
@@ -73,6 +74,7 @@ using deepmsg::archive::server::StopRecordingRequest;
 using deepmsg::archive::server::StopRecordingSubscriptionRequest;
 using deepmsg::archive::server::StopReplayRequest;
 using deepmsg::archive::server::TruncateRecordingRequest;
+using deepmsg::archive::server::UpdateChannelRequest;
 using deepmsg::archive::server::archive_codecs::AuthConnectRequest;
 using deepmsg::archive::server::archive_codecs::BooleanType;
 using deepmsg::archive::server::archive_codecs::ChallengeResponse;
@@ -91,6 +93,7 @@ using ExtendRecordingEncoder = deepmsg::archive::server::archive_codecs::ExtendR
 using PurgeRecordingEncoder = deepmsg::archive::server::archive_codecs::PurgeRecordingRequest;
 using PurgeSegmentsEncoder = deepmsg::archive::server::archive_codecs::PurgeSegmentsRequest;
 using TruncateRecordingEncoder = deepmsg::archive::server::archive_codecs::TruncateRecordingRequest;
+using UpdateChannelEncoder = deepmsg::archive::server::archive_codecs::UpdateChannelRequest;
 using FindLastEncoder = deepmsg::archive::server::archive_codecs::FindLastMatchingRecordingRequest;
 using ListRecordingEncoder = deepmsg::archive::server::archive_codecs::ListRecordingRequest;
 using ListRecordingSubscriptionsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingSubscriptionsRequest;
@@ -233,6 +236,11 @@ public:
         attach_segments_requests.push_back(request);
     }
 
+    void on_update_channel(const UpdateChannelRequest& request) override
+    {
+        update_channel_requests.push_back(request);
+    }
+
     void on_start_replay(const ReplayRequest& request) override
     {
         start_replay_requests.push_back(request);
@@ -303,6 +311,7 @@ public:
     std::vector<RecordingIdRequest> delete_detached_segments_requests;
     std::vector<SegmentStartPositionRequest> purge_segments_requests;
     std::vector<RecordingIdRequest> attach_segments_requests;
+    std::vector<UpdateChannelRequest> update_channel_requests;
     std::vector<ReplayRequest> start_replay_requests;
     std::vector<BoundedReplayRequest> bounded_replay_requests;
     std::vector<StopReplayRequest> stop_replay_requests;
@@ -474,6 +483,19 @@ public:
     AttachSegmentsEncoder encoder;
     encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
     encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_update_channel(std::int64_t control_session_id,
+                                                              std::int64_t correlation_id, std::int64_t recording_id,
+                                                              const std::string& channel)
+{
+    std::vector<std::uint8_t> buffer(256, 0);
+    UpdateChannelEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    encoder.putChannel(channel.data(), static_cast<std::uint32_t>(channel.size()));
     buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
     return buffer;
 }
@@ -1003,6 +1025,25 @@ TEST_F(ControlSessionAdapterTest, theSegmentManagementRequestsReachTheHandler)
     EXPECT_EQ(55, handler_.attach_segments_requests[0].correlation_id);
     EXPECT_EQ(9, handler_.attach_segments_requests[0].recording_id);
     EXPECT_EQ(handler_.session.get(), handler_.attach_segments_requests[0].session);
+}
+
+TEST_F(ControlSessionAdapterTest, anUpdateChannelRequestDoesNotActivateItsSession)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto update = encode_update_channel(7, 60, 9, "aeron:ipc?alias=test42|rejoin=false");
+    EXPECT_EQ(1, adapter_->on_fragment(update.data(), static_cast<std::int32_t>(update.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.update_channel_requests.size());
+    EXPECT_EQ(60, handler_.update_channel_requests[0].correlation_id);
+    EXPECT_EQ(9, handler_.update_channel_requests[0].recording_id);
+    EXPECT_EQ("aeron:ipc?alias=test42|rejoin=false", handler_.update_channel_requests[0].channel);
+    EXPECT_EQ(handler_.session.get(), handler_.update_channel_requests[0].session);
+    // `ControlSessionAdapter.java:1107-1128` skips `attemptToActivate`.
+    EXPECT_EQ(ControlSession::State::authenticated, handler_.session->state());
 }
 
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)
