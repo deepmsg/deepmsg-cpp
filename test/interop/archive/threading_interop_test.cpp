@@ -148,19 +148,19 @@ protected:
         }
 
         std::vector<std::string> arguments = {
-            "-Daeron.dir=" + aeron_dir_,
-            "-Daeron.archive.dir=" + archive_dir_,
+            "-Daeron.dir=" + aeron_dir_, "-Daeron.archive.dir=" + archive_dir_,
             "-Daeron.archive.control.channel=aeron:ipc",
             "-Daeron.archive.control.stream.id=" + std::to_string(CONTROL_STREAM_ID),
             "-Daeron.archive.local.control.channel=aeron:ipc?term-length=64k",
             "-Daeron.archive.local.control.stream.id=" + std::to_string(LOCAL_CONTROL_STREAM_ID),
-            "-Daeron.archive.id=" + std::to_string(ARCHIVE_ID),
-            "-Daeron.archive.threading.mode=" + std::string{mode},
-            "-Daeron.thread.naming=new",
-            "-Daeron.archive.idle.strategy=yield",
-            "-Daeron.archive.segment.file.length=131072",
-            "-Daeron.archive.dir.delete.on.start=true",
+            "-Daeron.archive.id=" + std::to_string(ARCHIVE_ID), "-Daeron.archive.threading.mode=" + std::string{mode},
+            "-Daeron.thread.naming=new", "-Daeron.archive.idle.strategy=yield",
+            "-Daeron.archive.segment.file.length=131072", "-Daeron.archive.dir.delete.on.start=true",
             "-Daeron.archive.recording.events.enabled=false",
+            // LOCAL + UDP records through an `aeron-spy:` subscription; the
+            // driver only counts a spy as a subscriber with this on
+            // (`TestArchive.h` passes it too).
+            "-Daeron.spies.simulate.connection=true",
             standalone ? "io.aeron.archive.Archive" : "io.aeron.archive.ArchivingMediaDriver"};
 
         auto spawned = ChildProcess::spawn(AXC_ARCHIVE_SERVER_BIN, arguments);
@@ -473,6 +473,24 @@ TEST_F(ThreadingInteropTest, invokerModeRunsCallerDrivenAndStartNoAgentThread)
     const auto labels = counter_labels();
     EXPECT_TRUE(has_label(labels, "archive-conductor max cycle time in ns: INVOKER"));
     EXPECT_EQ(1u, count_type(labels, 103));
+}
+
+TEST_F(ThreadingInteropTest, theEmbeddedShapeRunsDedicatedToo)
+{
+    // The archive child owns the driver in this shape (no `aeronmd`).
+    start_archive("DEDICATED", false);
+    ASSERT_TRUE(connected_) << "the archive client did not connect";
+
+    const auto names = wait_for_task_names("aeron-ar-cnd", "aeron-ar-rec", "aeron-ar-rep");
+    EXPECT_TRUE(contains(names, "aeron-ar-cnd"));
+    EXPECT_TRUE(contains(names, "aeron-ar-rec"));
+    EXPECT_TRUE(contains(names, "aeron-ar-rep"));
+
+    const auto labels = counter_labels();
+    EXPECT_TRUE(has_label(labels, "archive-conductor max cycle time in ns: DEDICATED"));
+    EXPECT_EQ(3u, count_type(labels, 103));
+
+    run_round();
 }
 
 }  // namespace
