@@ -1,2 +1,7 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
-# timer services and the Long2LongHashMap-backed timer table land in C1c.
+#
+# The timer services are deliberately absent: their only allocations are the
+# reference's own lazy Timer/Node allocations and array growth (warm-up, then
+# steady state reuses the free list), so registering them would make the
+# `operator new` audit red on behaviour the reference shares. C10 revisits this
+# if the counter says otherwise.

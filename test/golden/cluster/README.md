@@ -9,11 +9,13 @@ run's field dump; the C++ tests compare against both.
 | generator (recording.log) | `analysis/cpp/records/c1a/RecordingLogGoldenGen.java` |
 | generator (node-state.dat) | `analysis/cpp/records/c1a/NodeStateGoldenGen.java` |
 | generator (cluster-mark.dat) | `analysis/cpp/records/c1b/ClusterMarkGoldenGen.java` |
+| generator (timer orders) | `analysis/cpp/records/c1c/TimerSnapshotGoldenGen.java` |
 | reference | Aeron 1.54.0 = `454da1e4e6`; jar `third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar` |
 | compile | `javac -proc:none -cp <jar> -d /tmp/c1a-gen <generator>.java` |
 | recording.log | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED -cp <jar>:/tmp/c1a-gen io.aeron.cluster.RecordingLogGoldenGen test/golden/cluster/recording-log` |
 | node-state.dat | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -cp <jar>:/tmp/c1a-gen io.aeron.cluster.NodeStateGoldenGen test/golden/cluster/node-state` |
 | cluster-mark.dat | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -cp <jar>:/tmp/c1b-gen io.aeron.cluster.service.ClusterMarkGoldenGen test/golden/cluster/mark-file` |
+| timer orders | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -cp <jar>:/tmp/c1c-gen io.aeron.cluster.TimerSnapshotGoldenGen test/golden/cluster/timer` |
 
 ## recording.log
 
@@ -79,3 +81,27 @@ component writes its own pid and start time.
 `test/unit/cluster/common/cluster_mark_file_golden_test.cpp` checks every
 field, and `axc_cluster_interop_tests` has `ClusterTool pid` read a mark file
 written by our code.
+
+## timer ordering
+
+The timer files are text, one scenario per file.
+
+| file | sha256 |
+|---|---|
+| `timer/five.txt` | `b6b65299fadd90d85097dff44a6fc7575f3e9be8a9ffcc9a674fac15ee3e795c` |
+| `timer/heap-after-poll.txt` | `1c3fa97ead8f0bb0a8e4d20505d567bcad696524d66db99cf276b57e0d866216` |
+| `timer/heap-expiry.txt` | `ead90825b99b5a96bc87a9e742b24468fc64b0c42502d377759f536ed4a4265a` |
+| `timer/many.txt` | `0f607d12a01bf2b0e54376f6b387544b6638d57990f8983256e09a56227c3d11` |
+| `timer/wheel-expiry.txt` | `a7802d397fadd6c2a758126203f762984166af3f2beaca51eacfc1a25f34eabf` |
+| `timer/wheel-tick.txt` | `3c55bb195cf088f73da243ba08945350ae03738f75a4dbb8c6097224196adac0` |
+
+`five` and `many` carry the snapshot order of both implementations; `many`
+passes the map through growth, cancels and reschedules. `heap-after-poll` and
+`heap-expiry` pin the heap array after an expiry. `wheel-expiry` includes a
+deadline exactly at `now` (which the wheel does **not** expire in that poll --
+reference behavior) and `wheel-tick` pins the tick-boundary scan: a timer at
+deadline 20 is missed by the `poll(10)` that advanced past its tick, then
+expires in `poll(25)` with correlation ids `[2, 1]`.
+
+`test/unit/cluster/common/timer_golden_test.cpp` and
+`priority_heap_timer_service_test.cpp` are the C++ side.

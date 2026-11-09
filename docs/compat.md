@@ -22,7 +22,8 @@ commit.
 | destination recording descriptor copied from the source descriptor (`addNewRecording` / `replaceRecording`) | `ReplicationSession.java:349-394` | A4b: `ReplicationSessionTest` (row fields) + the C cases (the destination replay reads the frames back) |
 | `cluster-mark*.dat` | `aeron-cluster-mark-codecs.xml` (message header + `MarkFileHeader` + var-ascii fields + error buffer) | C1b: `test/golden/cluster/mark-file/{consensus-module,container,backup}` (reference-written) + `ClusterMarkFileTest`/golden + `ClusterTool pid` interop over a file we wrote |
 | cluster counters 200–241 key layout | `ClusterCounters` / `AeronCounters.java:860-1106` | C1b: `ClusterCountersTest` (key bytes and label text for cluster, service and versioned forms; full type-id table) |
-| timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
+| timer snapshot order | Agrona `Long2LongHashMap` entry-iterator order (wheel) / heap array level order (priority heap); `WheelTimerService.snapshot` | C1c: `test/golden/cluster/timer/{five,many,heap-after-poll}.txt` (reference-written) + `TimerGoldenTest`; the two suppliers are deliberately **not** snapshot-byte-compatible with each other |
+| timer expiry order | `DeadlineTimerWheel.poll` / `PriorityHeapTimerService.poll` | C1c: `test/golden/cluster/timer/{wheel-expiry,wheel-tick,heap-expiry}.txt` + `TimerGoldenTest` + `PriorityHeapTimerServiceTest` |
 | ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
 
 ## C++-only switches (A6c/A6d, 2026-11-10)
