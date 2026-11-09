@@ -11,6 +11,7 @@
 #include "archive/server/authenticator.h"
 #include "archive/server/catalog.h"
 #include "archive/server/epoch_clock_source.h"
+#include "archive/server/threading.h"
 #include "core/config/property_source.h"
 #include "core/error/error.h"
 
@@ -28,6 +29,18 @@ struct ArchiveLaunchConfig
     std::string mark_file_dir;
     std::string control_channel{"aeron:udp?endpoint=localhost:8010"};
     std::int32_t control_stream_id{10};
+    /// `aeron.archive.control.channel.enabled` (`Archive.java:692`).
+    bool control_channel_enabled{true};
+    /// `aeron.archive.control.response.channel` / `.stream.id`
+    /// (`AeronArchive.java:2752-2758`): the archive client's response
+    /// channel. Empty ⇒ derived from `control_channel`
+    /// (`Archive.java:1587-1610`).
+    std::string control_response_channel;
+    std::int32_t control_response_stream_id{20};
+    /// `aeron.archive.message.timeout` / `.retry.attempts`
+    /// (`AeronArchive.java:2674-2692`).
+    std::int64_t message_timeout_ms{10'000};
+    std::int32_t message_retry_attempts{3};
     std::string local_control_channel{"aeron:ipc?term-length=64k"};
     std::int32_t local_control_stream_id{10};
     /// `aeron.archive.replication.channel` (`Archive.java:613`, `:1301-1303`):
@@ -46,6 +59,8 @@ struct ArchiveLaunchConfig
     int catalog_file_sync_level{0};
     RecordingSettings recording;
     ReplaySettings replay;
+    /// `aeron.archive.threading.mode` and the three agent settings.
+    ThreadingSettings threading;
     /// `aeron.archive.authenticator.supplier`; empty ⇒ `DefaultAuthenticator`.
     std::string authenticator_supplier;
 };

@@ -198,28 +198,33 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     handlers.on_unavailable = &ArchiveConductor::unavailable_image_trampoline;
     handlers.on_unavailable_clientd = this;
 
-    auto subscription = client_.add_subscription(context_.control_channel, context_.control_stream_id, handlers);
-    for (int attempt = 0; attempt < 5000; attempt++)
+    // `Archive.java:692`: a disabled control channel leaves the local
+    // (privileged) one only.
+    if (context_.control_channel_enabled)
     {
-        auto polled = subscription.poll();
-        if (!polled)
+        auto subscription = client_.add_subscription(context_.control_channel, context_.control_stream_id, handlers);
+        for (int attempt = 0; attempt < 5000; attempt++)
         {
-            return std::unexpected(polled.error());
-        }
-        if (polled->has_value())
-        {
-            control_subscription_ = std::move(**polled);
-            break;
-        }
+            auto polled = subscription.poll();
+            if (!polled)
+            {
+                return std::unexpected(polled.error());
+            }
+            if (polled->has_value())
+            {
+                control_subscription_ = std::move(**polled);
+                break;
+            }
 
-        // The driver has to answer the async add, so the conductor has to keep
-        // turning between polls (`铁律 2`: never block inside an add).
-        const int work = client_.do_work();
-        (void)work;
-        ::usleep(1000);
+            // The driver has to answer the async add, so the conductor has to keep
+            // turning between polls (`铁律 2`: never block inside an add).
+            const int work = client_.do_work();
+            (void)work;
+            ::usleep(1000);
+        }
     }
 
-    if (!control_subscription_)
+    if (context_.control_channel_enabled && !control_subscription_)
     {
         return std::unexpected(
             axc::core::make_error(axc::core::ErrorCode::io_error, "control subscription did not complete"));
@@ -2831,6 +2836,8 @@ void ArchiveConductor::on_replicate(const ReplicateRequest& request)
     config.dst_start_position = dst_summary.start_position;
     config.dst_stop_position = dst_summary.stop_position;
     config.dst_stream_id = dst_summary.stream_id;
+    config.action_timeout_ms = context_.message_timeout_ms;
+    config.retry_attempts = context_.message_retry_attempts;
     config.clock = &cached_clock_;
 
     // `ArchiveConductor.java:1433-1457`: clone the archive's client context —
@@ -2839,6 +2846,10 @@ void ArchiveConductor::on_replicate(const ReplicateRequest& request)
     // (`Archive.java:1587-1610`), the client name suffixed with the
     // replication id.
     std::string response_channel = request.src_response_channel;
+    if (response_channel.empty())
+    {
+        response_channel = context_.control_response_channel;
+    }
     if (response_channel.empty())
     {
         auto derived = replication_response_channel(context_.control_channel);
@@ -2855,6 +2866,7 @@ void ArchiveConductor::on_replicate(const ReplicateRequest& request)
     client_config.control_request_channel = request.src_control_channel;
     client_config.control_request_stream_id = request.src_control_stream_id;
     client_config.control_response_channel = response_channel;
+    client_config.control_response_stream_id = context_.control_response_stream_id;
     client_config.client_name = "archive archiveId=" + std::to_string(context_.archive_id) +
                                 " replicationSessionId=" + std::to_string(config.replication_id);
     client_config.encoded_credentials = request.encoded_credentials;

@@ -31,6 +31,7 @@
 #include "archive/server/replication_session.h"
 #include "archive/server/segment_validation.h"
 #include "archive/server/session_worker.h"
+#include "archive/server/threading.h"
 #include "core/counters/counter_target.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error.h"
@@ -51,6 +52,20 @@ struct ArchiveConductorContext
     /// (`Archive.java:484-500`): the privileged local control channel.
     std::string local_control_channel{"aeron:ipc?term-length=64k"};
     std::int32_t local_control_stream_id{10};
+    /// `aeron.archive.control.channel.enabled` (`Archive.java:692`): false
+    /// leaves only the local control channel.
+    bool control_channel_enabled{true};
+    /// `aeron.archive.control.response.channel` / `.stream.id`
+    /// (`AeronArchive.java:2752-2758`): the archive client's response channel;
+    /// empty ⇒ derived from `control_channel` (`Archive.java:1587-1610`).
+    std::string control_response_channel;
+    std::int32_t control_response_stream_id{20};
+    /// `aeron.archive.message.timeout` / `.retry.attempts`
+    /// (`AeronArchive.java:2674-2692`).
+    std::int64_t message_timeout_ms{10'000};
+    std::int32_t message_retry_attempts{3};
+    /// `aeron.archive.threading.mode` plus the three agent settings.
+    ThreadingSettings threading;
     /// `Archive.Context.replicationChannel` (`Archive.java:1301-1303`).
     std::string replication_channel;
     /// Empty ⇒ the Aeron default (`/dev/shm/aeron-<user>`).

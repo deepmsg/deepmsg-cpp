@@ -60,8 +60,12 @@ struct ReplicationConfig
     std::int64_t dst_start_position{0};
     std::int64_t dst_stop_position{0};
     std::int32_t dst_stream_id{0};
-    /// `context.messageTimeoutNs()` (`AeronArchive.Configuration` default 10 s).
+    /// `context.messageTimeoutNs()` (`AeronArchive.Configuration` default 10 s,
+    /// `aeron.archive.message.timeout`).
     std::int64_t action_timeout_ms{10'000};
+    /// `context.messageRetryAttempts()` (`aeron.archive.message.retry.attempts`):
+    /// only the live-join path reads it (a recorded gap), kept for fidelity.
+    std::int32_t retry_attempts{3};
     const EpochClockSource* clock{nullptr};
 };
 
