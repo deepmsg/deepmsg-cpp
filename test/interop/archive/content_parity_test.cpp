@@ -326,6 +326,11 @@ protected:
             }
             if (nullptr == archive)
             {
+                if (nullptr != async)
+                {
+                    aeron_archive_async_connect_delete(async);
+                    async = nullptr;
+                }
                 (void)aeron_archive_context_close(context);
             }
             else
