@@ -52,6 +52,36 @@ public:
         return work_count;
     }
 
+    /// DEDICATED mode: a finished session's ownership is handed to `on_close`
+    /// (it goes back to the conductor through the close queue) instead of being
+    /// destroyed here (`DedicatedModeArchiveConductor.java:220-250`).
+    template <class OnClose>
+    int do_work_releasing(const OnClose& on_close)
+    {
+        int work_count = 0;
+
+        for (std::size_t index = 0; index < sessions_.size();)
+        {
+            Session& session = *sessions_[index];
+            work_count += session.do_work();
+
+            if (session.is_done())
+            {
+                SessionPtr done = std::move(sessions_[index]);
+                sessions_[index] = std::move(sessions_.back());
+                sessions_.pop_back();
+                on_close(std::move(done));
+                work_count++;
+            }
+            else
+            {
+                index++;
+            }
+        }
+
+        return work_count;
+    }
+
     [[nodiscard]] std::size_t size() const noexcept
     {
         return sessions_.size();

@@ -11,6 +11,7 @@ axc_add_executable(axc_unit_tests
         core/io_test.cpp
         core/config_test.cpp
         core/trace_test.cpp
+        core/many_to_one_queue_test.cpp
     DEPS
         axc_core
         GTest::gtest_main
@@ -59,6 +60,7 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/list_recordings_session_test.cpp
         archive/server/replication_validation_test.cpp
         archive/server/replication_session_test.cpp
+        archive/server/session_worker_test.cpp
     DEPS
         axc_archive_server
         aeron_static
