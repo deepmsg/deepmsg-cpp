@@ -21,6 +21,7 @@ axc_add_library(axc_archive_server
         epoch_clock_source.cpp
         segment_files.cpp
         segment_validation.cpp
+        list_recordings_session.cpp
         recording_writer.cpp
         recording_reader.cpp
         replay_publication.cpp
