@@ -56,6 +56,7 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/segment_files_test.cpp
         archive/server/delete_segments_session_test.cpp
         archive/server/segment_validation_test.cpp
+        archive/server/list_recordings_session_test.cpp
     DEPS
         axc_archive_server
         aeron_static

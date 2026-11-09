@@ -27,6 +27,8 @@
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
 #include "io_aeron_archive_codecs/ListRecordingRequest.h"
 #include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingsForUriRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MigrateSegmentsRequest.h"
 #include "io_aeron_archive_codecs/PurgeRecordingRequest.h"
@@ -61,6 +63,8 @@ using deepmsg::archive::server::ControlSessionHandler;
 using deepmsg::archive::server::DefaultAuthenticator;
 using deepmsg::archive::server::ExtendRecordingRequest;
 using deepmsg::archive::server::FindLastMatchingRecordingRequest;
+using deepmsg::archive::server::ListRecordingsForUriRequest;
+using deepmsg::archive::server::ListRecordingsRequest;
 using deepmsg::archive::server::ListRecordingSubscriptionsRequest;
 using deepmsg::archive::server::MigrateSegmentsRequest;
 using deepmsg::archive::server::PurgeRecordingRequest;
@@ -98,6 +102,8 @@ using TruncateRecordingEncoder = deepmsg::archive::server::archive_codecs::Trunc
 using UpdateChannelEncoder = deepmsg::archive::server::archive_codecs::UpdateChannelRequest;
 using FindLastEncoder = deepmsg::archive::server::archive_codecs::FindLastMatchingRecordingRequest;
 using ListRecordingEncoder = deepmsg::archive::server::archive_codecs::ListRecordingRequest;
+using ListRecordingsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingsRequest;
+using ListRecordingsForUriEncoder = deepmsg::archive::server::archive_codecs::ListRecordingsForUriRequest;
 using ListRecordingSubscriptionsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingSubscriptionsRequest;
 using MigrateSegmentsEncoder = deepmsg::archive::server::archive_codecs::MigrateSegmentsRequest;
 using StopRecordingByIdentityEncoder = deepmsg::archive::server::archive_codecs::StopRecordingByIdentityRequest;
@@ -249,6 +255,16 @@ public:
         migrate_segments_requests.push_back(request);
     }
 
+    void on_list_recordings(const ListRecordingsRequest& request) override
+    {
+        list_recordings_requests.push_back(request);
+    }
+
+    void on_list_recordings_for_uri(const ListRecordingsForUriRequest& request) override
+    {
+        list_recordings_for_uri_requests.push_back(request);
+    }
+
     void on_start_replay(const ReplayRequest& request) override
     {
         start_replay_requests.push_back(request);
@@ -321,6 +337,8 @@ public:
     std::vector<RecordingIdRequest> attach_segments_requests;
     std::vector<UpdateChannelRequest> update_channel_requests;
     std::vector<MigrateSegmentsRequest> migrate_segments_requests;
+    std::vector<ListRecordingsRequest> list_recordings_requests;
+    std::vector<ListRecordingsForUriRequest> list_recordings_for_uri_requests;
     std::vector<ReplayRequest> start_replay_requests;
     std::vector<BoundedReplayRequest> bounded_replay_requests;
     std::vector<StopReplayRequest> stop_replay_requests;
@@ -492,6 +510,39 @@ public:
     AttachSegmentsEncoder encoder;
     encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
     encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_list_recordings(std::int64_t control_session_id,
+                                                               std::int64_t correlation_id,
+                                                               std::int64_t from_recording_id,
+                                                               std::int32_t record_count)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    ListRecordingsEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .fromRecordingId(from_recording_id)
+        .recordCount(record_count);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_list_recordings_for_uri(
+    std::int64_t control_session_id, std::int64_t correlation_id, std::int64_t from_recording_id,
+    std::int32_t record_count, std::int32_t stream_id, const std::string& channel_fragment)
+{
+    std::vector<std::uint8_t> buffer(256, 0);
+    ListRecordingsForUriEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .fromRecordingId(from_recording_id)
+        .recordCount(record_count)
+        .streamId(stream_id);
+    encoder.putChannel(channel_fragment.data(), static_cast<std::uint32_t>(channel_fragment.size()));
     buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
     return buffer;
 }
@@ -1087,6 +1138,31 @@ TEST_F(ControlSessionAdapterTest, aMigrateSegmentsRequestReachesTheHandler)
     EXPECT_EQ(10, handler_.migrate_segments_requests[0].dst_recording_id);
     EXPECT_EQ(handler_.session.get(), handler_.migrate_segments_requests[0].session);
     EXPECT_EQ(ControlSession::State::active, handler_.session->state());
+}
+
+TEST_F(ControlSessionAdapterTest, thePagingListingRequestsReachTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto list = encode_list_recordings(7, 70, INT64_MIN, 10);
+    EXPECT_EQ(1, adapter_->on_fragment(list.data(), static_cast<std::int32_t>(list.size()), &image_));
+    ASSERT_EQ(1u, handler_.list_recordings_requests.size());
+    EXPECT_EQ(70, handler_.list_recordings_requests[0].correlation_id);
+    EXPECT_EQ(INT64_MIN, handler_.list_recordings_requests[0].from_recording_id);
+    EXPECT_EQ(10, handler_.list_recordings_requests[0].record_count);
+    EXPECT_EQ(ControlSession::State::active, handler_.session->state());
+
+    const auto for_uri = encode_list_recordings_for_uri(7, 71, 3, 2, 33, "endpoint=localhost:3333");
+    EXPECT_EQ(1, adapter_->on_fragment(for_uri.data(), static_cast<std::int32_t>(for_uri.size()), &image_));
+    ASSERT_EQ(1u, handler_.list_recordings_for_uri_requests.size());
+    EXPECT_EQ(71, handler_.list_recordings_for_uri_requests[0].correlation_id);
+    EXPECT_EQ(3, handler_.list_recordings_for_uri_requests[0].from_recording_id);
+    EXPECT_EQ(2, handler_.list_recordings_for_uri_requests[0].record_count);
+    EXPECT_EQ(33, handler_.list_recordings_for_uri_requests[0].stream_id);
+    EXPECT_EQ("endpoint=localhost:3333", handler_.list_recordings_for_uri_requests[0].channel_fragment);
 }
 
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)

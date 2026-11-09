@@ -20,6 +20,8 @@
 #include "io_aeron_archive_codecs/KeepAliveRequest.h"
 #include "io_aeron_archive_codecs/ListRecordingRequest.h"
 #include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingsForUriRequest.h"
+#include "io_aeron_archive_codecs/ListRecordingsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MessageHeader.h"
 #include "io_aeron_archive_codecs/MigrateSegmentsRequest.h"
@@ -805,6 +807,62 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (found != sessions_.end() && found->second.image == image)
             {
                 found->second.session->abort(ControlSession::SESSION_CLOSED_MSG);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_LIST_RECORDINGS:
+        {
+            // `ControlSessionAdapter.java:275-295`.
+            archive_codecs::ListRecordingsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ListRecordingsRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.from_recording_id = decoder.fromRecordingId();
+            request.record_count = decoder.recordCount();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_list_recordings(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_LIST_RECORDINGS_FOR_URI:
+        {
+            // `ControlSessionAdapter.java:296-324`.
+            archive_codecs::ListRecordingsForUriRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ListRecordingsForUriRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.from_recording_id = decoder.fromRecordingId();
+            request.record_count = decoder.recordCount();
+            request.stream_id = decoder.streamId();
+            request.channel_fragment = decoder.getChannelAsString();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_list_recordings_for_uri(request);
             }
             return 1;
         }

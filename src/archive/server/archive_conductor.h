@@ -23,6 +23,7 @@
 #include "archive/server/deepmsg_response_publication.h"
 #include "archive/server/delete_segments_session.h"
 #include "archive/server/epoch_clock_source.h"
+#include "archive/server/list_recordings_session.h"
 #include "archive/server/recorder.h"
 #include "archive/server/recording_events.h"
 #include "archive/server/replay_session.h"
@@ -88,7 +89,8 @@ class ArchiveConductor final : public ControlSessionHandler,
                                public ReplayWarningSink,
                                public CreateReplayPublicationSessionHandler,
                                public DeleteSegmentsControl,
-                               public DeleteSegmentsResponder
+                               public DeleteSegmentsResponder,
+                               public ListRecordingsResponses
 {
 public:
     /// `AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION`.
@@ -130,6 +132,8 @@ public:
     void on_attach_segments(const RecordingIdRequest& request) override;
     void on_update_channel(const UpdateChannelRequest& request) override;
     void on_migrate_segments(const MigrateSegmentsRequest& request) override;
+    void on_list_recordings(const ListRecordingsRequest& request) override;
+    void on_list_recordings_for_uri(const ListRecordingsForUriRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;
@@ -166,6 +170,14 @@ public:
     void send_delete_signal(std::int64_t control_session_id, std::int64_t correlation_id,
                             std::int64_t recording_id) override;
     void send_error(std::int64_t control_session_id, std::int64_t correlation_id, std::string_view message) override;
+
+    // ListRecordingsResponses (`ControlSession.sendDescriptor` and friends).
+    [[nodiscard]] bool send_descriptor(std::int64_t control_session_id, std::int64_t correlation_id,
+                                       std::span<const std::uint8_t> frame) override;
+    void send_recording_unknown(std::int64_t control_session_id, std::int64_t correlation_id,
+                                std::int64_t recording_id) override;
+    [[nodiscard]] bool control_session_is_done(std::int64_t control_session_id) const override;
+    void clear_active_listing(std::int64_t control_session_id) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
     {
@@ -413,6 +425,9 @@ private:
     /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
     std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
+
+    // Listing (A3a).
+    SessionWorker<ListRecordingsSession> list_recordings_sessions_;
 
     // Segment management (A4a).
     /// `ArchiveConductor.deleteSegmentsSessionByIdMap` (`:270`): keyed by

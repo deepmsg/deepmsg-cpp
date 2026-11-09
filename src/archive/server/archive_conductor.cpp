@@ -444,6 +444,7 @@ void ArchiveConductor::close()
     recorder_.close();
     replayer_.close();
     replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
+    list_recordings_sessions_ = SessionWorker<ListRecordingsSession>{};
     delete_sessions_ = SessionWorker<DeleteSegmentsSession>{};
     delete_session_by_recording_id_.clear();
     sessions_ = SessionWorker<ControlSession>{};
@@ -500,6 +501,7 @@ int ArchiveConductor::do_work()
     work_count += poll_pending_control_counters();
     work_count += poll_recording_images();
     work_count += poll_listings();
+    work_count += list_recordings_sessions_.do_work([](ListRecordingsSession& session) { session.close(); });
     check_replay_tokens();
     work_count += replay_publication_sessions_.do_work([](CreateReplayPublicationSession&) {});
     work_count += replayer_.do_work([this](ReplaySession& session) { close_replay_session(session); });
@@ -2674,6 +2676,99 @@ void ArchiveConductor::on_attach_segments(const RecordingIdRequest& request)
     }
 
     session->send_ok_response(request.correlation_id, count);
+}
+
+void ArchiveConductor::on_list_recordings(const ListRecordingsRequest& request)
+{
+    // `ControlSession.onListRecordings` (`ControlSession.java:374-381`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.newListRecordingsSession` (`:637-656`).
+    if (const auto error = listing_start_error(session->has_active_listing()))
+    {
+        session->send_error_response(request.correlation_id, ACTIVE_LISTING, *error);
+        return;
+    }
+
+    ListRecordingsConfig config;
+    config.control_session_id = session->session_id();
+    config.correlation_id = request.correlation_id;
+    config.from_recording_id = request.from_recording_id;
+    config.count = request.record_count;
+    list_recordings_sessions_.add(std::make_unique<ListRecordingsSession>(catalog_, *this, config));
+    session->set_active_listing(true);
+}
+
+void ArchiveConductor::on_list_recordings_for_uri(const ListRecordingsForUriRequest& request)
+{
+    // `ControlSession.onListRecordingsForUri` (`ControlSession.java:354-372`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.newListRecordingsForUriSession` (`:658-685`).
+    if (const auto error = listing_start_error(session->has_active_listing()))
+    {
+        session->send_error_response(request.correlation_id, ACTIVE_LISTING, *error);
+        return;
+    }
+
+    ListRecordingsConfig config;
+    config.control_session_id = session->session_id();
+    config.correlation_id = request.correlation_id;
+    config.from_recording_id = request.from_recording_id;
+    config.count = request.record_count;
+    config.stream_id = request.stream_id;
+    config.channel_fragment = request.channel_fragment;
+    config.filter_by_uri = true;
+    list_recordings_sessions_.add(std::make_unique<ListRecordingsSession>(catalog_, *this, config));
+    session->set_active_listing(true);
+}
+
+bool ArchiveConductor::send_descriptor(std::int64_t control_session_id, std::int64_t correlation_id,
+                                       std::span<const std::uint8_t> frame)
+{
+    ControlSession* session = control_session_by_id(control_session_id);
+    return nullptr != session && session->send_descriptor(correlation_id, frame);
+}
+
+void ArchiveConductor::send_recording_unknown(std::int64_t control_session_id, std::int64_t correlation_id,
+                                              std::int64_t recording_id)
+{
+    if (ControlSession* session = control_session_by_id(control_session_id); nullptr != session)
+    {
+        session->send_recording_unknown(correlation_id, recording_id);
+    }
+}
+
+bool ArchiveConductor::control_session_is_done(std::int64_t control_session_id) const
+{
+    const auto found = sessions_by_id_.find(control_session_id);
+    return found == sessions_by_id_.end() || found->second->is_done();
+}
+
+void ArchiveConductor::clear_active_listing(std::int64_t control_session_id)
+{
+    if (ControlSession* session = control_session_by_id(control_session_id); nullptr != session)
+    {
+        session->set_active_listing(false);
+    }
 }
 
 void ArchiveConductor::on_migrate_segments(const MigrateSegmentsRequest& request)
