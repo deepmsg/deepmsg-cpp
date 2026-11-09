@@ -22,6 +22,7 @@
 #include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MessageHeader.h"
+#include "io_aeron_archive_codecs/MigrateSegmentsRequest.h"
 #include "io_aeron_archive_codecs/PurgeRecordingRequest.h"
 #include "io_aeron_archive_codecs/PurgeSegmentsRequest.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
@@ -963,6 +964,33 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (ControlSession::State::active == request.session->state())
             {
                 handler_.on_attach_segments(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_MIGRATE_SEGMENTS:
+        {
+            // `ControlSessionAdapter.java:745-767`.
+            archive_codecs::MigrateSegmentsRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            MigrateSegmentsRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.src_recording_id = decoder.srcRecordingId();
+            request.dst_recording_id = decoder.dstRecordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_migrate_segments(request);
             }
             return 1;
         }

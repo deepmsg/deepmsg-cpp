@@ -129,6 +129,7 @@ public:
     void on_purge_segments(const SegmentStartPositionRequest& request) override;
     void on_attach_segments(const RecordingIdRequest& request) override;
     void on_update_channel(const UpdateChannelRequest& request) override;
+    void on_migrate_segments(const MigrateSegmentsRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;

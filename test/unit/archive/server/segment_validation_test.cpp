@@ -15,6 +15,9 @@ namespace
 using deepmsg::archive::server::RecordingSummary;
 using deepmsg::archive::server::ReplayInProgressInfo;
 using deepmsg::archive::server::validate_detach;
+using deepmsg::archive::server::validate_migrate_seam;
+using deepmsg::archive::server::validate_migrate_source;
+using deepmsg::archive::server::validate_migrate_stream_parameters;
 using deepmsg::archive::server::validate_purge;
 using deepmsg::archive::server::validate_truncate;
 
@@ -137,6 +140,61 @@ TEST(SegmentValidationTest, detachReportsTheNearestReplayInProgress)
 
     // A replay at the requested position does not block it (strict `>`).
     EXPECT_FALSE(validate_detach(summary(0, 262144), 131072, -1, replays).has_value());
+}
+
+TEST(SegmentValidationTest, migrateRefusesAnActiveSource)
+{
+    const auto invalid = validate_migrate_source(summary(0, -1));
+    ASSERT_TRUE(invalid.has_value());
+    EXPECT_EQ(0, invalid->code);
+    EXPECT_EQ("recording 7 is still active", invalid->message);
+
+    EXPECT_FALSE(validate_migrate_source(summary(0, 262144)).has_value());
+}
+
+TEST(SegmentValidationTest, migrateComparesTheFiveStreamParametersInOrder)
+{
+    const RecordingSummary src = summary(0, 262144);
+
+    auto dst = src;
+    dst.segment_file_length = SEGMENT_LENGTH / 2;
+    EXPECT_EQ("invalid migrate: srcSegmentFileLength=131072 dstSegmentFileLength=65536",
+              validate_migrate_stream_parameters(src, dst)->message);
+
+    dst = src;
+    dst.term_buffer_length = TERM_LENGTH / 2;
+    EXPECT_EQ("invalid migrate: srcTermBufferLength=65536 dstTermBufferLength=32768",
+              validate_migrate_stream_parameters(src, dst)->message);
+
+    dst = src;
+    dst.initial_term_id = 2;
+    EXPECT_EQ("invalid migrate: srcInitialTermId=1 dstInitialTermId=2",
+              validate_migrate_stream_parameters(src, dst)->message);
+
+    dst = src;
+    dst.stream_id = 12;
+    EXPECT_EQ("invalid migrate: srcStreamId=11 dstStreamId=12", validate_migrate_stream_parameters(src, dst)->message);
+
+    dst = src;
+    dst.mtu_length = 2048;
+    EXPECT_EQ("invalid migrate: srcMtuLength=1024 dstMtuLength=2048",
+              validate_migrate_stream_parameters(src, dst)->message);
+
+    EXPECT_FALSE(validate_migrate_stream_parameters(src, src).has_value());
+}
+
+TEST(SegmentValidationTest, migrateRequiresTheJoinPositionOnASegmentBoundary)
+{
+    const RecordingSummary recording = summary(0, 262144);
+
+    const auto invalid = validate_migrate_seam("src", recording, 1000);
+    ASSERT_TRUE(invalid.has_value());
+    EXPECT_EQ(
+        "invalid migrate: join position is not on segment boundary of src recording seamPosition=1000 "
+        "startPosition=0 stopPosition=262144 termBufferLength=65536 segmentFileLength=131072",
+        invalid->message);
+
+    EXPECT_FALSE(validate_migrate_seam("src", recording, 131072).has_value());
 }
 
 }  // namespace

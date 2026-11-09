@@ -29,6 +29,7 @@ using deepmsg::archive::server::FRAME_LENGTH_OFFSET;
 using deepmsg::archive::server::FrameHeaderCheck;
 using deepmsg::archive::server::list_segment_files;
 using deepmsg::archive::server::list_segment_files_with_delete_suffix;
+using deepmsg::archive::server::move_all_segments;
 using deepmsg::archive::server::segment_file_name;
 using deepmsg::archive::server::SESSION_ID_OFFSET;
 using deepmsg::archive::server::STREAM_ID_OFFSET;
@@ -86,6 +87,12 @@ protected:
         ASSERT_EQ(static_cast<ssize_t>(header.size()),
                   ::pwrite(fd, header.data(), header.size(), static_cast<off_t>(offset)));
         ASSERT_EQ(0, ::close(fd));
+    }
+
+    [[nodiscard]] bool exists(const std::string& name) const
+    {
+        std::error_code error;
+        return std::filesystem::exists(archive_dir_ / name, error);
     }
 
     [[nodiscard]] std::vector<std::uint8_t> read_file(const std::string& name) const
@@ -246,6 +253,53 @@ TEST_F(SegmentFilesSegmentOpsTest, findTermOffsetReportsAnEmptyFirstTerm)
     const auto offset = find_term_offset_for_start(dir(), name, 11, 3, TERM_LENGTH);
     ASSERT_FALSE(offset.has_value());
     EXPECT_EQ("fragment not found in first term of segment " + (archive_dir_ / name).string(), offset.error());
+}
+
+TEST_F(SegmentFilesSegmentOpsTest, moveAllSegmentsRenamesEverythingButTheEmptyFollowingOne)
+{
+    create_file(segment_file_name(7, 0), SEGMENT_LENGTH, 0);
+    create_file(segment_file_name(7, SEGMENT_LENGTH), SEGMENT_LENGTH, 0);
+
+    std::vector<std::string> empty_following;
+    const auto result =
+        move_all_segments(dir(), 7, 8, 0, 2 * SEGMENT_LENGTH, TERM_LENGTH, SEGMENT_LENGTH, empty_following);
+
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(2, result.moved);
+    EXPECT_EQ((std::vector<std::string>{segment_file_name(7, 2 * SEGMENT_LENGTH)}), empty_following);
+    EXPECT_FALSE(exists(segment_file_name(7, 0)));
+    EXPECT_FALSE(exists(segment_file_name(7, SEGMENT_LENGTH)));
+    EXPECT_TRUE(exists(segment_file_name(8, 0)));
+    EXPECT_TRUE(exists(segment_file_name(8, SEGMENT_LENGTH)));
+}
+
+TEST_F(SegmentFilesSegmentOpsTest, moveAllSegmentsReportsAMissingSourceBeforeRenamingAnything)
+{
+    create_file(segment_file_name(7, 0), SEGMENT_LENGTH, 0);
+
+    std::vector<std::string> empty_following;
+    const auto result =
+        move_all_segments(dir(), 7, 8, 0, 2 * SEGMENT_LENGTH, TERM_LENGTH, SEGMENT_LENGTH, empty_following);
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(0, result.moved);
+    EXPECT_EQ(0u, empty_following.size());
+    EXPECT_EQ("missing src segment file " + (archive_dir_ / segment_file_name(7, SEGMENT_LENGTH)).string(),
+              result.error);
+    EXPECT_TRUE(exists(segment_file_name(7, 0))) << "nothing is renamed when a check fails";
+}
+
+TEST_F(SegmentFilesSegmentOpsTest, moveAllSegmentsRefusesAPreexistingDestination)
+{
+    create_file(segment_file_name(7, 0), SEGMENT_LENGTH, 0);
+    create_file(segment_file_name(8, 0), SEGMENT_LENGTH, 0);
+
+    std::vector<std::string> empty_following;
+    const auto result = move_all_segments(dir(), 7, 8, 0, SEGMENT_LENGTH, TERM_LENGTH, SEGMENT_LENGTH, empty_following);
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ("preexisting dst segment file " + (archive_dir_ / segment_file_name(8, 0)).string(), result.error);
+    EXPECT_TRUE(exists(segment_file_name(7, 0)));
 }
 
 }  // namespace

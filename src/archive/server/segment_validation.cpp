@@ -110,4 +110,65 @@ std::optional<ValidationError> validate_detach(const RecordingSummary& summary, 
     return std::nullopt;
 }
 
+std::optional<ValidationError> validate_migrate_source(const RecordingSummary& src)
+{
+    // `ArchiveConductor.isActiveRecording` (`:2418-2433`).
+    if (NULL_POSITION == src.stop_position)
+    {
+        return ValidationError{0, "recording " + std::to_string(src.recording_id) + " is still active"};
+    }
+    return std::nullopt;
+}
+
+std::optional<ValidationError> validate_migrate_stream_parameters(const RecordingSummary& src,
+                                                                  const RecordingSummary& dst)
+{
+    // `ArchiveConductor.hasMatchingStreamParameters` (`:2435-2490`): the order of
+    // the five checks is the reference's.
+    if (dst.segment_file_length != src.segment_file_length)
+    {
+        return ValidationError{0, "invalid migrate: srcSegmentFileLength=" + std::to_string(src.segment_file_length) +
+                                      " dstSegmentFileLength=" + std::to_string(dst.segment_file_length)};
+    }
+    if (dst.term_buffer_length != src.term_buffer_length)
+    {
+        return ValidationError{0, "invalid migrate: srcTermBufferLength=" + std::to_string(src.term_buffer_length) +
+                                      " dstTermBufferLength=" + std::to_string(dst.term_buffer_length)};
+    }
+    if (dst.initial_term_id != src.initial_term_id)
+    {
+        return ValidationError{0, "invalid migrate: srcInitialTermId=" + std::to_string(src.initial_term_id) +
+                                      " dstInitialTermId=" + std::to_string(dst.initial_term_id)};
+    }
+    if (dst.stream_id != src.stream_id)
+    {
+        return ValidationError{0, "invalid migrate: srcStreamId=" + std::to_string(src.stream_id) +
+                                      " dstStreamId=" + std::to_string(dst.stream_id)};
+    }
+    if (dst.mtu_length != src.mtu_length)
+    {
+        return ValidationError{0, "invalid migrate: srcMtuLength=" + std::to_string(src.mtu_length) +
+                                      " dstMtuLength=" + std::to_string(dst.mtu_length)};
+    }
+    return std::nullopt;
+}
+
+std::optional<ValidationError> validate_migrate_seam(std::string_view label, const RecordingSummary& summary,
+                                                     std::int64_t seam_position)
+{
+    // `ArchiveConductor.isJoinPositionSegmentUnaligned` (`:2389-2416`).
+    const std::int64_t segment_base_position = segment_file_base_position(
+        summary.start_position, seam_position, summary.term_buffer_length, summary.segment_file_length);
+    if (segment_base_position != seam_position)
+    {
+        return ValidationError{0, "invalid migrate: join position is not on segment boundary of " + std::string{label} +
+                                      " recording" + " seamPosition=" + std::to_string(seam_position) +
+                                      " startPosition=" + std::to_string(summary.start_position) +
+                                      " stopPosition=" + std::to_string(summary.stop_position) +
+                                      " termBufferLength=" + std::to_string(summary.term_buffer_length) +
+                                      " segmentFileLength=" + std::to_string(summary.segment_file_length)};
+    }
+    return std::nullopt;
+}
+
 }  // namespace deepmsg::archive::server

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "archive/server/catalog.h"
@@ -41,5 +42,17 @@ struct ReplayInProgressInfo
 [[nodiscard]] std::optional<ValidationError> validate_detach(const RecordingSummary& summary, std::int64_t position,
                                                              std::int64_t recorded_position,
                                                              const std::vector<ReplayInProgressInfo>& replays);
+
+/// `ArchiveConductor.isActiveRecording` (`:2418-2433`).
+[[nodiscard]] std::optional<ValidationError> validate_migrate_source(const RecordingSummary& src);
+
+/// `ArchiveConductor.hasMatchingStreamParameters` (`:2435-2490`).
+[[nodiscard]] std::optional<ValidationError> validate_migrate_stream_parameters(const RecordingSummary& src,
+                                                                                const RecordingSummary& dst);
+
+/// `ArchiveConductor.isJoinPositionSegmentUnaligned` (`:2389-2416`).
+[[nodiscard]] std::optional<ValidationError> validate_migrate_seam(std::string_view label,
+                                                                   const RecordingSummary& summary,
+                                                                   std::int64_t seam_position);
 
 }  // namespace deepmsg::archive::server

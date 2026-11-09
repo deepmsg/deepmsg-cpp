@@ -103,6 +103,25 @@ enum class FrameHeaderCheck
     std::string_view archive_dir, std::string_view file_name, std::int64_t position, std::int32_t segment_length,
     std::int32_t segment_offset, std::int32_t term_length, std::int32_t term_id, std::int32_t stream_id) noexcept;
 
+/// The outcome of `ArchiveConductor.moveAllSegments` (`:2492-2568`): `ok` false
+/// carries the reference's `sendErrorResponse` message.
+struct MoveSegmentsResult
+{
+    bool ok{true};
+    std::int64_t moved{0};
+    std::string error;
+};
+
+/// `ArchiveConductor.moveAllSegments` (`:2492-2568`): check every source file
+/// (and that no destination file exists), then rename them into the
+/// destination's names. The file at the source's stop position is the empty
+/// following segment and goes to the delete session instead.
+[[nodiscard]] MoveSegmentsResult move_all_segments(std::string_view archive_dir, std::int64_t src_recording_id,
+                                                   std::int64_t dst_recording_id, std::int64_t start_position,
+                                                   std::int64_t stop_position, std::int32_t term_length,
+                                                   std::int32_t segment_length,
+                                                   std::vector<std::string>& empty_following_src_segments);
+
 /// `ArchiveConductor.findTermOffsetForStart` (`ArchiveConductor.java:1789-1871`).
 /// Returns the offset of the first valid frame in the file's first term, or the
 /// reference's `sendErrorResponse` message.

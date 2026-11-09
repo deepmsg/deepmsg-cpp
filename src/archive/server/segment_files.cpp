@@ -376,6 +376,73 @@ std::expected<void, std::string> erase_remaining_segment(std::string_view archiv
     return {};
 }
 
+MoveSegmentsResult move_all_segments(std::string_view archive_dir, std::int64_t src_recording_id,
+                                     std::int64_t dst_recording_id, std::int64_t start_position,
+                                     std::int64_t stop_position, std::int32_t term_length, std::int32_t segment_length,
+                                     std::vector<std::string>& empty_following_src_segments)
+{
+    // `ArchiveConductor.moveAllSegments` (`:2492-2568`).
+    MoveSegmentsResult result;
+    const std::filesystem::path dir{std::string(archive_dir)};
+
+    const std::int64_t first_segment_position =
+        segment_file_base_position(start_position, start_position, term_length, segment_length);
+    const std::int64_t last_segment_position =
+        segment_file_base_position(start_position, stop_position, term_length, segment_length);
+
+    for (std::int64_t position = first_segment_position; position <= last_segment_position; position += segment_length)
+    {
+        const bool empty_following_src_segment = position == stop_position;
+        if (empty_following_src_segment)
+        {
+            continue;
+        }
+
+        const std::filesystem::path src_file = dir / segment_file_name(src_recording_id, position);
+        std::error_code error;
+        if (!std::filesystem::exists(src_file, error))
+        {
+            result.ok = false;
+            result.error = "missing src segment file " + src_file.string();
+            return result;
+        }
+
+        const std::filesystem::path dst_file = dir / segment_file_name(dst_recording_id, position);
+        if (std::filesystem::exists(dst_file, error))
+        {
+            result.ok = false;
+            result.error = "preexisting dst segment file " + dst_file.string();
+            return result;
+        }
+    }
+
+    for (std::int64_t position = first_segment_position; position <= last_segment_position; position += segment_length)
+    {
+        const std::string src_name = segment_file_name(src_recording_id, position);
+        if (position == stop_position)
+        {
+            // The reference collects with `addFirst`, i.e. ascending order.
+            empty_following_src_segments.push_back(src_name);
+            continue;
+        }
+
+        const std::string dst_name = segment_file_name(dst_recording_id, position);
+        const std::filesystem::path src_file = dir / src_name;
+        const std::filesystem::path dst_file = dir / dst_name;
+        std::error_code error;
+        std::filesystem::rename(src_file, dst_file, error);
+        if (error)
+        {
+            result.ok = false;
+            result.error = "failed to rename " + src_file.string() + " to " + dst_file.string();
+            return result;
+        }
+        result.moved++;
+    }
+
+    return result;
+}
+
 std::expected<std::int32_t, std::string> find_term_offset_for_start(std::string_view archive_dir,
                                                                     std::string_view file_name, std::int32_t stream_id,
                                                                     std::int32_t term_id, std::int32_t term_length)

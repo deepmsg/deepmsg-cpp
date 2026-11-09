@@ -2676,6 +2676,124 @@ void ArchiveConductor::on_attach_segments(const RecordingIdRequest& request)
     session->send_ok_response(request.correlation_id, count);
 }
 
+void ArchiveConductor::on_migrate_segments(const MigrateSegmentsRequest& request)
+{
+    // `ControlSession.onMigrateSegments` (`ControlSession.java:673-680`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.migrateSegments` (`:1626-1701`).
+    if (!require_recording(catalog_, request.src_recording_id, request.correlation_id, *session) ||
+        !require_recording(catalog_, request.dst_recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+
+    const RecordingSummary src = catalog_.recording_summary(request.src_recording_id);
+    const RecordingSummary dst = catalog_.recording_summary(request.dst_recording_id);
+
+    if (const auto invalid = validate_migrate_source(src))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+    if (const auto invalid = validate_migrate_stream_parameters(src, dst))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+
+    std::int64_t join_position = 0;
+    if (src.stop_position == dst.start_position)
+    {
+        join_position = src.stop_position;
+    }
+    else if (src.start_position == dst.stop_position)
+    {
+        join_position = src.start_position;
+    }
+    else
+    {
+        session->send_error_response(request.correlation_id,
+                                     "invalid migrate: src and dst are not contiguous" +
+                                         std::string{" srcStartPosition="} + std::to_string(src.start_position) +
+                                         " srcStopPosition=" + std::to_string(src.stop_position) +
+                                         " dstStartPosition=" + std::to_string(dst.start_position) +
+                                         " dstStopPosition=" + std::to_string(dst.stop_position));
+        return;
+    }
+
+    if (const auto invalid = validate_migrate_seam("src", src, join_position))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+    if (const auto invalid = validate_migrate_seam("dst", dst, join_position))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+
+    std::vector<std::string> empty_following_src_segments;
+    const MoveSegmentsResult moved = move_all_segments(
+        context_.archive_dir, request.src_recording_id, request.dst_recording_id, src.start_position, src.stop_position,
+        src.term_buffer_length, src.segment_file_length, empty_following_src_segments);
+    if (!moved.ok)
+    {
+        session->send_error_response(request.correlation_id, moved.error);
+        return;
+    }
+
+    const auto delete_count = static_cast<std::int64_t>(empty_following_src_segments.size());
+    if (delete_count > 0)
+    {
+        auto delete_session = std::make_unique<DeleteSegmentsSession>(
+            request.src_recording_id, session->session_id(), request.correlation_id, context_.archive_dir,
+            std::move(empty_following_src_segments), *this, *this, false);
+        delete_session_by_recording_id_[request.src_recording_id] = delete_session.get();
+        delete_sessions_.add(std::move(delete_session));
+    }
+
+    if (src.stop_position == dst.start_position)
+    {
+        if (auto started = catalog_.start_position(request.dst_recording_id, src.stop_position); !started)
+        {
+            session->send_error_response(request.correlation_id, std::string{started.error().message.view()});
+            return;
+        }
+    }
+    else
+    {
+        if (auto stopped = catalog_.stop_position(request.dst_recording_id, src.stop_position); !stopped)
+        {
+            session->send_error_response(request.correlation_id, std::string{stopped.error().message.view()});
+            return;
+        }
+    }
+
+    if (auto stopped = catalog_.stop_position(request.src_recording_id, src.start_position); !stopped)
+    {
+        session->send_error_response(request.correlation_id, std::string{stopped.error().message.view()});
+        return;
+    }
+
+    session->send_ok_response(request.correlation_id, moved.moved);
+
+    if (moved.moved > 0 && 0 == delete_count)
+    {
+        session->send_signal(request.correlation_id, request.src_recording_id, NULL_VALUE, NULL_VALUE,
+                             archive_codecs::RecordingSignal::DELETE);
+    }
+}
+
 void ArchiveConductor::on_update_channel(const UpdateChannelRequest& request)
 {
     // `ArchiveConductor.updateChannel` (`:707-735`); the adapter calls this

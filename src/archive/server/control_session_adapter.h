@@ -264,6 +264,7 @@ public:
     virtual void on_purge_segments(const SegmentStartPositionRequest& request) = 0;
     virtual void on_attach_segments(const RecordingIdRequest& request) = 0;
     virtual void on_update_channel(const UpdateChannelRequest& request) = 0;
+    virtual void on_migrate_segments(const MigrateSegmentsRequest& request) = 0;
 
     /// `ControlSession.onStartReplay` / `onStartBoundedReplay` /
     /// `onStopReplay` / `onStopAllReplays` (`ControlSession.java:412-479`).
