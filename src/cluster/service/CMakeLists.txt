@@ -1,6 +1,16 @@
 axc_add_library(axc_cluster_service
     SOURCES
         module.cpp
+        role.cpp
+        session.cpp
+        cluster.cpp
+        consensus_module_proxy.cpp
+        container_config.cpp
+        container_context.cpp
+        service_adapter.cpp
+        log_adapter.cpp
     DEPS
         axc_cluster_common
+        axc_core
+        axc_sbe
         aeron_static)

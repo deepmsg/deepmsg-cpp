@@ -24,7 +24,7 @@ commit.
 | cluster counters 200–241 key layout | `ClusterCounters` / `AeronCounters.java:860-1106` | C1b: `ClusterCountersTest` (key bytes and label text for cluster, service and versioned forms; full type-id table) |
 | timer snapshot order | Agrona `Long2LongHashMap` entry-iterator order (wheel) / heap array level order (priority heap); `WheelTimerService.snapshot` | C1c: `test/golden/cluster/timer/{five,many,heap-after-poll}.txt` (reference-written) + `TimerGoldenTest`; the two suppliers are deliberately **not** snapshot-byte-compatible with each other |
 | timer expiry order | `DeadlineTimerWheel.poll` / `PriorityHeapTimerService.poll` | C1c: `test/golden/cluster/timer/{wheel-expiry,wheel-tick,heap-expiry}.txt` + `TimerGoldenTest` + `PriorityHeapTimerServiceTest` |
-| ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
+| ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` (schema 111) | C2a: the container half of S2 (`JoinLog` 40, `ServiceTerminationPosition` 42, `RequestServiceAck` 108, `ServiceAck` 33, `ScheduleTimer` 31, `CancelTimer` 32) against the reference CM (`ContainerInteropTest`); full family C4 |
 
 ## C++-only switches (A6c/A6d, 2026-11-10)
 

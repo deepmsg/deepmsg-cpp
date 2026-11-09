@@ -1,2 +1,9 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
 # bounded_log_adapter.h / clustered_service_agent.h are template hot paths (C2).
+
+# C2a note: the log/service adapters are deliberately not registered yet. The
+# per-message path copies nothing extra (the SBE decode borrows the term and the
+# business gets a span into it; egress and service offers are two-part
+# `offerv`s), but session-open events allocate the session object's strings and
+# the controlled assembler allocates its per-session buffer on first use. C10
+# registers these once the allocation test can tell warm-up from steady state.

@@ -873,13 +873,15 @@ std::string ClusterMarkFile::resolve_mark_file_dir(std::string_view directory)
         return std::string{directory};
     }
 
+    // `ClusterToolOperator.resolveDirectoryFromLinkFile`: the link contains the
+    // mark file's **directory**, not the file.
     std::filesystem::path target_path{target};
     if (target_path.is_relative())
     {
         target_path = std::filesystem::path{std::string{directory}} / target_path;
     }
 
-    return target_path.parent_path().string();
+    return target_path.string();
 }
 
 }  // namespace deepmsg::cluster::common

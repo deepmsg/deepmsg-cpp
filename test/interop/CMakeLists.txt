@@ -56,11 +56,14 @@ axc_add_executable(axc_cluster_interop_tests
     SOURCES
         cluster/recording_log_interop_test.cpp
         cluster/cluster_mark_file_interop_test.cpp
+        cluster/container_lc4a_interop_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
         axc_cluster_common
+        axc_cluster_service
         axc_core
+        aeron_static
         GTest::gtest_main)
 
 target_include_directories(axc_cluster_interop_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
