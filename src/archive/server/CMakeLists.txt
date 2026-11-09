@@ -26,6 +26,7 @@ axc_add_library(axc_archive_server
         replay_session.cpp
         replayer.cpp
         create_replay_publication_session.cpp
+        delete_segments_session.cpp
     DEPS
         axc_core
         axc_sbe

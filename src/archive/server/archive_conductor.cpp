@@ -422,6 +422,8 @@ void ArchiveConductor::close()
     recorder_.close();
     replayer_.close();
     replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
+    delete_sessions_ = SessionWorker<DeleteSegmentsSession>{};
+    delete_session_by_recording_id_.clear();
     sessions_ = SessionWorker<ControlSession>{};
     publications_.clear();
     if (nullptr != control_assembler_)
@@ -479,6 +481,7 @@ int ArchiveConductor::do_work()
     check_replay_tokens();
     work_count += replay_publication_sessions_.do_work([](CreateReplayPublicationSession&) {});
     work_count += replayer_.do_work([this](ReplaySession& session) { close_replay_session(session); });
+    work_count += delete_sessions_.do_work([](DeleteSegmentsSession& session) { session.close(); });
     work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
     work_count += sessions_.do_work(
         [this](ControlSession& session)
@@ -2277,6 +2280,79 @@ void ArchiveConductor::mark_counter_closed(std::int32_t counter_id)
     if (found != counter_by_id_.end())
     {
         found->second.closed = true;
+    }
+}
+
+bool ArchiveConductor::has_in_progress_replays(std::int64_t recording_id)
+{
+    // `ArchiveConductor.hasInProgressReplays` (`:2226-2239`).
+    for (const auto& entry : replay_session_by_id_)
+    {
+        if (entry.second->recording_id() == recording_id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ArchiveConductor::remove_delete_segments_session(std::int64_t recording_id)
+{
+    // `ArchiveConductor.removeDeleteSegmentsSession` (`:1711-1714`).
+    delete_session_by_recording_id_.erase(recording_id);
+}
+
+void ArchiveConductor::log_error(std::string_view message)
+{
+    // The reference's `errorHandler.onError(new ArchiveEvent(...))` writes to the
+    // error log; the archive's error log is the warnings sink until C1a.
+    log_warning(message);
+}
+
+void ArchiveConductor::send_delete_signal(std::int64_t control_session_id, std::int64_t correlation_id,
+                                          std::int64_t recording_id)
+{
+    // `ControlSession.sendSignal(correlationId, recordingId, NULL, NULL, DELETE)`
+    // (`DeleteSegmentsSession.java:105-107`). A session that has already gone is
+    // simply dropped, as in the replay path.
+    const auto found = sessions_by_id_.find(control_session_id);
+    if (found != sessions_by_id_.end())
+    {
+        found->second->send_signal(correlation_id, recording_id, NULL_VALUE, NULL_VALUE,
+                                   archive_codecs::RecordingSignal::DELETE);
+    }
+}
+
+void ArchiveConductor::send_error(std::int64_t control_session_id, std::int64_t correlation_id,
+                                  std::string_view message)
+{
+    const auto found = sessions_by_id_.find(control_session_id);
+    if (found != sessions_by_id_.end())
+    {
+        found->second->send_error_response(correlation_id, message);
+    }
+}
+
+void ArchiveConductor::delete_segments(ControlSession& session, std::int64_t correlation_id, std::int64_t recording_id,
+                                       std::vector<std::string> files, bool await_replays_stop)
+{
+    // `ArchiveConductor.deleteSegments` (`:2654-2670`).
+    const auto count = static_cast<std::int64_t>(files.size());
+    if (count > 0)
+    {
+        auto delete_session = std::make_unique<DeleteSegmentsSession>(
+            recording_id, session.session_id(), correlation_id, context_.archive_dir, std::move(files), *this, *this,
+            await_replays_stop);
+        delete_session_by_recording_id_[recording_id] = delete_session.get();
+        delete_sessions_.add(std::move(delete_session));
+    }
+
+    session.send_ok_response(correlation_id, count);
+
+    if (0 == count)
+    {
+        session.send_signal(correlation_id, recording_id, NULL_VALUE, NULL_VALUE,
+                            archive_codecs::RecordingSignal::DELETE);
     }
 }
 

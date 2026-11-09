@@ -21,6 +21,7 @@
 #include "archive/server/control_session_adapter.h"
 #include "archive/server/create_replay_publication_session.h"
 #include "archive/server/deepmsg_response_publication.h"
+#include "archive/server/delete_segments_session.h"
 #include "archive/server/epoch_clock_source.h"
 #include "archive/server/recorder.h"
 #include "archive/server/recording_events.h"
@@ -84,7 +85,9 @@ struct ArchiveConductorContext
 class ArchiveConductor final : public ControlSessionHandler,
                                public ReplayControlResponses,
                                public ReplayWarningSink,
-                               public CreateReplayPublicationSessionHandler
+                               public CreateReplayPublicationSessionHandler,
+                               public DeleteSegmentsControl,
+                               public DeleteSegmentsResponder
 {
 public:
     /// `AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION`.
@@ -144,6 +147,16 @@ public:
                             std::unique_ptr<ReplayPublication> publication) override;
 
     void log_warning(std::string_view message) override;
+
+    // DeleteSegmentsControl (`ControlSession.archiveConductor()`).
+    [[nodiscard]] bool has_in_progress_replays(std::int64_t recording_id) override;
+    void remove_delete_segments_session(std::int64_t recording_id) override;
+    void log_error(std::string_view message) override;
+
+    // DeleteSegmentsResponder (`ControlSession.sendSignal` / `sendErrorResponse`).
+    void send_delete_signal(std::int64_t control_session_id, std::int64_t correlation_id,
+                            std::int64_t recording_id) override;
+    void send_error(std::int64_t control_session_id, std::int64_t correlation_id, std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
     {
@@ -384,6 +397,18 @@ private:
     /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
     std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
+
+    // Segment management (A4a).
+    /// `ArchiveConductor.deleteSegmentsSessionByIdMap` (`:270`): keyed by
+    /// **recordingId**, exactly like the reference.
+    SessionWorker<DeleteSegmentsSession> delete_sessions_;
+    std::unordered_map<std::int64_t, DeleteSegmentsSession*> delete_session_by_recording_id_;
+
+    /// `ArchiveConductor.deleteSegments` (`:2654-2670`): create the session,
+    /// send the OK with the file count and emit DELETE itself when the list is
+    /// empty (no session would ever close).
+    void delete_segments(ControlSession& session, std::int64_t correlation_id, std::int64_t recording_id,
+                         std::vector<std::string> files, bool await_replays_stop);
 };
 
 }  // namespace deepmsg::archive::server
