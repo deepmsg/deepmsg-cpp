@@ -1,0 +1,39 @@
+# A5a (archive threading modes + two binary shapes + XA-4) criteria.
+#
+# The three modes are judged against the real binary: the archive runs as a
+# child process, the client is the reference C archive client.
+#
+#   build/debug/test/interop/axc_archive_interop_tests \
+#       --gtest_filter='ThreadingInteropTest.*'
+#
+#   * DEDICATED: three threads named per `aeron.thread.naming` (classic
+#     `archive-conduct*` / new `aeron-ar-cnd|rec|rep`), counter pairs 103/104
+#     for conductor + recorder + replayer labelled `: DEDICATED`.
+#   * SHARED: caller-driven, no worker thread, one counter pair labelled
+#     `: SHARED`.
+#   * INVOKER: identical runtime shape, counter pair labelled `: INVOKER`.
+#   * Every mode completes record -> stop -> list -> replay through the C
+#     client.
+#
+# Two binary shapes (`Archive.java:141-170`), both selected by the main class
+# the reference harness passes:
+#   * `io.aeron.archive.ArchivingMediaDriver` = archive + embedded driver (the
+#     whole C archive suite already runs this shape).
+#   * `io.aeron.archive.Archive` = standalone against an existing driver. The
+#     shim now maps both classes, so the 27 `TestStandaloneArchive` cases in
+#     the resilience suite run against us:
+#
+#   AXC_C_SUITE=build/reference-shim/binaries/aeron_archive_persistent_subscription_resilience_test \
+#       test/interop/run-c-suite.sh debug
+#   -> 50/50 green (before this card those cases ran the real Java archive).
+#
+# XA-4: every one of the 48 `aeron.archive.*` names in 1.54.0 has a
+# disposition (44 honoured, 4 accepted_ignored) and a reason; no `Pending`.
+#   build/debug/test/unit/axc_archive_unit_tests --gtest_filter='ConfigRegistryTest.*'
+#
+# Not expressible here (unit tests instead):
+#   * the many-to-one handoff FIFO / multi-producer behaviour
+#     (`ManyToOneQueueTest`, TSan-clean)
+#   * `SessionWorker::do_work_releasing` ownership transfer
+#   * the duty-cycle tracker's max/threshold arithmetic
+#   * the thread-name table and the idle/threshold/affinity parsing
