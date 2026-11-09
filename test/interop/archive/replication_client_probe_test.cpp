@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "archive/server/archive_conductor.h"
+#include "archive/server/replication_client.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "fixture/c_driver.h"
 
@@ -52,6 +53,7 @@ using axc::core::ClientConfig;
 using axc::core::DeepmsgClient;
 using deepmsg::archive::server::ArchiveConductor;
 using deepmsg::archive::server::ArchiveConductorContext;
+using deepmsg::archive::server::SourceArchiveClient;
 
 constexpr const char* CONTROL_CHANNEL = "aeron:udp?endpoint=localhost:34600";
 constexpr std::int32_t CONTROL_STREAM_ID = 10;
@@ -224,6 +226,56 @@ TEST_F(ReplicationClientProbeTest, theSourceClientConnectsOnTheSharedAeronClient
     EXPECT_EQ(2, poller->code_value);
     EXPECT_FALSE(poller->is_code_error);
     EXPECT_EQ(unknown_recording_id, poller->relevant_id);
+}
+
+TEST_F(ReplicationClientProbeTest, theSourceArchiveClientWrapperDrivesTheConnectAndTheDescriptorPoller)
+{
+    for (int iteration = 0; iteration < 100; iteration++)
+    {
+        drive_once();
+        ::usleep(1000);
+    }
+
+    SourceArchiveClient::Config config;
+    config.control_request_channel = CONTROL_CHANNEL;
+    config.control_request_stream_id = CONTROL_STREAM_ID;
+    config.control_response_channel = "aeron:udp?endpoint=localhost:0";
+    config.control_response_stream_id = RESPONSE_STREAM_ID;
+
+    auto source = SourceArchiveClient::create(client_.handle(), config);
+    ASSERT_TRUE(source) << source.error().message.view();
+    std::unique_ptr<SourceArchiveClient> source_client = std::move(*source);
+
+    for (int iteration = 0; iteration < 20'000 && !source_client->is_connected(); iteration++)
+    {
+        drive_once();
+        (void)source_client->do_work();
+        ASSERT_FALSE(source_client->is_failed()) << source_client->error_message();
+        ::usleep(200);
+    }
+
+    ASSERT_TRUE(source_client->is_connected()) << source_client->error_message();
+    EXPECT_GE(source_client->control_session_id(), 0);
+
+    int descriptor_calls = 0;
+    const std::int64_t correlation_id = source_client->next_correlation_id();
+    source_client->reset_descriptor_poller(
+        correlation_id, 1, [&](deepmsg::archive::server::SourceRecordingDescriptor&) { descriptor_calls++; });
+    ASSERT_TRUE(source_client->list_recording(correlation_id, 777'777));
+
+    for (int iteration = 0; iteration < 20'000 && !source_client->descriptor_dispatch_complete(); iteration++)
+    {
+        drive_once();
+        (void)source_client->do_work();
+        const auto polled = source_client->poll_descriptors();
+        ASSERT_TRUE(polled.has_value()) << polled.error().message.view();
+        ::usleep(200);
+    }
+
+    EXPECT_TRUE(source_client->descriptor_dispatch_complete())
+        << "the RECORDING_UNKNOWN answer must complete the listing";
+    EXPECT_GE(source_client->descriptor_remaining_record_count(), 0);
+    (void)descriptor_calls;
 }
 
 }  // namespace

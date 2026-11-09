@@ -50,6 +50,8 @@ struct ArchiveConductorContext
     /// (`Archive.java:484-500`): the privileged local control channel.
     std::string local_control_channel{"aeron:ipc?term-length=64k"};
     std::int32_t local_control_stream_id{10};
+    /// `Archive.Context.replicationChannel` (`Archive.java:1301-1303`).
+    std::string replication_channel;
     /// Empty ⇒ the Aeron default (`/dev/shm/aeron-<user>`).
     std::string aeron_dir;
     std::int64_t connect_timeout_ms{3000};

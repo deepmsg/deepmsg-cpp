@@ -30,6 +30,10 @@ struct ArchiveLaunchConfig
     std::int32_t control_stream_id{10};
     std::string local_control_channel{"aeron:ipc?term-length=64k"};
     std::int32_t local_control_stream_id{10};
+    /// `aeron.archive.replication.channel` (`Archive.java:613`, `:1301-1303`):
+    /// the fallback channel when a `ReplicateRequest2` names none. Empty ⇒ a
+    /// replicate request without its own channel is refused.
+    std::string replication_channel;
     std::int64_t archive_id{-1};
     bool delete_archive_on_start{false};
     std::int64_t connect_timeout_ms{5000};
