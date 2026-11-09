@@ -1,0 +1,34 @@
+# XA-1 (archive interchangeability, the full reference C suite) — 319 runtime
+# cases, run in SHARED and in DEDICATED, three consecutive rounds each, zero red.
+#
+#   test/interop/run-xa1.sh debug SHARED
+#   test/interop/run-xa1.sh debug DEDICATED
+#
+# Denominator: X0-6's runtime recount (`analysis/cpp/records/x0-6/case-denominators.tsv`),
+# 319 cases over eleven binaries; the runner prints the per-binary table and fails
+# if a binary's case count moves, if any case fails, or if any case skips.
+#
+# The reference harness hardcodes `aeron.archive.threading.mode=SHARED`
+# (`TestArchive.h`, `TestStandaloneArchive.h`). The shim rewrites that argument to
+# `AXC_SHIM_THREADING_MODE` for our binary only, so DEDICATED is a property of the
+# run and the submodule is never patched (the gitlink is the contract).
+#
+# The three drop-wait cases need the upstream test-side hold the Rust track runs
+# with (`analysis/fix/upstream-issue-drop-wait-races-the-flood.md`):
+#
+#   test/interop/apply-xa1-holds.sh apply     # 100 ms waits, submodule working tree only
+#   test/interop/apply-xa1-holds.sh revert    # after the runs
+#
+# They are applied by this card's runs and reverted; nothing is committed to
+# `third_party/aeron`. Without them the PS drop/failback cases flake red (they read
+# the persistent subscription while the flood is still landing).
+#
+# One reference-test race is load-sensitive (not archive behaviour): the C++
+# wrapper's `shouldRecordAndExtend/0,/1` lists the recording right after the stop
+# and can read `stop_position = -1`, which its URI builder refuses as unaligned.
+# Loud-machine runs see it; the same binary run alone passes 51/51 repeatedly.
+#
+# Prerequisite: the eleven binaries under `build/reference-shim/binaries`
+# (<name>:<cases> mirrors the runner's table); see a2b.txt for the one-time
+# configure and build them with
+#   cmake --build build/reference-shim --target <names>

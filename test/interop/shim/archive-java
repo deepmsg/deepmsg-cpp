@@ -16,6 +16,11 @@
 # `deepmsg -> deepmsg`. Empty (or missing) keeps the historical behaviour: every
 # archive goes to our binary.
 #
+# `AXC_SHIM_THREADING_MODE` (`SHARED` / `DEDICATED`) rewrites (or appends)
+# `-Daeron.archive.threading.mode` on the argv handed to our binary only. XA-1
+# runs the whole reference C suite in DEDICATED without touching the reference
+# harness, which hardcodes SHARED (`TestArchive.h`, `TestStandaloneArchive.h`).
+#
 # The binary directory comes from `mapped.conf` next to this script when it
 # exists (written by the test runner), then `AXC_BIN_DIR`, then the debug
 # preset default.
@@ -32,6 +37,7 @@ fi
 bin_dir=${AXC_BIN_DIR:-"$here/../../../build/debug/apps/deepmsg-archive-server"}
 real_java=${AXC_REAL_JAVA:-/usr/bin/java}
 deepmsg_ids=${AXC_SHIM_DEEPMSG_IDS:-}
+threading_mode=${AXC_SHIM_THREADING_MODE:-}
 
 is_archive=0
 archive_id=""
@@ -62,6 +68,25 @@ if [ 1 -eq "$is_archive" ]; then
 fi
 
 if [ 1 -eq "$to_deepmsg" ]; then
+    if [ -n "$threading_mode" ]; then
+        rewritten=()
+        found=0
+        for argument in "$@"; do
+            case "$argument" in
+                -Daeron.archive.threading.mode=*)
+                    rewritten+=("-Daeron.archive.threading.mode=$threading_mode")
+                    found=1
+                    ;;
+                *)
+                    rewritten+=("$argument")
+                    ;;
+            esac
+        done
+        if [ 0 -eq "$found" ]; then
+            rewritten+=("-Daeron.archive.threading.mode=$threading_mode")
+        fi
+        exec "$bin_dir/deepmsg-archive-server" "${rewritten[@]}"
+    fi
     exec "$bin_dir/deepmsg-archive-server" "$@"
 fi
 
