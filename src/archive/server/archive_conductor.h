@@ -256,6 +256,11 @@ private:
         bool auto_stop{false};
         bool extend{false};
         std::int64_t extend_recording_id{0};
+        /// Non-zero when a replication session started this add: its outcome
+        /// is published in `extend_outcomes_` under this token
+        /// (`ArchiveConductor.extendRecording` returns the `Subscription`
+        /// synchronously in the reference; ours is a driver round trip).
+        std::int64_t extend_token{0};
         axc::core::AsyncAdd<axc::core::SubPtr> subscription_add;
     };
 
@@ -296,6 +301,24 @@ private:
     void mark_counter_closed(std::int32_t counter_id);
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     [[nodiscard]] int extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
+
+    /// `ArchiveConductor.extendRecording` (`ArchiveConductor.java:1067-1151`):
+    /// validation, the recording-subscription add and the OK/ERROR, shared by
+    /// the wire handler and a replication session (which passes its
+    /// `replicationId` as the correlation).
+    ///
+    /// Success returns a token for `take_extend_recording_outcome()`; failure
+    /// returns the message that already went out as the ERROR.
+    [[nodiscard]] std::expected<std::int64_t, std::string> extend_recording(
+        std::int64_t correlation_id, std::int64_t recording_id, std::int32_t stream_id, std::int32_t source_location,
+        bool auto_stop, std::string_view original_channel, ControlSession& session);
+
+    /// Consumes the token's outcome; `nullopt` while the add is in flight.
+    [[nodiscard]] std::optional<ExtendRecordingOutcome> take_extend_recording_outcome(std::int64_t token);
+
+    /// Drops an in-flight add (the `AsyncAdd` destructor cancels the driver
+    /// request, so no OK is sent for a token nobody waits on).
+    void cancel_extend_recording(std::int64_t token);
     void close_recording_session(RecordingSession& session);
     void abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason);
     [[nodiscard]] std::optional<RecordingSubscription> remove_recording_subscription(std::int64_t registration_id);
@@ -373,6 +396,10 @@ private:
     /// subscription registration id -> `recording_subscriptions_` key.
     std::unordered_map<std::int64_t, std::string> recording_subscription_keys_;
     std::vector<PendingRecordingSubscription> pending_recording_subscriptions_;
+    /// `extend_token` → outcome for the replication path; the wire path has no
+    /// waiter and leaves its token zero.
+    std::unordered_map<std::int64_t, ExtendRecordingOutcome> extend_outcomes_;
+    std::int64_t next_extend_token_{1};
     std::unordered_map<aeron_image_t*, RecordingSession*> sessions_by_image_;
 
     /// A listing in progress (`ListRecordingByIdSession` /

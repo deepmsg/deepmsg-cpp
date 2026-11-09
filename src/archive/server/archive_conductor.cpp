@@ -473,6 +473,7 @@ void ArchiveConductor::close()
     recording_subscription_keys_.clear();
     recording_subscription_order_.clear();
     pending_recording_subscriptions_.clear();
+    extend_outcomes_.clear();
     pending_control_counters_.clear();
     pending_publications_.clear();
     control_session_counters_.clear();
@@ -886,11 +887,15 @@ int ArchiveConductor::poll_pending_recording_subscriptions()
         auto polled = it->subscription_add.poll();
         if (!polled)
         {
-            log_warning(std::string{"recording subscription add failed: "} +
-                        std::string{polled.error().message.view()});
+            const std::string message{polled.error().message.view()};
+            log_warning("recording subscription add failed: " + message);
             if (auto* session = control_session_by_id(it->control_session_id))
             {
-                session->send_error_response(it->correlation_id, std::string{polled.error().message.view()});
+                session->send_error_response(it->correlation_id, message);
+            }
+            if (0 != it->extend_token)
+            {
+                extend_outcomes_[it->extend_token] = ExtendRecordingOutcome{0, message};
             }
             it = pending_recording_subscriptions_.erase(it);
             continue;
@@ -903,6 +908,7 @@ int ArchiveConductor::poll_pending_recording_subscriptions()
         }
 
         auto handle = std::move(**polled);
+        const std::int64_t registration_id = handle->registration_id;
 
         RecordingSubscription subscription;
         subscription.key = it->key;
@@ -924,10 +930,14 @@ int ArchiveConductor::poll_pending_recording_subscriptions()
         recording_subscriptions_[subscription.key] = std::move(subscription);
 
         // The OK carries the registration id and is sent before any image
-        // arrives (`ArchiveConductor.java:570`).
+        // arrives (`ArchiveConductor.java:570`, `:1139`).
         if (auto* session = control_session_by_id(it->control_session_id))
         {
-            session->send_ok_response(it->correlation_id, recording_subscriptions_[it->key].registration_id);
+            session->send_ok_response(it->correlation_id, registration_id);
+        }
+        if (0 != it->extend_token)
+        {
+            extend_outcomes_[it->extend_token] = ExtendRecordingOutcome{registration_id, {}};
         }
 
         it = pending_recording_subscriptions_.erase(it);
@@ -946,88 +956,137 @@ void ArchiveConductor::on_extend_recording(const ExtendRecordingRequest& request
         return;
     }
 
+    // The wire path has no waiter for the registration id (the OK carries it);
+    // the replication path keeps the returned token.
+    (void)extend_recording(request.correlation_id, request.recording_id, request.stream_id, request.source_location,
+                           request.auto_stop, request.channel, *session);
+}
+
+std::expected<std::int64_t, std::string> ArchiveConductor::extend_recording(
+    std::int64_t correlation_id, std::int64_t recording_id, std::int32_t stream_id, std::int32_t source_location,
+    bool auto_stop, std::string_view original_channel, ControlSession& session)
+{
+    // `ArchiveConductor.extendRecording` (`ArchiveConductor.java:1067-1151`).
+    // The reference sends the ERROR (and returns the same message) on every
+    // refusal below; the OK with the registration id goes out from
+    // `poll_pending_recording_subscriptions` once the driver answers
+    // (`ArchiveConductor.java:1139`).
     const auto max_recordings = static_cast<std::size_t>(context_.recording.max_concurrent_recordings);
     if (recording_subscriptions_.size() >= max_recordings || recorder_.size() >= max_recordings)
     {
-        session->send_error_response(
-            request.correlation_id, MAX_RECORDINGS,
-            "max concurrent recordings reached at " + std::to_string(context_.recording.max_concurrent_recordings));
-        return;
+        const std::string msg =
+            "max concurrent recordings reached at " + std::to_string(context_.recording.max_concurrent_recordings);
+        session.send_error_response(correlation_id, MAX_RECORDINGS, msg);
+        return std::unexpected(msg);
     }
 
-    if (!catalog_.has_recording(request.recording_id))
+    if (!catalog_.has_recording(recording_id))
     {
-        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
-                                     "unknown recording id: " + std::to_string(request.recording_id));
-        return;
+        const std::string msg = "unknown recording id: " + std::to_string(recording_id);
+        session.send_error_response(correlation_id, UNKNOWN_RECORDING, msg);
+        return std::unexpected(msg);
     }
 
-    const auto summary = catalog_.recording_summary(request.recording_id);
-    if (request.stream_id != summary.stream_id)
+    const auto summary = catalog_.recording_summary(recording_id);
+    if (stream_id != summary.stream_id)
     {
-        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
-                                     "cannot extend recording " + std::to_string(summary.recording_id) +
-                                         " with streamId=" + std::to_string(request.stream_id) +
-                                         " for existing streamId=" + std::to_string(summary.stream_id));
-        return;
+        const std::string msg = "cannot extend recording " + std::to_string(summary.recording_id) +
+                                " with streamId=" + std::to_string(stream_id) +
+                                " for existing streamId=" + std::to_string(summary.stream_id);
+        session.send_error_response(correlation_id, UNKNOWN_RECORDING, msg);
+        return std::unexpected(msg);
     }
 
-    if (sessions_by_recording_id_.find(request.recording_id) != sessions_by_recording_id_.end())
+    if (sessions_by_recording_id_.find(recording_id) != sessions_by_recording_id_.end())
     {
-        session->send_error_response(request.correlation_id, ACTIVE_RECORDING,
-                                     "cannot extend active recording " + std::to_string(request.recording_id));
-        return;
+        const std::string msg = "cannot extend active recording " + std::to_string(recording_id);
+        session.send_error_response(correlation_id, ACTIVE_RECORDING, msg);
+        return std::unexpected(msg);
     }
 
     const std::int64_t usable = axc::core::usable_space(context_.archive_dir);
     if (usable <= context_.recording.low_storage_space_threshold)
     {
-        session->send_error_response(
-            request.correlation_id, STORAGE_SPACE,
+        const std::string msg =
             "low storage threshold=" + std::to_string(context_.recording.low_storage_space_threshold) +
-                " <= usableSpace=" + std::to_string(usable));
-        return;
+            " <= usableSpace=" + std::to_string(usable);
+        session.send_error_response(correlation_id, STORAGE_SPACE, msg);
+        return std::unexpected(msg);
     }
 
-    auto key = make_key(request.stream_id, request.channel);
+    auto key = make_key(stream_id, original_channel);
     if (!key)
     {
-        session->send_error_response(request.correlation_id, std::string{key.error().message.view()});
-        return;
+        const std::string msg{key.error().message.view()};
+        session.send_error_response(correlation_id, msg);
+        return std::unexpected(msg);
     }
 
     if (recording_subscriptions_.find(*key) != recording_subscriptions_.end())
     {
-        session->send_error_response(
-            request.correlation_id, ACTIVE_SUBSCRIPTION,
-            "recording exists for streamId=" + std::to_string(request.stream_id) + " channel=" + request.channel);
-        return;
+        const std::string msg =
+            "recording exists for streamId=" + std::to_string(stream_id) + " channel=" + std::string{original_channel};
+        session.send_error_response(correlation_id, ACTIVE_SUBSCRIPTION, msg);
+        return std::unexpected(msg);
     }
 
-    auto stripped = stripped_channel(request.channel);
+    auto stripped = stripped_channel(original_channel);
     if (!stripped)
     {
-        session->send_error_response(request.correlation_id, std::string{stripped.error().message.view()});
-        return;
+        const std::string msg{stripped.error().message.view()};
+        session.send_error_response(correlation_id, msg);
+        return std::unexpected(msg);
     }
 
     const std::string subscription_channel =
-        SOURCE_LOCATION_LOCAL == request.source_location && is_udp_channel(request.channel) ? "aeron-spy:" + *stripped
-                                                                                            : *stripped;
+        SOURCE_LOCATION_LOCAL == source_location && is_udp_channel(original_channel) ? "aeron-spy:" + *stripped
+                                                                                     : *stripped;
+
+    const std::int64_t token = next_extend_token_++;
 
     PendingRecordingSubscription pending;
     pending.key = *key;
     pending.stripped_channel = *stripped;
-    pending.original_channel = request.channel;
+    pending.original_channel = std::string{original_channel};
     pending.subscription_channel = subscription_channel;
-    pending.stream_id = request.stream_id;
-    pending.control_session_id = session->session_id();
-    pending.correlation_id = request.correlation_id;
-    pending.auto_stop = request.auto_stop;
+    pending.stream_id = stream_id;
+    pending.control_session_id = session.session_id();
+    pending.correlation_id = correlation_id;
+    pending.auto_stop = auto_stop;
     pending.extend = true;
-    pending.extend_recording_id = request.recording_id;
-    pending.subscription_add = client_.add_subscription(subscription_channel, request.stream_id, {});
+    pending.extend_recording_id = recording_id;
+    pending.extend_token = token;
+    pending.subscription_add = client_.add_subscription(subscription_channel, stream_id, {});
     pending_recording_subscriptions_.push_back(std::move(pending));
+
+    return token;
+}
+
+std::optional<ExtendRecordingOutcome> ArchiveConductor::take_extend_recording_outcome(std::int64_t token)
+{
+    const auto found = extend_outcomes_.find(token);
+    if (found == extend_outcomes_.end())
+    {
+        return std::nullopt;
+    }
+
+    ExtendRecordingOutcome outcome = std::move(found->second);
+    extend_outcomes_.erase(found);
+    return outcome;
+}
+
+void ArchiveConductor::cancel_extend_recording(std::int64_t token)
+{
+    extend_outcomes_.erase(token);
+
+    const auto found =
+        std::find_if(pending_recording_subscriptions_.begin(), pending_recording_subscriptions_.end(),
+                     [token](const PendingRecordingSubscription& pending) { return pending.extend_token == token; });
+    if (found != pending_recording_subscriptions_.end())
+    {
+        // The AsyncAdd destructor cancels the driver request, so no OK goes out.
+        pending_recording_subscriptions_.erase(found);
+    }
 }
 
 int ArchiveConductor::extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image)

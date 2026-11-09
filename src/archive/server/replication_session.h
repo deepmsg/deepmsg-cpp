@@ -7,6 +7,22 @@
 namespace deepmsg::archive::server
 {
 
+/// The two-phase outcome of `ArchiveConductor.extendRecording`
+/// (`ArchiveConductor.java:1067-1151`), which the wire handler and a
+/// replication session share.
+///
+/// The reference returns the `Subscription` itself because Java's
+/// `addSubscription` blocks; our recording-subscription add is a driver round
+/// trip (`AsyncAdd`), so starting one returns a token whose outcome resolves
+/// on a later conductor pass. The OK carrying the registration id (or the
+/// ERROR) already went out on the control session when this is filled in.
+struct ExtendRecordingOutcome
+{
+    std::int64_t registration_id{0};
+    /// Non-empty ⇒ the add failed; the message was already sent on the session.
+    std::string error;
+};
+
 /// Everything `ArchiveConductor.replicate` passes to a session
 /// (`ReplicationSession.java:80-120`).
 struct ReplicationConfig
