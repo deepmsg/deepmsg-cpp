@@ -209,7 +209,12 @@ public:
     void write_go()
     {
         const char go[] = "go\n";
-        (void)::write(stdin_fd_, go, sizeof(go) - 1);
+        // glibc marks `write` warn_unused_result and a cast to void does not
+        // silence it under GCC + `_FORTIFY_SOURCE` (the release preset); the
+        // child is waited on below, so a failed write shows up as a wrong exit
+        // rather than here.
+        const ssize_t written = ::write(stdin_fd_, go, sizeof(go) - 1);
+        (void)written;
     }
 
     [[nodiscard]] int wait_exit(std::chrono::steady_clock::time_point deadline)
