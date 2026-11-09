@@ -398,6 +398,13 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     {
         return std::unexpected(allocated.error());
     }
+    // `ArchiveConductor.onStart` (`ArchiveConductor.java:252`): the conductor's
+    // tracker is anchored before the first cycle, otherwise its first
+    // `measureAndUpdate` reports `nanoTime() - 0` — the machine's uptime — as
+    // the max cycle (measured: 6.1e13 ns on a 17-hour box, against the
+    // reference's ~2.5e7). The recorder and replayer anchor themselves in
+    // `on_start_threaded`.
+    conductor_duty_cycle_.tracker.update(axc::core::NanoClock::now());
     if (is_dedicated())
     {
         if (auto allocated = allocate_duty_cycle(recorder_duty_cycle_, "archive-recorder",
