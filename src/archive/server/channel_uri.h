@@ -40,6 +40,37 @@ struct ChannelUriOptions
 [[nodiscard]] std::expected<std::string, axc::core::Error> control_response_channel(std::string_view channel,
                                                                                     const ChannelUriOptions& options);
 
+/// The extra parameters `ArchiveConductor.startReplay` puts on a replay
+/// publication (`ArchiveConductor.java:892-901`).
+struct ReplayChannelOptions
+{
+    /// `replayPosition`; `initialPosition(position, initialTermId, termLength)`.
+    std::int64_t position{0};
+    std::int32_t initial_term_id{0};
+    std::int32_t term_length{0};
+    /// `recordingSummary.mtuLength`.
+    std::int32_t mtu_length{0};
+    /// `ctx.replayLingerTimeoutNs()` when the channel itself has no `linger`.
+    std::int64_t linger_timeout_ns{5'000'000'000};
+    /// Set by the adapter for a response-mode replay (the request image's
+    /// correlation id); otherwise the channel's own value is copied.
+    bool has_response_correlation_id{false};
+    std::int64_t response_correlation_id{0};
+};
+
+/// The adapter's `channelUri.put(RESPONSE_CORRELATION_ID_PARAM_NAME, ...)`
+/// (`ControlSessionAdapter.java:1183`): the channel with the response
+/// correlation id replaced (or added), everything else preserved.
+[[nodiscard]] std::expected<std::string, axc::core::Error> with_response_correlation_id(std::string_view channel,
+                                                                                        std::int64_t correlation_id);
+
+/// `strippedChannelBuilder(uri).initialPosition(...).eos(uri).sparse(uri).mtu(...).linger(...)`
+/// (`ArchiveConductor.java:893-901`): the stripped channel plus the four
+/// initial-position parameters, `eos`/`sparse` copied from the channel,
+/// `mtu`/`term-length` forced, and a formatted `linger`.
+[[nodiscard]] std::expected<std::string, axc::core::Error> replay_channel(std::string_view channel,
+                                                                          const ReplayChannelOptions& options);
+
 /// `ArchiveConductor.makeKey` (`ArchiveConductor.java:1914-1953`): the in-process
 /// `streamId:media?endpoint=|interface=|control=|session-id=|tags=` key with the
 /// trailing character chopped off (unconditionally, `:1945`).

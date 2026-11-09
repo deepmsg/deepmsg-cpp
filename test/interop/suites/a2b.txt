@@ -40,6 +40,6 @@ AeronCArchiveTest.shouldListRegisteredRecordingSubscriptions
 AeronCArchiveTest.shouldReadRecordingDescriptor
 AeronCArchiveTest.shouldReadJumboRecordingDescriptor
 
-# Known red until a later card (kept here so the gap is named, not silent):
+# Closed by A3b (2026-11-08): the replay tail of
 #   AeronCArchive/AeronCArchiveParamTest.shouldRecordAndExtend/0,/1
-#     recording-side assertions all pass; the tail is a replay (A3b).
+# is green now; see suites/a3b.txt for the replay criteria and readings.

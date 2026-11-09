@@ -1,0 +1,59 @@
+# A3b (archive replay) criteria: the reference C suite cases this card is judged
+# by, run against our binary with test/interop/run-c-suite.sh.
+#
+# The reference C suite is built once against the shim (see a2b.txt); the shim
+# maps `io.aeron.archive.ArchivingMediaDriver` to build/<preset>/apps/
+# deepmsg-archive-server/deepmsg-archive-server.
+#
+# Replay subset (12/12 green at the A3b close, 2026-11-08):
+#
+#   test/interop/run-c-suite.sh debug --gtest_filter='\
+#     AeronCArchiveTest.shouldRecordThenReplay:\
+#     AeronCArchiveTest.shouldRecordThenBoundedReplay:\
+#     AeronCArchiveTest.shouldRecordAndCancelReplayEarly:\
+#     AeronCArchiveTest.shouldRecordAndCancelReplayEarlyWithExclusivePublication:\
+#     AeronCArchiveTest.shouldReplayRecordingFromLateJoinPosition:\
+#     AeronCArchiveTest.shouldDisconnectAfterStopAllReplays:\
+#     AeronCArchive/AeronCArchiveParamTest.shouldRecordAndExtend/*:\
+#     AeronCArchive/AeronCArchiveParamTest.shouldStartReplayWithResponseChannel/*:\
+#     AeronCArchive/AeronCArchiveParamTest.shouldStartBoundedReplayWithResponseChannel/*'
+#
+# Full AeronCArchiveTest round (45 cases, excluding the merge-from-replay-to-live
+# case that hangs until ReplayMerge is exercised end to end):
+#   35 green / 10 red. The reds are attributed to A3a (2 URI listings), A4a
+#   (truncate/purge/detach/update channel, 7) and A4b (2 replication cases).
+#
+# Persistent subscription suites (card DoD):
+#
+#   AXC_C_SUITE=build/reference-shim/binaries/aeron_archive_persistent_subscription_test \
+#       test/interop/run-c-suite.sh debug
+#   AXC_C_SUITE=build/reference-shim/binaries/aeron_archive_persistent_subscription_resilience_test \
+#       test/interop/run-c-suite.sh debug
+#
+# Readings at the A3b close: PS 78/80, resilience 50/50. The two PS reds are the
+# upstream test race documented in
+# /home/gavin/trader/analysis/fix/upstream-issue-drop-wait-races-the-flood.md:
+# `shouldDropFromLiveBackToReplayThenJoinLiveAgain` and
+# `canFallbackToReplayAfterStartingFromLive` need a wait for the flood to land
+# before polling the persistent subscription (the same two cases are in the
+# Rust track's test-side holds); they are not archive behaviour.
+
+# Recording then replay: finite, bounded and live-follow.
+AeronCArchiveTest.shouldRecordThenReplay
+AeronCArchiveTest.shouldRecordThenBoundedReplay
+AeronCArchiveTest.shouldRecordAndCancelReplayEarly
+AeronCArchiveTest.shouldRecordAndCancelReplayEarlyWithExclusivePublication
+AeronCArchiveTest.shouldReplayRecordingFromLateJoinPosition
+AeronCArchiveTest.shouldDisconnectAfterStopAllReplays
+
+# Response-channel replay and the extend tail (parameterised suite).
+AeronCArchive/AeronCArchiveParamTest.shouldRecordAndExtend/0
+AeronCArchive/AeronCArchiveParamTest.shouldRecordAndExtend/1
+AeronCArchive/AeronCArchiveParamTest.shouldStartReplayWithResponseChannel/0
+AeronCArchive/AeronCArchiveParamTest.shouldStartReplayWithResponseChannel/1
+AeronCArchive/AeronCArchiveParamTest.shouldStartBoundedReplayWithResponseChannel/0
+AeronCArchive/AeronCArchiveParamTest.shouldStartBoundedReplayWithResponseChannel/1
+
+# Known red until a later card (kept here so the gap is named, not silent):
+#   shouldRecordThenReplayThenTruncate                 -> A4a (truncateRecording)
+#   shouldRecordReplicateThenReplay / shouldRecordReplicateTwice -> A4b

@@ -227,9 +227,19 @@ int ControlSession::perform_liveness_check(std::int64_t now_ms)
     return 1;
 }
 
+bool ControlSession::send_pending(const PendingResponse& response)
+{
+    return PendingResponse::Kind::signal == response.kind
+               ? proxy_.send_signal(config_.control_session_id, response.correlation_id, response.recording_id,
+                                    response.subscription_id, response.position, response.signal, *control_publication_)
+               : proxy_.send_response(config_.control_session_id, response.correlation_id, response.relevant_id,
+                                      response.code, response.message.view(), *control_publication_, *this);
+}
+
 int ControlSession::send_responses(std::int64_t now_ms)
 {
-    // `ControlSession.sendResponses` (`ControlSession.java:1001-1039`).
+    // `ControlSession.sendResponses` (`ControlSession.java:1001-1039`): one from
+    // the sync queue, then one from the async queue.
     if (!control_publication_->is_connected())
     {
         abort(RESPONSE_NOT_CONNECTED_MSG);
@@ -239,17 +249,19 @@ int ControlSession::send_responses(std::int64_t now_ms)
     int work_count = 0;
     if (!sync_response_queue_.empty())
     {
-        PendingResponse& response = sync_response_queue_.front();
-        const bool sent =
-            PendingResponse::Kind::signal == response.kind
-                ? proxy_.send_signal(config_.control_session_id, response.correlation_id, response.recording_id,
-                                     response.subscription_id, response.position, response.signal,
-                                     *control_publication_)
-                : proxy_.send_response(config_.control_session_id, response.correlation_id, response.relevant_id,
-                                       response.code, response.message.view(), *control_publication_, *this);
-        if (sent)
+        if (send_pending(sync_response_queue_.front()))
         {
             sync_response_queue_.pop_front();
+            activity_deadline_ms_ = NULL_VALUE;
+            work_count++;
+        }
+    }
+
+    if (!async_response_queue_.empty())
+    {
+        if (send_pending(async_response_queue_.front()))
+        {
+            async_response_queue_.pop_front();
             activity_deadline_ms_ = NULL_VALUE;
             work_count++;
         }
@@ -312,6 +324,19 @@ void ControlSession::attempt_to_activate() noexcept
 void ControlSession::send_ok_response(std::int64_t correlation_id, std::int64_t relevant_id)
 {
     send_response(correlation_id, relevant_id, archive_codecs::ControlResponseCode::OK, {});
+}
+
+void ControlSession::async_send_ok_response(std::int64_t correlation_id, std::int64_t replay_session_id)
+{
+    // `ControlSession.asyncSendOkResponse` (`:733-745`): the reference offers a
+    // BooleanSupplier to a many-to-one queue and throws when the offer fails; a
+    // deque push is the single-threaded SHARED-mode equivalent.
+    PendingResponse response;
+    response.kind = PendingResponse::Kind::response;
+    response.code = archive_codecs::ControlResponseCode::OK;
+    response.correlation_id = correlation_id;
+    response.relevant_id = replay_session_id;
+    async_response_queue_.push_back(response);
 }
 
 void ControlSession::send_error_response(std::int64_t correlation_id, std::string_view message)

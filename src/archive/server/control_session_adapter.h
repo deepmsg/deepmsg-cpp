@@ -114,6 +114,61 @@ struct ExtendRecordingRequest
     ControlSession* session{nullptr};
 };
 
+/// `ReplayRequest` (6) / `BoundedReplayRequest` (18) after the version guards
+/// (`ControlSessionAdapter.java:209-252`, `:515-561`).
+struct ReplayRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    /// `Aeron.NULL_VALUE` ⇒ replay from the recording's start position.
+    std::int64_t position{0};
+    /// `REPLAY_ALL_AND_FOLLOW` (-1), `REPLAY_ALL_AND_STOP` (-2) or a length.
+    std::int64_t length{0};
+    std::int32_t file_io_max_length{-1};
+    std::int32_t replay_stream_id{0};
+    std::int64_t replay_token{-1};
+    std::string replay_channel;
+    ControlSession* session{nullptr};
+};
+
+struct BoundedReplayRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    std::int64_t position{0};
+    std::int64_t length{0};
+    std::int32_t limit_counter_id{-1};
+    std::int32_t file_io_max_length{-1};
+    std::int32_t replay_stream_id{0};
+    std::int64_t replay_token{-1};
+    std::string replay_channel;
+    ControlSession* session{nullptr};
+};
+
+/// `StopReplayRequest` (7) and `StopAllReplaysRequest` (19)
+/// (`ControlSessionAdapter.java:254-273`, `:563-582`).
+struct StopReplayRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t replay_session_id{0};
+    ControlSession* session{nullptr};
+};
+
+struct StopAllReplaysRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{-1};
+    ControlSession* session{nullptr};
+};
+
+/// `ReplayTokenRequest` (105) (`ControlSessionAdapter.java:1084-1106`).
+struct ReplayTokenRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t recording_id{0};
+    ControlSession* session{nullptr};
+};
+
 /// What the adapter asks the conductor for.
 class ControlSessionHandler
 {
@@ -156,6 +211,22 @@ public:
     /// `ControlSession.onExtendRecording` (`ControlSession.java:478-486`).
     virtual void on_extend_recording(const ExtendRecordingRequest& request) = 0;
 
+    /// `ControlSession.onStartReplay` / `onStartBoundedReplay` /
+    /// `onStopReplay` / `onStopAllReplays` (`ControlSession.java:412-479`).
+    virtual void on_start_replay(const ReplayRequest& request) = 0;
+    virtual void on_start_bounded_replay(const BoundedReplayRequest& request) = 0;
+    virtual void on_stop_replay(const StopReplayRequest& request) = 0;
+    virtual void on_stop_all_replays(const StopAllReplaysRequest& request) = 0;
+
+    /// `ControlSessionAdapter`'s `ReplayTokenRequest` arm: the conductor both
+    /// generates the token and sends the OK (`:1084-1106`).
+    virtual void on_replay_token(const ReplayTokenRequest& request) = 0;
+
+    /// `ArchiveConductor.generateReplayToken` / `getReplaySession`
+    /// (`ArchiveConductor.java:2674-2702`).
+    virtual std::int64_t generate_replay_token(ControlSession& session, std::int64_t recording_id) = 0;
+    virtual ControlSession* replay_session_for_token(std::int64_t token, std::int64_t recording_id) = 0;
+
     /// `ArchiveConductor.logWarning` (`ArchiveConductor.java:442`).
     virtual void log_warning(std::string_view message) = 0;
 
@@ -196,6 +267,11 @@ public:
     static constexpr std::int32_t TEMPLATE_LIST_RECORDING_SUBSCRIPTIONS = 17;
     static constexpr std::int32_t TEMPLATE_FIND_LAST_MATCHING_RECORDING = 16;
     static constexpr std::int32_t TEMPLATE_EXTEND_RECORDING_2 = 64;
+    static constexpr std::int32_t TEMPLATE_REPLAY = 6;
+    static constexpr std::int32_t TEMPLATE_STOP_REPLAY = 7;
+    static constexpr std::int32_t TEMPLATE_BOUNDED_REPLAY = 18;
+    static constexpr std::int32_t TEMPLATE_STOP_ALL_REPLAYS = 19;
+    static constexpr std::int32_t TEMPLATE_REPLAY_TOKEN = 105;
     static constexpr std::int32_t TEMPLATE_ARCHIVE_ID = 68;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;
@@ -215,8 +291,25 @@ public:
     [[nodiscard]] ControlSession* control_session(std::int64_t control_session_id, const void* image,
                                                   std::int32_t template_id, std::int64_t correlation_id);
 
+    /// `ControlSessionAdapter.setupSessionAndChannelForReplay`
+    /// (`ControlSessionAdapter.java:1165-1190`): a response-mode channel with a
+    /// replay token resolves the control session through the token and carries
+    /// the request image's correlation id.
+    [[nodiscard]] ControlSession* setup_session_and_channel_for_replay(std::string& channel, std::int64_t replay_token,
+                                                                       std::int64_t recording_id,
+                                                                       std::int64_t correlation_id,
+                                                                       std::int64_t control_session_id,
+                                                                       std::int32_t template_id, const void* image);
+
     void register_session(std::int64_t control_session_id, const void* image, ControlSession* session);
     void unregister_session(std::int64_t control_session_id);
+
+    /// Drop every session pointer (archive teardown, before the sessions are
+    /// destroyed) so a late unavailable-image callback cannot dereference them.
+    void clear_sessions() noexcept
+    {
+        sessions_.clear();
+    }
 
     /// `ArchiveConductor.onUnavailableImage` (`ArchiveConductor.java:255`): the
     /// session's image went away, so every session created on it is aborted.

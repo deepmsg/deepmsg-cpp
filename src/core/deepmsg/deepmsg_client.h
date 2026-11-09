@@ -20,6 +20,10 @@ struct ClientConfig
 {
     std::string_view dir;
     bool use_conductor_agent_invoker{true};
+    /// The C API requires this on the context, before `aeron_init`
+    /// (`aeron_context_set_on_unavailable_counter`).
+    aeron_on_unavailable_counter_t on_unavailable_counter{nullptr};
+    void* on_unavailable_counter_clientd{nullptr};
 };
 
 /// RAII client over the C Aeron API.

@@ -41,6 +41,7 @@ struct ArchiveLaunchConfig
     std::int64_t catalog_capacity{1024 * 1024};
     int catalog_file_sync_level{0};
     RecordingSettings recording;
+    ReplaySettings replay;
     /// `aeron.archive.authenticator.supplier`; empty ⇒ `DefaultAuthenticator`.
     std::string authenticator_supplier;
 };

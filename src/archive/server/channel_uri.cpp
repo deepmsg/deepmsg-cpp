@@ -10,6 +10,7 @@ extern "C"
 
 #include <cstddef>
 #include <cstring>
+#include <memory>
 #include <string>
 
 #include "archive/server/archive_config.h"
@@ -30,12 +31,30 @@ constexpr std::string_view SPY_PREFIX{"aeron-spy:"};
     return channel;
 }
 
+/// The parser copies the URI into `aeron_uri_t::mutable_uri` and keeps every
+/// parameter pointer pointing inside it, so the struct must never move after
+/// `aeron_uri_parse`. It lives on the heap for exactly that reason; `close`
+/// releases the additional-parameters array.
+struct UriDeleter
+{
+    void operator()(aeron_uri_t* uri) const noexcept
+    {
+        if (nullptr != uri)
+        {
+            aeron_uri_close(uri);
+            delete uri;
+        }
+    }
+};
+
+using UriPtr = std::unique_ptr<aeron_uri_t, UriDeleter>;
+
 /// `ChannelUri.parse`: the C client's own parser so the two agree on syntax.
-[[nodiscard]] std::expected<aeron_uri_t, axc::core::Error> parse_channel(std::string_view channel)
+[[nodiscard]] std::expected<UriPtr, axc::core::Error> parse_channel(std::string_view channel)
 {
     const std::string_view parsed_channel = without_spy_prefix(channel);
-    aeron_uri_t uri{};
-    if (0 != aeron_uri_parse(parsed_channel.size(), parsed_channel.data(), &uri))
+    UriPtr uri{new aeron_uri_t{}};
+    if (0 != aeron_uri_parse(parsed_channel.size(), parsed_channel.data(), uri.get()))
     {
         return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument, aeron_errmsg()));
     }
@@ -169,9 +188,38 @@ void trim_trailing_separator(std::string& out)
     }
 }
 
+/// Which of the forced parameters `build_channel` emits, and their values.
+struct BuildOptions
+{
+    bool force_mtu{false};
+    std::int32_t mtu{0};
+    bool copy_mtu{false};
+    bool force_term_length{false};
+    std::int32_t term_length{0};
+    bool copy_term_length{false};
+    bool has_initial_position{false};
+    std::int32_t initial_term_id{0};
+    std::int32_t term_id{0};
+    std::int32_t term_offset{0};
+    /// Control path: `termLength` / `sparse` are always written.
+    bool force_sparse{false};
+    bool sparse{false};
+    /// Replay path: `eos` / `sparse` are copied from the channel when present
+    /// (`ChannelUriStringBuilder.eos(ChannelUri)` / `.sparse(ChannelUri)`).
+    bool copy_sparse{false};
+    bool copy_eos{false};
+    bool has_linger{false};
+    std::int64_t linger_ns{0};
+    /// The adapter rewrite keeps the channel's own `linger` (a string).
+    bool copy_linger{false};
+    bool has_response_correlation_id{false};
+    std::int64_t response_correlation_id{0};
+};
+
 /// `ChannelUriStringBuilder.build()` order (`ChannelUriStringBuilder.java:2514-2552`),
-/// restricted to the parameters `strippedChannelBuilder` copies.
-[[nodiscard]] std::string build_channel(const aeron_uri_t& uri, const ChannelUriOptions* options)
+/// restricted to the parameters `strippedChannelBuilder` copies plus the ones
+/// the control and replay paths force.
+[[nodiscard]] std::string build_channel(const aeron_uri_t& uri, const BuildOptions& options)
 {
     std::string out;
     out += "aeron:";
@@ -184,26 +232,53 @@ void trim_trailing_separator(std::string& out)
     append_param(out, "control", param(uri, "control"));
     append_param(out, "control-mode", param(uri, "control-mode"));
 
-    // `ArchiveConductor.java:453-468`: a value on the channel wins over the
-    // context default, and only the context default is used when it is absent.
-    const auto mtu_length = uri_int32(uri, "mtu", nullptr == options ? 0 : options->mtu_length);
-    const auto term_length = uri_int32(uri, "term-length", nullptr == options ? 0 : options->term_length);
-    const bool sparse = uri_bool(uri, "sparse", nullptr != options && options->sparse);
-
-    if (nullptr != options)
+    if (options.force_mtu)
     {
-        append_int(out, "mtu", mtu_length);
-        append_int(out, "term-length", term_length);
+        append_int(out, "mtu", options.mtu);
+    }
+    else if (options.copy_mtu)
+    {
+        append_param(out, "mtu", param(uri, "mtu"));
+    }
+    if (options.force_term_length)
+    {
+        append_int(out, "term-length", options.term_length);
+    }
+    else if (options.copy_term_length)
+    {
+        append_param(out, "term-length", param(uri, "term-length"));
+    }
+    if (options.has_initial_position)
+    {
+        append_int(out, "init-term-id", options.initial_term_id);
+        append_int(out, "term-id", options.term_id);
+        append_int(out, "term-offset", options.term_offset);
     }
     append_param(out, "session-id", param(uri, "session-id"));
     append_param(out, "ttl", param(uri, "ttl"));
+    if (options.has_linger)
+    {
+        append_param(out, "linger", format_duration_ns(options.linger_ns));
+    }
+    else if (options.copy_linger)
+    {
+        append_param(out, "linger", param(uri, "linger"));
+    }
     append_param(out, "alias", param(uri, "alias"));
     append_param(out, "cc", param(uri, "cc"));
     append_param(out, "fc", param(uri, "fc"));
     append_param(out, "gtag", param(uri, "gtag"));
-    if (nullptr != options)
+    if (options.force_sparse)
     {
-        append_param(out, "sparse", sparse ? "true" : "false");
+        append_param(out, "sparse", options.sparse ? "true" : "false");
+    }
+    else if (options.copy_sparse)
+    {
+        append_param(out, "sparse", param(uri, "sparse"));
+    }
+    if (options.copy_eos)
+    {
+        append_param(out, "eos", param(uri, "eos"));
     }
     append_param(out, "tether", param(uri, "tether"));
     append_param(out, "group", param(uri, "group"));
@@ -215,9 +290,9 @@ void trim_trailing_separator(std::string& out)
     append_param(out, "channel-rcv-ts-offset", param(uri, "channel-rcv-ts-offset"));
     append_param(out, "channel-snd-ts-offset", param(uri, "channel-snd-ts-offset"));
     append_param(out, "response-endpoint", param(uri, "response-endpoint"));
-    if (nullptr != options && options->has_response_correlation_id)
+    if (options.has_response_correlation_id)
     {
-        append_int(out, "response-correlation-id", options->response_correlation_id);
+        append_int(out, "response-correlation-id", options.response_correlation_id);
     }
     else
     {
@@ -250,7 +325,7 @@ std::expected<std::string, axc::core::Error> stripped_channel(std::string_view c
     {
         return std::unexpected(uri.error());
     }
-    return build_channel(*uri, nullptr);
+    return build_channel(**uri, BuildOptions{});
 }
 
 std::expected<std::string, axc::core::Error> control_response_channel(std::string_view channel,
@@ -261,7 +336,99 @@ std::expected<std::string, axc::core::Error> control_response_channel(std::strin
     {
         return std::unexpected(uri.error());
     }
-    return build_channel(*uri, &options);
+
+    // `ArchiveConductor.java:453-468`: a value on the channel wins over the
+    // context default, and only the context default is used when it is absent.
+    BuildOptions build;
+    build.force_mtu = true;
+    build.mtu = uri_int32(**uri, "mtu", options.mtu_length);
+    build.force_term_length = true;
+    build.term_length = uri_int32(**uri, "term-length", options.term_length);
+    build.force_sparse = true;
+    build.sparse = uri_bool(**uri, "sparse", options.sparse);
+    build.has_response_correlation_id = options.has_response_correlation_id;
+    build.response_correlation_id = options.response_correlation_id;
+    return build_channel(**uri, build);
+}
+
+std::expected<std::string, axc::core::Error> with_response_correlation_id(std::string_view channel,
+                                                                          std::int64_t correlation_id)
+{
+    auto uri = parse_channel(channel);
+    if (!uri)
+    {
+        return std::unexpected(uri.error());
+    }
+
+    BuildOptions build;
+    build.copy_mtu = true;
+    build.copy_term_length = true;
+    build.copy_sparse = true;
+    build.copy_eos = true;
+    build.copy_linger = true;
+    build.has_response_correlation_id = true;
+    build.response_correlation_id = correlation_id;
+    return build_channel(**uri, build);
+}
+
+std::expected<std::string, axc::core::Error> replay_channel(std::string_view channel,
+                                                            const ReplayChannelOptions& options)
+{
+    auto uri = parse_channel(channel);
+    if (!uri)
+    {
+        return std::unexpected(uri.error());
+    }
+
+    // `ChannelUriStringBuilder.initialPosition` (`:1628-1648`): a negative
+    // position, a position off the frame alignment or a non-power-of-two term
+    // length is an error, the same checks the builder throws.
+    constexpr std::int64_t FRAME_ALIGNMENT_MASK = 32 - 1;
+    if (options.position < 0 || 0 != (options.position & FRAME_ALIGNMENT_MASK))
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                                     "invalid initial position=" + std::to_string(options.position)));
+    }
+    if (options.term_length <= 0 || 0 != (options.term_length & (options.term_length - 1)))
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                                     "invalid term length=" + std::to_string(options.term_length)));
+    }
+
+    const std::int32_t position_bits = __builtin_ctz(static_cast<unsigned>(options.term_length));
+
+    BuildOptions build;
+    build.force_mtu = true;
+    build.mtu = options.mtu_length;
+    build.force_term_length = true;
+    build.term_length = options.term_length;
+    build.has_initial_position = true;
+    build.initial_term_id = options.initial_term_id;
+    build.term_id = options.initial_term_id + static_cast<std::int32_t>(options.position >> position_bits);
+    build.term_offset = static_cast<std::int32_t>(options.position & (options.term_length - 1));
+    build.copy_sparse = true;
+    build.copy_eos = true;
+
+    // `ArchiveConductor.java:899-901`: the channel's `linger` wins, otherwise
+    // the context's replay linger timeout.
+    build.has_linger = true;
+    if (const char* linger_value = param(**uri, "linger"); nullptr != linger_value)
+    {
+        auto parsed = parse_duration_ns(linger_value);
+        if (!parsed)
+        {
+            return std::unexpected(parsed.error());
+        }
+        build.linger_ns = *parsed;
+    }
+    else
+    {
+        build.linger_ns = options.linger_timeout_ns;
+    }
+
+    build.has_response_correlation_id = options.has_response_correlation_id;
+    build.response_correlation_id = options.response_correlation_id;
+    return build_channel(**uri, build);
 }
 
 std::expected<std::string, axc::core::Error> make_key(std::int32_t stream_id, std::string_view channel)
@@ -275,14 +442,14 @@ std::expected<std::string, axc::core::Error> make_key(std::int32_t stream_id, st
     // `ArchiveConductor.makeKey` (`ArchiveConductor.java:1914-1947`).
     std::string out = std::to_string(stream_id);
     out.push_back(':');
-    out += AERON_URI_UDP == uri->type ? "udp" : "ipc";
+    out += AERON_URI_UDP == (*uri)->type ? "udp" : "ipc";
     out.push_back('?');
 
-    append_param(out, "endpoint", param(*uri, "endpoint"));
-    append_param(out, "interface", param(*uri, "interface"));
-    append_param(out, "control", param(*uri, "control"));
-    append_param(out, "session-id", param(*uri, "session-id"));
-    append_param(out, "tags", tags_value(*uri));
+    append_param(out, "endpoint", param(**uri, "endpoint"));
+    append_param(out, "interface", param(**uri, "interface"));
+    append_param(out, "control", param(**uri, "control"));
+    append_param(out, "session-id", param(**uri, "session-id"));
+    append_param(out, "tags", tags_value(**uri));
 
     // `:1945`: chopped unconditionally, so a key with no parameters keeps the
     // `streamId:media` prefix and loses the `?`.

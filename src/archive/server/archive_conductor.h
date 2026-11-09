@@ -15,13 +15,17 @@
 #include "archive/server/archive_config.h"
 #include "archive/server/authenticator.h"
 #include "archive/server/catalog.h"
+#include "archive/server/checksum.h"
 #include "archive/server/control_response_proxy.h"
 #include "archive/server/control_session.h"
 #include "archive/server/control_session_adapter.h"
+#include "archive/server/create_replay_publication_session.h"
 #include "archive/server/deepmsg_response_publication.h"
 #include "archive/server/epoch_clock_source.h"
 #include "archive/server/recorder.h"
 #include "archive/server/recording_events.h"
+#include "archive/server/replay_session.h"
+#include "archive/server/replayer.h"
 #include "archive/server/session_worker.h"
 #include "core/counters/counter_target.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -39,6 +43,10 @@ struct ArchiveConductorContext
     /// listens on for control requests.
     std::string control_channel{"aeron:ipc"};
     std::int32_t control_stream_id{10};
+    /// `Archive.LOCAL_CONTROL_CHANNEL_DEFAULT` / `..._STREAM_ID_DEFAULT`
+    /// (`Archive.java:484-500`): the privileged local control channel.
+    std::string local_control_channel{"aeron:ipc?term-length=64k"};
+    std::int32_t local_control_stream_id{10};
     /// Empty ⇒ the Aeron default (`/dev/shm/aeron-<user>`).
     std::string aeron_dir;
     std::int64_t connect_timeout_ms{3000};
@@ -55,6 +63,10 @@ struct ArchiveConductorContext
     Authenticator* authenticator{nullptr};
     /// `Archive.Configuration` recording values (`Archive.java:328-438`).
     RecordingSettings recording;
+    /// `Archive.Configuration` replay values (`Archive.java:474-564`, `:676`).
+    ReplaySettings replay;
+    /// `Archive.Context.replayChecksum()`; nullptr ⇒ no verification.
+    const Checksum* replay_checksum{nullptr};
     /// `aeron.archive.catalog.capacity` (`Archive.java:508-516`).
     std::int64_t catalog_capacity{1024 * 1024};
     int catalog_file_sync_level{0};
@@ -69,7 +81,10 @@ struct ArchiveConductorContext
 /// replay requests, the session counters, the mark file wiring, the
 /// `AuthorisationService` and the local-control (privileged) channel arrive with
 /// A2b, A3a and A3b.
-class ArchiveConductor final : public ControlSessionHandler
+class ArchiveConductor final : public ControlSessionHandler,
+                               public ReplayControlResponses,
+                               public ReplayWarningSink,
+                               public CreateReplayPublicationSessionHandler
 {
 public:
     /// `AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION`.
@@ -103,6 +118,31 @@ public:
     void on_list_recording(const RecordingIdRequest& request) override;
     void on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request) override;
     void on_extend_recording(const ExtendRecordingRequest& request) override;
+    void on_start_replay(const ReplayRequest& request) override;
+    void on_start_bounded_replay(const BoundedReplayRequest& request) override;
+    void on_stop_replay(const StopReplayRequest& request) override;
+    void on_stop_all_replays(const StopAllReplaysRequest& request) override;
+    void on_replay_token(const ReplayTokenRequest& request) override;
+    std::int64_t generate_replay_token(ControlSession& session, std::int64_t recording_id) override;
+    ControlSession* replay_session_for_token(std::int64_t token, std::int64_t recording_id) override;
+
+    // ReplayControlResponses (`ReplaySession.java:288-295`, `:338`).
+    void async_send_ok(std::int64_t control_session_id, std::int64_t correlation_id,
+                       std::int64_t replay_session_id) override;
+    void send_error(std::int64_t control_session_id, std::int64_t correlation_id, std::int64_t relevant_id,
+                    std::string_view message) override;
+
+    // ReplayWarningSink (`ArchiveConductor.logWarning`).
+    void unexpected_frame(std::int32_t frame_type, std::int64_t position) override;
+
+    // CreateReplayPublicationSessionHandler.
+    axc::core::AsyncAdd<axc::core::ExPubPtr> add_replay_publication(std::string_view channel,
+                                                                    std::int32_t stream_id) override;
+    void replay_publication_failed(std::int64_t control_session_id, std::int64_t correlation_id,
+                                   std::string_view message) override;
+    void new_replay_session(const CreateReplayPublicationSession::Config& config,
+                            std::unique_ptr<ReplayPublication> publication) override;
+
     void log_warning(std::string_view message) override;
 
     [[nodiscard]] std::int64_t archive_id() const override
@@ -119,6 +159,12 @@ public:
     [[nodiscard]] std::size_t recording_session_count() const noexcept
     {
         return recorder_.size();
+    }
+
+    /// Live replay sessions (`ctx.numActiveReplays`).
+    [[nodiscard]] std::size_t replay_session_count() const noexcept
+    {
+        return replayer_.size();
     }
 
     [[nodiscard]] std::int64_t recording_sessions_counter_value() const noexcept;
@@ -190,6 +236,25 @@ private:
     [[nodiscard]] int poll_pending_control_counters();
     [[nodiscard]] int poll_recording_images();
     [[nodiscard]] int poll_listings();
+    void start_replay_request(const ReplayRequest& request, std::int32_t limit_counter_id, bool bounded);
+    void close_replay_session(ReplaySession& session);
+    void on_replay_start() noexcept;
+    void on_replay_end() noexcept;
+    [[nodiscard]] std::int64_t next_replay_token();
+    void check_replay_tokens();
+    void remove_replay_tokens_for_session(std::int64_t control_session_id);
+
+    /// `ArchiveConductor.counterByIdMap` + `Counter.isClosed()`: the stable
+    /// per-counter state the replay limit source reads.
+    struct CounterState
+    {
+        std::int64_t registration_id{-1};
+        bool closed{false};
+        bool client_supplied{false};
+    };
+    [[nodiscard]] CounterState& counter_state(std::int32_t counter_id, bool client_supplied);
+    void reset_counter_state(std::int32_t counter_id, std::int64_t registration_id);
+    void mark_counter_closed(std::int32_t counter_id);
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     [[nodiscard]] int extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     void close_recording_session(RecordingSession& session);
@@ -202,6 +267,9 @@ private:
     [[nodiscard]] std::expected<axc::core::PositionWriter, axc::core::Error> allocate_counter(
         std::int32_t type_id, std::span<const std::uint8_t> key, std::string_view label);
 
+    static void unavailable_counter_trampoline(void* clientd, aeron_counters_reader_t* reader,
+                                               std::int64_t registration_id, std::int32_t counter_id);
+
     static aeron_controlled_fragment_handler_action_t assembled_trampoline(void* clientd, const std::uint8_t* buffer,
                                                                            size_t length, aeron_header_t* header);
     static void unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription, aeron_image_t* image);
@@ -209,6 +277,8 @@ private:
     ArchiveConductorContext context_;
     axc::core::DeepmsgClient client_;
     axc::core::SubPtr control_subscription_;
+    /// `ArchiveConductor.localControlSubscription` (`:238-239`).
+    axc::core::SubPtr local_control_subscription_;
     /// Control requests above one MTU arrive as several fragments; the
     /// controlled assembler hands complete messages to the adapter
     /// (`ControlSessionAdapter.java:126` wraps the handler in a
@@ -254,7 +324,12 @@ private:
     std::optional<axc::core::PositionWriterTarget> max_write_time_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_bytes_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_time_counter_;
+    std::optional<axc::core::PositionWriterTarget> control_sessions_counter_;
     std::optional<axc::core::PositionWriterTarget> recording_sessions_counter_;
+    std::optional<axc::core::PositionWriterTarget> replay_session_counter_;
+    std::optional<axc::core::PositionWriterTarget> total_read_bytes_counter_;
+    std::optional<axc::core::PositionWriterTarget> total_read_time_counter_;
+    std::optional<axc::core::PositionWriterTarget> max_read_time_counter_;
     std::unordered_map<std::string, RecordingSubscription> recording_subscriptions_;
     /// subscription registration id -> `recording_subscriptions_` key.
     std::unordered_map<std::int64_t, std::string> recording_subscription_keys_;
@@ -290,6 +365,25 @@ private:
     /// `pseudoIndex` walks the map).
     std::vector<std::string> recording_subscription_order_;
     std::unordered_map<std::int64_t, RecordingSession*> sessions_by_recording_id_;
+
+    // Replay (A3b).
+    Replayer replayer_;
+    SessionWorker<CreateReplayPublicationSession> replay_publication_sessions_;
+    std::unordered_map<std::int64_t, ReplaySession*> replay_session_by_id_;
+    std::int32_t next_replay_id_{1};
+    std::int32_t num_active_replays_{0};
+    std::unordered_map<std::int32_t, CounterState> counter_by_id_;
+    struct SessionForReplay
+    {
+        std::int64_t recording_id{0};
+        std::int64_t control_session_id{0};
+        std::int64_t deadline_ns{0};
+    };
+    std::unordered_map<std::int64_t, SessionForReplay> replay_tokens_;
+    std::uint64_t replay_token_state_{0x9E3779B97F4A7C15ULL};
+    /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
+    std::vector<std::uint8_t> replay_buffer_;
+    SystemReplayClock replay_clock_{cached_clock_};
 };
 
 }  // namespace deepmsg::archive::server

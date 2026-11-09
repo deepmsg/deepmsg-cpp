@@ -3,9 +3,13 @@
 #include <cstring>
 #include <string_view>
 
+#include <aeronc.h>
+
+#include "archive/server/channel_uri.h"
 #include "io_aeron_archive_codecs/ArchiveIdRequest.h"
 #include "io_aeron_archive_codecs/AuthConnectRequest.h"
 #include "io_aeron_archive_codecs/BooleanType.h"
+#include "io_aeron_archive_codecs/BoundedReplayRequest.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
 #include "io_aeron_archive_codecs/ExtendRecordingRequest2.h"
@@ -16,18 +20,25 @@
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/MessageHeader.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
+#include "io_aeron_archive_codecs/ReplayRequest.h"
+#include "io_aeron_archive_codecs/ReplayTokenRequest.h"
 #include "io_aeron_archive_codecs/StartPositionRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
+#include "io_aeron_archive_codecs/StopAllReplaysRequest.h"
 #include "io_aeron_archive_codecs/StopPositionRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingByIdentityRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
+#include "io_aeron_archive_codecs/StopReplayRequest.h"
 
 namespace deepmsg::archive::server
 {
 namespace
 {
+
+/// `Aeron.NULL_VALUE`.
+constexpr std::int64_t NULL_VALUE = -1;
 
 /// Bounds-checked reader for the var-data fields: every length prefix and the
 /// bytes behind it must sit inside the fragment. The generated codecs throw on
@@ -566,6 +577,171 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             return 1;
         }
 
+        case TEMPLATE_REPLAY:
+        {
+            // `ControlSessionAdapter.java:209-252`.
+            archive_codecs::ReplayRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            const auto version = static_cast<std::int32_t>(header.version());
+            ReplayRequest request;
+            const std::int64_t control_session_id = decoder.controlSessionId();
+            const std::int64_t correlation_id = decoder.correlationId();
+            request.correlation_id = correlation_id;
+            request.recording_id = decoder.recordingId();
+            request.position = decoder.position();
+            request.length = decoder.length();
+            request.file_io_max_length = version >= 7 ? decoder.fileIoMaxLength() : -1;
+            request.replay_stream_id = decoder.replayStreamId();
+            request.replay_token = version >= 10 ? decoder.replayToken() : -1;
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.replay_channel) || !reader.at_end())
+            {
+                handler_.log_warning("malformed ReplayRequest");
+                return 0;
+            }
+
+            request.session =
+                setup_session_and_channel_for_replay(request.replay_channel, request.replay_token, request.recording_id,
+                                                     correlation_id, control_session_id, template_id, image);
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_start_replay(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_BOUNDED_REPLAY:
+        {
+            // `ControlSessionAdapter.java:515-561`.
+            archive_codecs::BoundedReplayRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            const auto version = static_cast<std::int32_t>(header.version());
+            BoundedReplayRequest request;
+            const std::int64_t control_session_id = decoder.controlSessionId();
+            const std::int64_t correlation_id = decoder.correlationId();
+            request.correlation_id = correlation_id;
+            request.recording_id = decoder.recordingId();
+            request.position = decoder.position();
+            request.length = decoder.length();
+            request.limit_counter_id = decoder.limitCounterId();
+            request.replay_stream_id = decoder.replayStreamId();
+            request.file_io_max_length = version >= 7 ? decoder.fileIoMaxLength() : -1;
+            request.replay_token = version >= 10 ? decoder.replayToken() : -1;
+
+            VarDataReader reader{buffer, length, MESSAGE_HEADER_LENGTH + block_length};
+            if (!reader.read_string(request.replay_channel) || !reader.at_end())
+            {
+                handler_.log_warning("malformed BoundedReplayRequest");
+                return 0;
+            }
+
+            request.session =
+                setup_session_and_channel_for_replay(request.replay_channel, request.replay_token, request.recording_id,
+                                                     correlation_id, control_session_id, template_id, image);
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_start_bounded_replay(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_REPLAY:
+        {
+            // `ControlSessionAdapter.java:254-273`.
+            archive_codecs::StopReplayRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            StopReplayRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.replay_session_id = decoder.replaySessionId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_stop_replay(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_ALL_REPLAYS:
+        {
+            // `ControlSessionAdapter.java:563-582`.
+            archive_codecs::StopAllReplaysRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            StopAllReplaysRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_stop_all_replays(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_REPLAY_TOKEN:
+        {
+            // `ControlSessionAdapter.java:1084-1106`.
+            archive_codecs::ReplayTokenRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ReplayTokenRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.recording_id = decoder.recordingId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_replay_token(request);
+            }
+            return 1;
+        }
+
         case TEMPLATE_KEEP_ALIVE:
         {
             // `ControlSessionAdapter.java:845-856`.
@@ -631,6 +807,45 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             handler_.log_warning("unsupported control request templateId=" + std::to_string(template_id));
             return 0;
     }
+}
+
+ControlSession* ControlSessionAdapter::setup_session_and_channel_for_replay(
+    std::string& channel, std::int64_t replay_token, std::int64_t recording_id, std::int64_t correlation_id,
+    std::int64_t control_session_id, std::int32_t template_id, const void* image)
+{
+    // `ControlSessionAdapter.java:1165-1190`.
+    if (is_mds_response_channel(channel) && NULL_VALUE != replay_token)
+    {
+        ControlSession* session = handler_.replay_session_for_token(replay_token, recording_id);
+        if (nullptr == session)
+        {
+            // The reference throws an ArchiveException, which AgentRunner logs
+            // and swallows; the request stays unanswered either way.
+            handler_.log_warning("Unknown session or token timeout for replayToken=" + std::to_string(replay_token));
+            return nullptr;
+        }
+
+        std::int64_t response_correlation_id = 0;
+        aeron_image_constants_t constants{};
+        if (nullptr != image &&
+            0 ==
+                aeron_image_constants(const_cast<aeron_image_t*>(static_cast<const aeron_image_t*>(image)), &constants))
+        {
+            response_correlation_id = constants.correlation_id;
+        }
+
+        auto rewritten = with_response_correlation_id(channel, response_correlation_id);
+        if (!rewritten)
+        {
+            handler_.log_warning("failed to rewrite the replay channel: " +
+                                 std::string{rewritten.error().message.view()});
+            return nullptr;
+        }
+        channel = std::move(*rewritten);
+        return session;
+    }
+
+    return control_session(control_session_id, image, template_id, correlation_id);
 }
 
 ControlSession* ControlSessionAdapter::control_session(std::int64_t control_session_id, const void* image,

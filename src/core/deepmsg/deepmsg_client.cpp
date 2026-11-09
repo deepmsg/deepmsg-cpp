@@ -48,6 +48,13 @@ std::expected<DeepmsgClient, Error> DeepmsgClient::connect(const ClientConfig& c
         return std::unexpected(make_error(ErrorCode::config_error, "set use_conductor_agent_invoker failed"));
     }
 
+    if (nullptr != config.on_unavailable_counter &&
+        0 != aeron_context_set_on_unavailable_counter(context, config.on_unavailable_counter,
+                                                      config.on_unavailable_counter_clientd))
+    {
+        return std::unexpected(make_error(ErrorCode::config_error, "set on_unavailable_counter failed"));
+    }
+
     aeron_t* client = nullptr;
     if (0 != aeron_init(&client, context))
     {

@@ -6,7 +6,11 @@
 #include <utility>
 
 #include <algorithm>
+#include <limits>
 #include <span>
+
+#include "core/counters/position_view.h"
+#include "core/time/clock.h"
 
 #include "archive/server/archive_counters.h"
 #include "archive/server/channel_uri.h"
@@ -63,9 +67,57 @@ constexpr std::int64_t UNKNOWN_RECORDING = 5;
 constexpr std::int64_t MAX_RECORDINGS = 8;
 constexpr std::int64_t INVALID_EXTENSION = 9;
 constexpr std::int64_t STORAGE_SPACE = 11;
+constexpr std::int64_t EMPTY_RECORDING = 15;
+constexpr std::int64_t INVALID_POSITION = 16;
+constexpr std::int64_t MAX_REPLAYS = 7;
+
+/// `Aeron.NULL_VALUE` / `Aeron.NULL_POSITION` / `AERON_NULL_COUNTER_ID`.
+constexpr std::int64_t NULL_POSITION = -1;
+constexpr std::int64_t NULL_VALUE = -1;
+constexpr std::int32_t NULL_COUNTER_ID = -1;
+
+/// `AeronArchive.REPLAY_ALL_AND_FOLLOW` / `REPLAY_ALL_AND_STOP`.
+constexpr std::int64_t REPLAY_ALL_AND_FOLLOW = -1;
+constexpr std::int64_t REPLAY_ALL_AND_STOP = -2;
 
 /// `SourceLocation.LOCAL` (`SourceLocation.java`).
 constexpr std::int32_t SOURCE_LOCATION_LOCAL = 0;
+
+/// `ReplaySession`'s live view of a limit counter (`ReplaySession.java:544-578`):
+/// the value is read by address, `is_closed` is the conductor's `CounterState`.
+class CounterLimitSource final : public ReplayLimitSource
+{
+public:
+    CounterLimitSource(aeron_counters_reader_t* reader, std::int32_t counter_id, bool& closed,
+                       std::int64_t& registration_id) noexcept
+        : reader_(reader), counter_id_(counter_id), closed_(closed), registration_id_(registration_id)
+    {
+    }
+
+    [[nodiscard]] std::int64_t value() const noexcept override
+    {
+        return axc::core::PositionView::at(reader_, counter_id_).get_acquire();
+    }
+
+    [[nodiscard]] bool is_closed() const noexcept override
+    {
+        return closed_;
+    }
+
+    [[nodiscard]] bool registration_matches() const noexcept override
+    {
+        std::int64_t actual = 0;
+        return nullptr != reader_ &&
+               0 == aeron_counters_reader_counter_registration_id(reader_, counter_id_, &actual) &&
+               actual == registration_id_;
+    }
+
+private:
+    aeron_counters_reader_t* reader_{nullptr};
+    std::int32_t counter_id_{-1};
+    bool& closed_;
+    std::int64_t& registration_id_;
+};
 
 }  // namespace
 
@@ -97,6 +149,8 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     axc::core::ClientConfig config;
     config.dir = context_.aeron_dir;
     config.use_conductor_agent_invoker = true;
+    config.on_unavailable_counter = &ArchiveConductor::unavailable_counter_trampoline;
+    config.on_unavailable_counter_clientd = this;
 
     auto client = axc::core::DeepmsgClient::connect(config);
     if (!client)
@@ -143,6 +197,31 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
             axc::core::make_error(axc::core::ErrorCode::io_error, "control subscription did not complete"));
     }
 
+    // `ArchiveConductor.java:238-239`: the local (privileged) control channel.
+    auto local_subscription =
+        client_.add_subscription(context_.local_control_channel, context_.local_control_stream_id, handlers);
+    for (int attempt = 0; attempt < 5000; attempt++)
+    {
+        auto polled = local_subscription.poll();
+        if (!polled)
+        {
+            return std::unexpected(polled.error());
+        }
+        if (polled->has_value())
+        {
+            local_control_subscription_ = std::move(**polled);
+            break;
+        }
+        (void)client_.do_work();
+        ::usleep(1000);
+    }
+
+    if (!local_control_subscription_)
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::io_error, "local control subscription did not complete"));
+    }
+
     cached_clock_.update(epoch_clock_.time_ms());
 
     // `Archive.Context.conclude` (`Archive.java:1570-1700`): the catalog and the
@@ -170,6 +249,17 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     }
 
     const auto archive_id_key = ArchiveCounters::archive_id_key(context_.archive_id);
+
+    // `Archive.java:1626-1631`: the archive control sessions count.
+    auto control_sessions =
+        allocate_counter(ArchiveCounters::CONTROL_SESSIONS_TYPE_ID,
+                         std::span<const std::uint8_t>{archive_id_key.data(), archive_id_key.size()},
+                         ArchiveCounters::make_label(ArchiveCounters::CONTROL_SESSIONS_NAME, context_.archive_id));
+    if (!control_sessions)
+    {
+        return std::unexpected(control_sessions.error());
+    }
+    control_sessions_counter_.emplace(std::move(*control_sessions));
 
     auto max_write_time =
         allocate_counter(ArchiveCounters::MAX_WRITE_TIME_TYPE_ID,
@@ -212,6 +302,54 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     recording_sessions_counter_.emplace(std::move(*recording_sessions));
 
     recorder_.set_counters(&*total_write_bytes_counter_, &*total_write_time_counter_, &*max_write_time_counter_);
+
+    // `Archive.java:1644-1730`: the replay session count and the three
+    // replayer read metrics.
+    auto replay_sessions =
+        allocate_counter(ArchiveCounters::REPLAY_SESSION_COUNT_TYPE_ID,
+                         std::span<const std::uint8_t>{archive_id_key.data(), archive_id_key.size()},
+                         ArchiveCounters::make_label(ArchiveCounters::REPLAY_SESSION_COUNT_NAME, context_.archive_id));
+    if (!replay_sessions)
+    {
+        return std::unexpected(replay_sessions.error());
+    }
+    replay_session_counter_.emplace(std::move(*replay_sessions));
+
+    auto max_read_time = allocate_counter(
+        ArchiveCounters::REPLAYER_MAX_READ_TIME_TYPE_ID,
+        std::span<const std::uint8_t>{archive_id_key.data(), archive_id_key.size()},
+        ArchiveCounters::make_label(ArchiveCounters::REPLAYER_MAX_READ_TIME_NAME, context_.archive_id));
+    if (!max_read_time)
+    {
+        return std::unexpected(max_read_time.error());
+    }
+    max_read_time_counter_.emplace(std::move(*max_read_time));
+
+    auto total_read_bytes = allocate_counter(
+        ArchiveCounters::REPLAYER_TOTAL_READ_BYTES_TYPE_ID,
+        std::span<const std::uint8_t>{archive_id_key.data(), archive_id_key.size()},
+        ArchiveCounters::make_label(ArchiveCounters::REPLAYER_TOTAL_READ_BYTES_NAME, context_.archive_id));
+    if (!total_read_bytes)
+    {
+        return std::unexpected(total_read_bytes.error());
+    }
+    total_read_bytes_counter_.emplace(std::move(*total_read_bytes));
+
+    auto total_read_time = allocate_counter(
+        ArchiveCounters::REPLAYER_TOTAL_READ_TIME_TYPE_ID,
+        std::span<const std::uint8_t>{archive_id_key.data(), archive_id_key.size()},
+        ArchiveCounters::make_label(ArchiveCounters::REPLAYER_TOTAL_READ_TIME_NAME, context_.archive_id));
+    if (!total_read_time)
+    {
+        return std::unexpected(total_read_time.error());
+    }
+    total_read_time_counter_.emplace(std::move(*total_read_time));
+
+    replayer_.set_counters(&*total_read_bytes_counter_, &*total_read_time_counter_, &*max_read_time_counter_);
+
+    // `Archive.Context.replayBuffer()` (`Archive.java:3894-3906`): one archive
+    // level buffer of `fileIoMaxLength`.
+    replay_buffer_.assign(static_cast<std::size_t>(context_.recording.file_io_max_length), 0);
 
     if (context_.recording.recording_events_enabled)
     {
@@ -273,11 +411,19 @@ std::expected<axc::core::PositionWriter, axc::core::Error> ArchiveConductor::all
 
 void ArchiveConductor::close()
 {
-    // Sessions first: their writers own segment files and their counters.
+    // The subscriptions close asynchronously and may deliver an
+    // unavailable-image callback, so the adapter must forget the sessions
+    // before they are destroyed.
+    adapter_.clear_sessions();
+    local_control_subscription_.reset();
+    control_subscription_.reset();
+
+    // Sessions next: their writers own segment files and their counters.
     recorder_.close();
+    replayer_.close();
+    replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
     sessions_ = SessionWorker<ControlSession>{};
     publications_.clear();
-    control_subscription_.reset();
     if (nullptr != control_assembler_)
     {
         (void)aeron_image_controlled_fragment_assembler_delete(control_assembler_);
@@ -289,7 +435,27 @@ void ArchiveConductor::close()
     }
     events_.reset();
     events_publication_.reset();
+
+    // Everything that owns a client resource must be released before the client
+    // itself: `aeron_close` deletes every registration, and a later close of the
+    // same handle is a use-after-free.
+    recording_subscriptions_.clear();
+    recording_subscription_keys_.clear();
+    recording_subscription_order_.clear();
+    pending_recording_subscriptions_.clear();
+    pending_control_counters_.clear();
+    pending_publications_.clear();
+    control_session_counters_.clear();
+    replay_session_by_id_.clear();
+    replay_tokens_.clear();
+    counter_by_id_.clear();
+
+    control_sessions_counter_.reset();
     recording_sessions_counter_.reset();
+    replay_session_counter_.reset();
+    max_read_time_counter_.reset();
+    total_read_bytes_counter_.reset();
+    total_read_time_counter_.reset();
     total_write_time_counter_.reset();
     total_write_bytes_counter_.reset();
     max_write_time_counter_.reset();
@@ -310,12 +476,22 @@ int ArchiveConductor::do_work()
     work_count += poll_pending_control_counters();
     work_count += poll_recording_images();
     work_count += poll_listings();
+    check_replay_tokens();
+    work_count += replay_publication_sessions_.do_work([](CreateReplayPublicationSession&) {});
+    work_count += replayer_.do_work([this](ReplaySession& session) { close_replay_session(session); });
     work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
     work_count += sessions_.do_work(
         [this](ControlSession& session)
         {
             adapter_.unregister_session(session.session_id());
             sessions_by_id_.erase(session.session_id());
+            remove_replay_tokens_for_session(session.session_id());
+
+            // `ControlSessionAdapter.removeControlSession` (`:1167-1171`).
+            if (control_sessions_counter_)
+            {
+                control_sessions_counter_->set_value(control_sessions_counter_->value() - 1);
+            }
             control_session_counters_.erase(session.session_id());
             for (std::size_t index = 0; index < pending_control_counters_.size();)
             {
@@ -364,28 +540,34 @@ int ArchiveConductor::do_work()
 
 int ArchiveConductor::poll_control_subscription()
 {
-    if (!control_subscription_)
-    {
-        return 0;
-    }
-
     int work_count = 0;
-    const int image_count = aeron_subscription_image_count(control_subscription_.get());
-    for (int index = 0; index < image_count; index++)
+
+    // `ArchiveConductor.doWork` polls both subscriptions through the adapter
+    // (`:363-395`); the local one is privileged and shares the same sessions map.
+    aeron_subscription_t* subscriptions[] = {control_subscription_.get(), local_control_subscription_.get()};
+    for (aeron_subscription_t* subscription : subscriptions)
     {
-        aeron_image_t* image =
-            aeron_subscription_image_at_index(control_subscription_.get(), static_cast<std::size_t>(index));
-        if (nullptr == image)
+        if (nullptr == subscription)
         {
             continue;
         }
 
-        current_control_image_ = image;
-        work_count +=
-            aeron_image_controlled_poll(image, &aeron_image_controlled_fragment_assembler_handler, control_assembler_,
-                                        static_cast<std::size_t>(context_.fragment_limit));
-        current_control_image_ = nullptr;
-        aeron_image_release(image);
+        const int image_count = aeron_subscription_image_count(subscription);
+        for (int index = 0; index < image_count; index++)
+        {
+            aeron_image_t* image = aeron_subscription_image_at_index(subscription, static_cast<std::size_t>(index));
+            if (nullptr == image)
+            {
+                continue;
+            }
+
+            current_control_image_ = image;
+            work_count +=
+                aeron_image_controlled_poll(image, &aeron_image_controlled_fragment_assembler_handler,
+                                            control_assembler_, static_cast<std::size_t>(context_.fragment_limit));
+            current_control_image_ = nullptr;
+            aeron_image_release(image);
+        }
     }
 
     return work_count;
@@ -399,6 +581,16 @@ aeron_controlled_fragment_handler_action_t ArchiveConductor::assembled_trampolin
     auto* conductor = static_cast<ArchiveConductor*>(clientd);
     conductor->adapter_.on_fragment(buffer, static_cast<std::int32_t>(length), conductor->current_control_image_);
     return AERON_ACTION_CONTINUE;
+}
+
+void ArchiveConductor::unavailable_counter_trampoline(void* clientd, aeron_counters_reader_t* reader,
+                                                      std::int64_t registration_id, std::int32_t counter_id)
+{
+    // `ArchiveConductor.onUnavailableCounter` (`:260-270`): the cached `Counter`
+    // object is closed, which a bounded replay's `isClosed()` observes.
+    (void)reader;
+    (void)registration_id;
+    static_cast<ArchiveConductor*>(clientd)->mark_counter_closed(counter_id);
 }
 
 void ArchiveConductor::unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription,
@@ -471,6 +663,12 @@ ControlSession* ArchiveConductor::on_connect_request(const ConnectRequest& reque
     sessions_by_id_[config.control_session_id] = raw_session;
     pending_publications_.push_back(PendingPublication{config.control_session_id, async});
     sessions_.add(std::move(session));
+
+    // `ArchiveConductor.java:519`: the control sessions counter.
+    if (control_sessions_counter_)
+    {
+        control_sessions_counter_->set_value(control_sessions_counter_->value() + 1);
+    }
 
     authenticator_->on_connect_request(config.control_session_id, request.encoded_credentials, cached_clock_.time_ms());
 
@@ -886,6 +1084,7 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
 
     axc::core::PositionWriter position = std::move(*counter);
     position.set_release(constants.join_position);
+    reset_counter_state(position.id(), position.registration_id());
 
     RecordingWriterContext writer_context;
     writer_context.archive_dir = context_.archive_dir;
@@ -1258,6 +1457,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
 
     axc::core::PositionWriter position = std::move(*counter);
     position.set_release(constants.join_position);
+    reset_counter_state(position.id(), position.registration_id());
 
     RecordingWriterContext writer_context;
     writer_context.archive_dir = context_.archive_dir;
@@ -1536,6 +1736,9 @@ void ArchiveConductor::close_recording_session(RecordingSession& session)
     // `ArchiveConductor.closeRecordingSession` (`ArchiveConductor.java:1329-1363`).
     sessions_by_image_.erase(session.image_handle());
     sessions_by_recording_id_.erase(session.recording_id());
+    // `closeSession` closes the type-100 counter (`RecordingSession.java:118-122`),
+    // which is what a live replay's `notExtended` observes.
+    mark_counter_closed(session.position_counter_id());
 
     const std::int64_t position = session.recorded_position();
 
@@ -1567,6 +1770,514 @@ void ArchiveConductor::close_recording_session(RecordingSession& session)
     }
 
     decrement_recording_sessions();
+}
+
+void ArchiveConductor::on_start_replay(const ReplayRequest& request)
+{
+    start_replay_request(request, NULL_COUNTER_ID, false);
+}
+
+void ArchiveConductor::on_start_bounded_replay(const BoundedReplayRequest& request)
+{
+    ReplayRequest replay;
+    replay.correlation_id = request.correlation_id;
+    replay.recording_id = request.recording_id;
+    replay.position = request.position;
+    replay.length = request.length;
+    replay.file_io_max_length = request.file_io_max_length;
+    replay.replay_stream_id = request.replay_stream_id;
+    replay.replay_token = request.replay_token;
+    replay.replay_channel = request.replay_channel;
+    replay.session = request.session;
+    start_replay_request(replay, request.limit_counter_id, true);
+}
+
+void ArchiveConductor::start_replay_request(const ReplayRequest& request, std::int32_t limit_counter_id, bool bounded)
+{
+    // `ArchiveConductor.startReplay` (`ArchiveConductor.java:763-929`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    if (num_active_replays_ == context_.replay.max_concurrent_replays)
+    {
+        session->send_error_response(
+            request.correlation_id, MAX_REPLAYS,
+            "max concurrent replays reached " + std::to_string(context_.replay.max_concurrent_replays));
+        return;
+    }
+
+    if (!catalog_.has_recording(request.recording_id))
+    {
+        session->send_error_response(request.correlation_id, UNKNOWN_RECORDING,
+                                     "unknown recording id: " + std::to_string(request.recording_id));
+        return;
+    }
+
+    // `:788-800`: the client's bounded counter wins; otherwise a live recording
+    // lends its own position counter.
+    std::int32_t resolved_limit_counter_id = NULL_COUNTER_ID;
+    bool limit_client_supplied = false;
+    std::int64_t limit_position = NULL_POSITION;
+    if (bounded)
+    {
+        // `startBoundedReplay` (`:996-1035`): `new Counter(reader, id)` refuses
+        // an id outside the directory.
+        const std::int32_t max_counter_id = aeron_counters_reader_max_counter_id(client_.counters_reader());
+        if (limit_counter_id < 0 || limit_counter_id > max_counter_id)
+        {
+            session->send_error_response(request.correlation_id, 0,
+                                         "unable to create replay limit counter id= " +
+                                             std::to_string(limit_counter_id) + " because of: " + aeron_errmsg());
+            return;
+        }
+
+        resolved_limit_counter_id = limit_counter_id;
+        limit_client_supplied = true;
+        (void)counter_state(limit_counter_id, true);
+        limit_position = axc::core::PositionView::at(client_.counters_reader(), limit_counter_id).get_acquire();
+    }
+    else
+    {
+        const auto live = sessions_by_recording_id_.find(request.recording_id);
+        if (live != sessions_by_recording_id_.end())
+        {
+            const std::int32_t position_counter_id = live->second->position_counter_id();
+            if (position_counter_id >= 0)
+            {
+                resolved_limit_counter_id = position_counter_id;
+                (void)counter_state(position_counter_id, false);
+                limit_position =
+                    axc::core::PositionView::at(client_.counters_reader(), position_counter_id).get_acquire();
+            }
+        }
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(request.recording_id);
+    const std::int64_t start_position = summary.start_position;
+    std::int64_t replay_position = start_position;
+
+    if (NULL_POSITION != request.position)
+    {
+        // `isInvalidReplayPosition` (`:2291-2329`).
+        if (0 != (request.position & (FRAME_ALIGNMENT - 1)))
+        {
+            session->send_error_response(request.correlation_id,
+                                         "requested replay start position=" + std::to_string(request.position) +
+                                             " is not a multiple of FRAME_ALIGNMENT (" +
+                                             std::to_string(FRAME_ALIGNMENT) + ") for recording " +
+                                             std::to_string(request.recording_id));
+            return;
+        }
+
+        if (request.position - start_position < 0)
+        {
+            session->send_error_response(
+                request.correlation_id, "requested replay start position=" + std::to_string(request.position) +
+                                            " is less than recording start position=" + std::to_string(start_position) +
+                                            " for recording " + std::to_string(request.recording_id));
+            return;
+        }
+
+        if (NULL_POSITION != summary.stop_position && request.position >= summary.stop_position)
+        {
+            session->send_error_response(
+                request.correlation_id, INVALID_POSITION,
+                "requested replay start position=" + std::to_string(request.position) +
+                    " must be less than the limit position=" + std::to_string(summary.stop_position) +
+                    " for recording " + std::to_string(request.recording_id));
+            return;
+        }
+
+        replay_position = request.position;
+    }
+
+    const std::int32_t file_io_max_length = request.file_io_max_length;
+    if (file_io_max_length > 0 && file_io_max_length < summary.mtu_length)
+    {
+        session->send_error_response(request.correlation_id, "fileIoMaxLength=" + std::to_string(file_io_max_length) +
+                                                                 " < mtuLength=" + std::to_string(summary.mtu_length));
+        return;
+    }
+    if (static_cast<std::int32_t>(replay_buffer_.size()) < summary.mtu_length)
+    {
+        session->send_error_response(request.correlation_id,
+                                     "replayBufferCapacity=" + std::to_string(replay_buffer_.size()) +
+                                         " < mtuLength=" + std::to_string(summary.mtu_length));
+        return;
+    }
+
+    std::int64_t stop_position = 0;
+    std::int64_t max_length = 0;
+    if (NULL_POSITION != limit_position)
+    {
+        if (replay_position > limit_position)
+        {
+            session->send_error_response(request.correlation_id, INVALID_POSITION,
+                                         "requested replay start position=" + std::to_string(replay_position) +
+                                             " must be less than the limit position=" + std::to_string(limit_position) +
+                                             " for recording " + std::to_string(request.recording_id));
+            return;
+        }
+        stop_position = limit_position;
+        max_length = std::numeric_limits<std::int64_t>::max() - replay_position;
+    }
+    else
+    {
+        stop_position = summary.stop_position;
+        max_length = stop_position - replay_position;
+    }
+
+    std::int64_t replay_length = 0;
+    if (REPLAY_ALL_AND_FOLLOW == request.length)
+    {
+        replay_length = max_length;
+    }
+    else if (REPLAY_ALL_AND_STOP == request.length)
+    {
+        replay_length = stop_position - replay_position;
+        if (0 == replay_length)
+        {
+            session->send_error_response(
+                request.correlation_id, EMPTY_RECORDING,
+                "when replaying and stopping the replay length must be non-zero, recordingId=" +
+                    std::to_string(request.recording_id));
+            return;
+        }
+    }
+    else
+    {
+        replay_length = std::min(request.length, max_length);
+    }
+
+    if (replay_length < 0)
+    {
+        session->send_error_response(request.correlation_id,
+                                     "replay length must be positive: replayLength=" + std::to_string(replay_length) +
+                                         ", length=" + std::to_string(request.length) +
+                                         ", stopPosition=" + std::to_string(stop_position) +
+                                         ", replayPosition=" + std::to_string(replay_position) + " for recording " +
+                                         std::to_string(request.recording_id));
+        return;
+    }
+
+    // `deleteSegmentsSessionByIdMap` is A4a's, so that check has no input yet.
+
+    // `:892-901`: the replay publication's channel.
+    ReplayChannelOptions channel_options;
+    channel_options.position = replay_position;
+    channel_options.initial_term_id = summary.initial_term_id;
+    channel_options.term_length = summary.term_buffer_length;
+    channel_options.mtu_length = summary.mtu_length;
+    channel_options.linger_timeout_ns = context_.replay.replay_linger_timeout_ns;
+
+    auto channel = replay_channel(request.replay_channel, channel_options);
+    if (!channel)
+    {
+        const std::string message = "failed to process replayChannel - " + std::string{channel.error().message.view()};
+        log_warning(message);
+        session->send_error_response(request.correlation_id, message);
+        return;
+    }
+
+    CreateReplayPublicationSession::Config config;
+    config.correlation_id = request.correlation_id;
+    config.recording_id = request.recording_id;
+    config.replay_position = replay_position;
+    config.replay_length = replay_length;
+    config.start_position = start_position;
+    config.stop_position = stop_position;
+    config.segment_file_length = summary.segment_file_length;
+    config.term_buffer_length = summary.term_buffer_length;
+    config.stream_id = summary.stream_id;
+    config.replay_stream_id = request.replay_stream_id;
+    config.replay_channel = std::move(*channel);
+    config.file_io_max_length = file_io_max_length;
+    config.control_session_id = session->session_id();
+    config.limit_counter_id = resolved_limit_counter_id;
+    config.limit_client_supplied = limit_client_supplied;
+
+    replay_publication_sessions_.add(std::make_unique<CreateReplayPublicationSession>(std::move(config), *this));
+    on_replay_start();
+}
+
+void ArchiveConductor::on_stop_replay(const StopReplayRequest& request)
+{
+    // `ArchiveConductor.stopReplay` (`:1037-1054`): OK unconditionally.
+    const auto found = replay_session_by_id_.find(request.replay_session_id);
+    if (found != replay_session_by_id_.end())
+    {
+        found->second->abort("stop replay");
+    }
+
+    if (nullptr != request.session)
+    {
+        request.session->send_ok_response(request.correlation_id, 0);
+    }
+}
+
+void ArchiveConductor::on_stop_all_replays(const StopAllReplaysRequest& request)
+{
+    // `ArchiveConductor.stopAllReplays` (`:1048-1062`).
+    for (auto& [replay_session_id, session] : replay_session_by_id_)
+    {
+        (void)replay_session_id;
+        if (NULL_VALUE == request.recording_id || session->recording_id() == request.recording_id)
+        {
+            session->abort("stop all replays");
+        }
+    }
+
+    if (nullptr != request.session)
+    {
+        request.session->send_ok_response(request.correlation_id, 0);
+    }
+}
+
+void ArchiveConductor::on_replay_token(const ReplayTokenRequest& request)
+{
+    // `ControlSessionAdapter.java:1084-1106`.
+    if (nullptr == request.session)
+    {
+        return;
+    }
+
+    const std::int64_t replay_token = generate_replay_token(*request.session, request.recording_id);
+    request.session->send_ok_response(request.correlation_id, replay_token);
+}
+
+std::int64_t ArchiveConductor::generate_replay_token(ControlSession& session, std::int64_t recording_id)
+{
+    // `ArchiveConductor.generateReplayToken` (`:2674-2687`).
+    std::int64_t replay_token = NULL_VALUE;
+    do
+    {
+        replay_token = next_replay_token();
+    } while (NULL_VALUE == replay_token || replay_tokens_.find(replay_token) != replay_tokens_.end());
+
+    SessionForReplay session_for_replay;
+    session_for_replay.recording_id = recording_id;
+    session_for_replay.control_session_id = session.session_id();
+    session_for_replay.deadline_ns = axc::core::NanoClock::now() + context_.connect_timeout_ms * 1'000'000;
+    replay_tokens_[replay_token] = session_for_replay;
+    return replay_token;
+}
+
+ControlSession* ArchiveConductor::replay_session_for_token(std::int64_t token, std::int64_t recording_id)
+{
+    // `ArchiveConductor.getReplaySession` (`:2689-2702`).
+    const auto found = replay_tokens_.find(token);
+    if (found == replay_tokens_.end() || found->second.recording_id != recording_id ||
+        axc::core::NanoClock::now() >= found->second.deadline_ns)
+    {
+        return nullptr;
+    }
+
+    return control_session_by_id(found->second.control_session_id);
+}
+
+void ArchiveConductor::remove_replay_tokens_for_session(std::int64_t control_session_id)
+{
+    // `ArchiveConductor.removeReplayTokensForSession` (`:2704-2716`).
+    for (auto it = replay_tokens_.begin(); it != replay_tokens_.end();)
+    {
+        if (it->second.control_session_id == control_session_id)
+        {
+            it = replay_tokens_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void ArchiveConductor::check_replay_tokens()
+{
+    // `ArchiveConductor.checkReplayTokens` (`:2718-2735`).
+    const std::int64_t now_ns = axc::core::NanoClock::now();
+    for (auto it = replay_tokens_.begin(); it != replay_tokens_.end();)
+    {
+        if (it->second.deadline_ns <= now_ns)
+        {
+            it = replay_tokens_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+std::int64_t ArchiveConductor::next_replay_token()
+{
+    // Any unique non-null value works; the reference uses `java.util.Random`.
+    replay_token_state_ ^= replay_token_state_ << 13;
+    replay_token_state_ ^= replay_token_state_ >> 7;
+    replay_token_state_ ^= replay_token_state_ << 17;
+    return static_cast<std::int64_t>(replay_token_state_ & 0x7FFF'FFFF'FFFF'FFFFULL);
+}
+
+void ArchiveConductor::async_send_ok(std::int64_t control_session_id, std::int64_t correlation_id,
+                                     std::int64_t replay_session_id)
+{
+    // `ControlSession.asyncSendOkResponse` (`:733-745`); a session that is gone
+    // simply drops it (the reference's closed publication does the same).
+    if (ControlSession* session = control_session_by_id(control_session_id); nullptr != session)
+    {
+        session->async_send_ok_response(correlation_id, replay_session_id);
+    }
+}
+
+void ArchiveConductor::send_error(std::int64_t control_session_id, std::int64_t correlation_id,
+                                  std::int64_t relevant_id, std::string_view message)
+{
+    if (ControlSession* session = control_session_by_id(control_session_id); nullptr != session)
+    {
+        session->send_error_response(correlation_id, relevant_id, message);
+    }
+}
+
+void ArchiveConductor::unexpected_frame(std::int32_t frame_type, std::int64_t position)
+{
+    log_warning("unexpected frame type " + std::to_string(frame_type) + " at position=" + std::to_string(position));
+}
+
+axc::core::AsyncAdd<axc::core::ExPubPtr> ArchiveConductor::add_replay_publication(std::string_view channel,
+                                                                                  std::int32_t stream_id)
+{
+    return client_.add_exclusive_publication(channel, stream_id);
+}
+
+void ArchiveConductor::replay_publication_failed(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                 std::string_view message)
+{
+    // `CreateReplayPublicationSession.java:152-156`.
+    on_replay_end();
+    log_warning(message);
+    if (ControlSession* session = control_session_by_id(control_session_id); nullptr != session)
+    {
+        session->send_error_response(correlation_id, message);
+    }
+}
+
+void ArchiveConductor::new_replay_session(const CreateReplayPublicationSession::Config& config,
+                                          std::unique_ptr<ReplayPublication> publication)
+{
+    // `ArchiveConductor.newReplaySession` (`:941-994`).
+    const std::int64_t replay_session_id = (static_cast<std::int64_t>(next_replay_id_++) << 32) |
+                                           (static_cast<std::int64_t>(publication->session_id()) & 0xFFFF'FFFFLL);
+
+    std::size_t buffer_length = replay_buffer_.size();
+    if (config.file_io_max_length > 0 && static_cast<std::size_t>(config.file_io_max_length) < buffer_length)
+    {
+        buffer_length = static_cast<std::size_t>(config.file_io_max_length);
+    }
+
+    std::unique_ptr<ReplayLimitSource> limit;
+    if (NULL_COUNTER_ID != config.limit_counter_id)
+    {
+        CounterState& state = counter_state(config.limit_counter_id, config.limit_client_supplied);
+        limit = std::make_unique<CounterLimitSource>(client_.counters_reader(), config.limit_counter_id, state.closed,
+                                                     state.registration_id);
+    }
+
+    ReplaySession::Config replay_config;
+    replay_config.correlation_id = config.correlation_id;
+    replay_config.recording_id = config.recording_id;
+    replay_config.replay_position = config.replay_position;
+    replay_config.replay_length = config.replay_length;
+    replay_config.start_position = config.start_position;
+    replay_config.stop_position = config.stop_position;
+    replay_config.segment_file_length = config.segment_file_length;
+    replay_config.term_buffer_length = config.term_buffer_length;
+    replay_config.stream_id = config.stream_id;
+    replay_config.replay_session_id = replay_session_id;
+    replay_config.control_session_id = config.control_session_id;
+    replay_config.connect_timeout_ms = context_.connect_timeout_ms;
+    replay_config.archive_dir = context_.archive_dir;
+
+    auto session = std::make_unique<ReplaySession>(std::move(replay_config), std::move(publication), *this, replayer_,
+                                                   replay_clock_, context_.replay_checksum, std::move(limit),
+                                                   std::span<std::uint8_t>{replay_buffer_.data(), buffer_length}, this);
+
+    replay_session_by_id_[replay_session_id] = session.get();
+    replayer_.add_session(std::move(session));
+
+    // `:993`: the type-112 replay session counter.
+    if (replay_session_counter_)
+    {
+        replay_session_counter_->set_value(replay_session_counter_->value() + 1);
+    }
+}
+
+void ArchiveConductor::close_replay_session(ReplaySession& session)
+{
+    // `ArchiveConductor.closeReplaySession` (`:1368-1390`).
+    session.send_pending_error();
+    replay_session_by_id_.erase(session.session_id());
+    on_replay_end();
+    session.close();
+
+    if (replay_session_counter_)
+    {
+        replay_session_counter_->set_value(replay_session_counter_->value() - 1);
+    }
+}
+
+void ArchiveConductor::on_replay_start() noexcept
+{
+    // `ArchiveConductor.onReplayStart` (`:931-934`).
+    num_active_replays_++;
+}
+
+void ArchiveConductor::on_replay_end() noexcept
+{
+    // `ArchiveConductor.onReplayEnd` (`:936-939`).
+    num_active_replays_--;
+}
+
+ArchiveConductor::CounterState& ArchiveConductor::counter_state(std::int32_t counter_id, bool client_supplied)
+{
+    auto found = counter_by_id_.find(counter_id);
+    if (found == counter_by_id_.end())
+    {
+        CounterState state;
+        state.client_supplied = client_supplied;
+
+        std::int64_t registration_id = 0;
+        if (0 == aeron_counters_reader_counter_registration_id(client_.counters_reader(), counter_id, &registration_id))
+        {
+            state.registration_id = registration_id;
+        }
+
+        found = counter_by_id_.emplace(counter_id, state).first;
+    }
+    return found->second;
+}
+
+void ArchiveConductor::reset_counter_state(std::int32_t counter_id, std::int64_t registration_id)
+{
+    if (counter_id < 0)
+    {
+        return;
+    }
+
+    CounterState& state = counter_state(counter_id, false);
+    state.registration_id = registration_id;
+    state.closed = false;
+    state.client_supplied = false;
+}
+
+void ArchiveConductor::mark_counter_closed(std::int32_t counter_id)
+{
+    const auto found = counter_by_id_.find(counter_id);
+    if (found != counter_by_id_.end())
+    {
+        found->second.closed = true;
+    }
 }
 
 void ArchiveConductor::log_warning(std::string_view message)

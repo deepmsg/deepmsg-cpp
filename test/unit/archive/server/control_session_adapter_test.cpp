@@ -16,6 +16,7 @@
 #include "archive/server/epoch_clock_source.h"
 #include "io_aeron_archive_codecs/AuthConnectRequest.h"
 #include "io_aeron_archive_codecs/BooleanType.h"
+#include "io_aeron_archive_codecs/BoundedReplayRequest.h"
 #include "io_aeron_archive_codecs/ChallengeResponse.h"
 #include "io_aeron_archive_codecs/CloseSessionRequest.h"
 #include "io_aeron_archive_codecs/ExtendRecordingRequest2.h"
@@ -25,17 +26,24 @@
 #include "io_aeron_archive_codecs/ListRecordingSubscriptionsRequest.h"
 #include "io_aeron_archive_codecs/MaxRecordedPositionRequest.h"
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
+#include "io_aeron_archive_codecs/ReplayRequest.h"
+#include "io_aeron_archive_codecs/ReplayTokenRequest.h"
 #include "io_aeron_archive_codecs/SourceLocation.h"
 #include "io_aeron_archive_codecs/StartPositionRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
+#include "io_aeron_archive_codecs/StopAllReplaysRequest.h"
 #include "io_aeron_archive_codecs/StopPositionRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingByIdentityRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
+#include "io_aeron_archive_codecs/StopReplayRequest.h"
 
 namespace
 {
 
+namespace archive_codecs = deepmsg::archive::server::archive_codecs;
+
+using deepmsg::archive::server::BoundedReplayRequest;
 using deepmsg::archive::server::CachedEpochClock;
 using deepmsg::archive::server::ConnectRequest;
 using deepmsg::archive::server::ControlResponseProxy;
@@ -47,11 +55,15 @@ using deepmsg::archive::server::ExtendRecordingRequest;
 using deepmsg::archive::server::FindLastMatchingRecordingRequest;
 using deepmsg::archive::server::ListRecordingSubscriptionsRequest;
 using deepmsg::archive::server::RecordingIdRequest;
+using deepmsg::archive::server::ReplayRequest;
+using deepmsg::archive::server::ReplayTokenRequest;
 using deepmsg::archive::server::ResponsePublication;
 using deepmsg::archive::server::StartRecordingRequest;
+using deepmsg::archive::server::StopAllReplaysRequest;
 using deepmsg::archive::server::StopRecordingByIdentityRequest;
 using deepmsg::archive::server::StopRecordingRequest;
 using deepmsg::archive::server::StopRecordingSubscriptionRequest;
+using deepmsg::archive::server::StopReplayRequest;
 using deepmsg::archive::server::archive_codecs::AuthConnectRequest;
 using deepmsg::archive::server::archive_codecs::BooleanType;
 using deepmsg::archive::server::archive_codecs::ChallengeResponse;
@@ -176,6 +188,45 @@ public:
         extend_recording_requests.push_back(request);
     }
 
+    void on_start_replay(const ReplayRequest& request) override
+    {
+        start_replay_requests.push_back(request);
+    }
+
+    void on_start_bounded_replay(const BoundedReplayRequest& request) override
+    {
+        bounded_replay_requests.push_back(request);
+    }
+
+    void on_stop_replay(const StopReplayRequest& request) override
+    {
+        stop_replay_requests.push_back(request);
+    }
+
+    void on_stop_all_replays(const StopAllReplaysRequest& request) override
+    {
+        stop_all_replays_requests.push_back(request);
+    }
+
+    void on_replay_token(const ReplayTokenRequest& request) override
+    {
+        replay_token_requests.push_back(request);
+    }
+
+    std::int64_t generate_replay_token(ControlSession& control_session, std::int64_t recording_id) override
+    {
+        (void)control_session;
+        return recording_id + 1000;
+    }
+
+    ControlSession* replay_session_for_token(std::int64_t token, std::int64_t recording_id) override
+    {
+        (void)token;
+        (void)recording_id;
+        token_lookups++;
+        return session.get();
+    }
+
     void log_warning(std::string_view message) override
     {
         warnings.emplace_back(message);
@@ -201,6 +252,12 @@ public:
     std::vector<RecordingIdRequest> list_recording_requests;
     std::vector<ListRecordingSubscriptionsRequest> list_recording_subscriptions_requests;
     std::vector<ExtendRecordingRequest> extend_recording_requests;
+    std::vector<ReplayRequest> start_replay_requests;
+    std::vector<BoundedReplayRequest> bounded_replay_requests;
+    std::vector<StopReplayRequest> stop_replay_requests;
+    std::vector<StopAllReplaysRequest> stop_all_replays_requests;
+    std::vector<ReplayTokenRequest> replay_token_requests;
+    int token_lookups{0};
     std::vector<std::string> warnings;
     CachedEpochClock clock{10};
     ControlResponseProxy proxy;
@@ -597,20 +654,191 @@ TEST_F(ControlSessionAdapterTest, findLastListAndExtendReachTheHandler)
     EXPECT_EQ("aeron:udp?endpoint=localhost:3333", handler_.extend_recording_requests[0].channel);
 }
 
+[[nodiscard]] std::vector<std::uint8_t> encode_replay(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                      std::int64_t recording_id, std::int64_t position,
+                                                      std::int64_t length, std::int32_t file_io_max_length,
+                                                      std::int32_t replay_stream_id, std::int64_t replay_token,
+                                                      const std::string& channel)
+{
+    std::vector<std::uint8_t> buffer(512, 0);
+    archive_codecs::ReplayRequest encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .recordingId(recording_id)
+        .position(position)
+        .length(length)
+        .fileIoMaxLength(file_io_max_length)
+        .replayStreamId(replay_stream_id)
+        .replayToken(replay_token)
+        .putReplayChannel(channel.data(), static_cast<std::uint32_t>(channel.size()));
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_bounded_replay(std::int64_t control_session_id,
+                                                              std::int64_t correlation_id, std::int64_t recording_id,
+                                                              std::int64_t position, std::int64_t length,
+                                                              std::int32_t limit_counter_id,
+                                                              std::int32_t file_io_max_length,
+                                                              std::int32_t replay_stream_id, const std::string& channel)
+{
+    std::vector<std::uint8_t> buffer(512, 0);
+    archive_codecs::BoundedReplayRequest encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .recordingId(recording_id)
+        .position(position)
+        .length(length)
+        .limitCounterId(limit_counter_id)
+        .replayStreamId(replay_stream_id)
+        .fileIoMaxLength(file_io_max_length)
+        .replayToken(-1)
+        .putReplayChannel(channel.data(), static_cast<std::uint32_t>(channel.size()));
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_stop_replay(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                           std::int64_t replay_session_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    archive_codecs::StopReplayRequest encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).replaySessionId(replay_session_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_stop_all_replays(std::int64_t control_session_id,
+                                                                std::int64_t correlation_id, std::int64_t recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    archive_codecs::StopAllReplaysRequest encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_replay_token(std::int64_t control_session_id,
+                                                            std::int64_t correlation_id, std::int64_t recording_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    archive_codecs::ReplayTokenRequest encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+TEST_F(ControlSessionAdapterTest, aReplayRequestReachesTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const std::vector<std::uint8_t> replay =
+        encode_replay(7, 42, 99, 128, 4096, 4096, 66, -1, "aeron:udp?endpoint=localhost:6666");
+    EXPECT_EQ(1, adapter_->on_fragment(replay.data(), static_cast<std::int32_t>(replay.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.start_replay_requests.size());
+    const ReplayRequest& decoded = handler_.start_replay_requests[0];
+    EXPECT_EQ(42, decoded.correlation_id);
+    EXPECT_EQ(99, decoded.recording_id);
+    EXPECT_EQ(128, decoded.position);
+    EXPECT_EQ(4096, decoded.length);
+    EXPECT_EQ(4096, decoded.file_io_max_length);
+    EXPECT_EQ(66, decoded.replay_stream_id);
+    EXPECT_EQ(-1, decoded.replay_token);
+    EXPECT_EQ("aeron:udp?endpoint=localhost:6666", decoded.replay_channel);
+    EXPECT_EQ(handler_.session.get(), decoded.session);
+    EXPECT_EQ(ControlSession::State::active, handler_.session->state());
+}
+
+TEST_F(ControlSessionAdapterTest, aBoundedReplayRequestCarriesTheLimitCounter)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const std::vector<std::uint8_t> bounded =
+        encode_bounded_replay(7, 43, 99, 0, 8192, 31, 4096, 66, "aeron:udp?endpoint=localhost:6666");
+    EXPECT_EQ(1, adapter_->on_fragment(bounded.data(), static_cast<std::int32_t>(bounded.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.bounded_replay_requests.size());
+    EXPECT_EQ(31, handler_.bounded_replay_requests[0].limit_counter_id);
+    EXPECT_EQ(8192, handler_.bounded_replay_requests[0].length);
+}
+
+TEST_F(ControlSessionAdapterTest, stopReplayRequestsReachTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const std::vector<std::uint8_t> stop = encode_stop_replay(7, 44, (3LL << 32) | 77);
+    EXPECT_EQ(1, adapter_->on_fragment(stop.data(), static_cast<std::int32_t>(stop.size()), &image_));
+
+    const std::vector<std::uint8_t> stop_all = encode_stop_all_replays(7, 45, 99);
+    EXPECT_EQ(1, adapter_->on_fragment(stop_all.data(), static_cast<std::int32_t>(stop_all.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.stop_replay_requests.size());
+    EXPECT_EQ((3LL << 32) | 77, handler_.stop_replay_requests[0].replay_session_id);
+    ASSERT_EQ(1u, handler_.stop_all_replays_requests.size());
+    EXPECT_EQ(99, handler_.stop_all_replays_requests[0].recording_id);
+}
+
+TEST_F(ControlSessionAdapterTest, aReplayTokenRequestReachesTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const std::vector<std::uint8_t> token = encode_replay_token(7, 46, 99);
+    EXPECT_EQ(1, adapter_->on_fragment(token.data(), static_cast<std::int32_t>(token.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.replay_token_requests.size());
+    EXPECT_EQ(99, handler_.replay_token_requests[0].recording_id);
+}
+
+TEST_F(ControlSessionAdapterTest, aResponseModeReplayResolvesTheSessionThroughTheToken)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    // The request arrives on a different image (the short-lived control request
+    // publication); the token is what resolves the control session.
+    const std::vector<std::uint8_t> replay =
+        encode_replay(7, 47, 99, 0, 4096, 4096, 66, 77, "aeron:udp?control-mode=response|control=localhost:10002");
+    EXPECT_EQ(1, adapter_->on_fragment(replay.data(), static_cast<std::int32_t>(replay.size()), nullptr));
+
+    EXPECT_EQ(1, handler_.token_lookups);
+    ASSERT_EQ(1u, handler_.start_replay_requests.size());
+    EXPECT_NE(std::string::npos, handler_.start_replay_requests[0].replay_channel.find("response-correlation-id=0"));
+}
+
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)
 {
     const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
     ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
 
     // Re-use a valid frame but claim a template id the adapter does not serve
-    // yet (`StartReplayRequest` = 7).
+    // (20 is not among the recording, query or replay requests).
     std::vector<std::uint8_t> frame = encode_keep_alive(7, 1);
-    frame[2] = 7;  // message header template id (offset 2), little endian
+    frame[2] = 20;  // message header template id (offset 2), little endian
     frame[3] = 0;
 
     EXPECT_EQ(0, adapter_->on_fragment(frame.data(), static_cast<std::int32_t>(frame.size()), &image_));
     ASSERT_FALSE(handler_.warnings.empty());
-    EXPECT_EQ("unsupported control request templateId=7", handler_.warnings.back());
+    EXPECT_EQ("unsupported control request templateId=20", handler_.warnings.back());
 }
 
 TEST_F(ControlSessionAdapterTest, aShortOrMalformedFrameIsRejectedBeforeDecode)

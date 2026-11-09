@@ -34,6 +34,15 @@ public:
                                                                                                : constants.counter_id;
     }
 
+    /// The driver's counter registration id (`Counter.registrationId()`).
+    [[nodiscard]] std::int64_t registration_id() const noexcept
+    {
+        aeron_counter_constants_t constants{};
+        return nullptr == counter_ || 0 != aeron_counter_constants(counter_.get(), &constants)
+                   ? -1
+                   : constants.registration_id;
+    }
+
     [[nodiscard]] bool valid() const noexcept
     {
         return nullptr != addr_;

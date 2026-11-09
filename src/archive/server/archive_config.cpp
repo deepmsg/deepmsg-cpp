@@ -113,6 +113,109 @@ std::expected<std::int64_t, axc::core::Error> parse_size(std::string_view value)
     return magnitude * multiplier;
 }
 
+std::expected<std::int64_t, axc::core::Error> parse_duration_ns(std::string_view value) noexcept
+{
+    value = trim(value);
+    if (value.empty())
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::config_error, "empty duration"));
+    }
+
+    // `SystemUtil.parseDuration`: the last character is a digit ⇒ nanoseconds.
+    const char last = value.back();
+    std::int64_t multiplier = 1;
+    if (last >= '0' && last <= '9')
+    {
+        // plain number in nanoseconds
+    }
+    else if ('s' == last || 'S' == last)
+    {
+        value.remove_suffix(1);
+        // `5s` is seconds; `5ms`/`5us`/`5ns` carry the unit in the character
+        // before the `s` (Agrona switches on it when it is not a digit).
+        if (!value.empty() && !(value.back() >= '0' && value.back() <= '9'))
+        {
+            const char unit = value.back();
+            value.remove_suffix(1);
+            switch (unit)
+            {
+                case 'm':
+                case 'M':
+                    multiplier = 1000000;
+                    break;
+                case 'u':
+                case 'U':
+                    multiplier = 1000;
+                    break;
+                case 'n':
+                case 'N':
+                    multiplier = 1;
+                    break;
+                default:
+                    return std::unexpected(axc::core::make_error(axc::core::ErrorCode::config_error,
+                                                                 "invalid duration unit: " + std::string{value}));
+            }
+        }
+        else
+        {
+            multiplier = 1000000000;
+        }
+    }
+    else
+    {
+        value.remove_suffix(1);
+        switch (last)
+        {
+            case 'n':
+            case 'N':
+                multiplier = 1;
+                break;
+            case 'u':
+            case 'U':
+                multiplier = 1000;
+                break;
+            case 'm':
+            case 'M':
+                multiplier = 1000000;
+                break;
+            default:
+                return std::unexpected(axc::core::make_error(axc::core::ErrorCode::config_error,
+                                                             "invalid duration unit: " + std::string{value}));
+        }
+    }
+
+    std::int64_t magnitude = 0;
+    const char* begin = value.data();
+    const char* end = begin + value.size();
+    const auto result = std::from_chars(begin, end, magnitude);
+    if (result.ec != std::errc{} || result.ptr != end || value.empty() || magnitude < 0)
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::config_error, "invalid duration: " + std::string{value}));
+    }
+
+    return magnitude * multiplier;
+}
+
+std::string format_duration_ns(std::int64_t value)
+{
+    // `SystemUtil.formatDuration` (Agrona 2.7.0): only an exact division changes
+    // the unit; otherwise the value stays in nanoseconds.
+    if (value >= 1000000000 && 0 == value % 1000000000)
+    {
+        return std::to_string(value / 1000000000) + "s";
+    }
+    if (value >= 1000000 && 0 == value % 1000000)
+    {
+        return std::to_string(value / 1000000) + "ms";
+    }
+    if (value >= 1000 && 0 == value % 1000)
+    {
+        return std::to_string(value / 1000) + "us";
+    }
+    return std::to_string(value) + "ns";
+}
+
 std::expected<RecordingSettings, axc::core::Error> parse_recording_settings(
     const axc::core::PropertySource& source) noexcept
 {
@@ -198,6 +301,38 @@ std::expected<RecordingSettings, axc::core::Error> parse_recording_settings(
         return std::unexpected(axc::core::make_error(axc::core::ErrorCode::config_error,
                                                      "Archive.Context.recordingEventsChannel must be set if "
                                                      "Archive.Context.recordingEventsEnabled is true"));
+    }
+
+    return settings;
+}
+
+std::expected<ReplaySettings, axc::core::Error> parse_replay_settings(const axc::core::PropertySource& source) noexcept
+{
+    ReplaySettings settings;
+
+    // `Archive.Configuration.maxConcurrentReplays` (`Archive.java:474-481`).
+    auto max_concurrent = get_int32(source, "aeron.archive.max.concurrent.replays", settings.max_concurrent_replays);
+    if (!max_concurrent)
+    {
+        return std::unexpected(max_concurrent.error());
+    }
+    settings.max_concurrent_replays = *max_concurrent;
+
+    // `Archive.Configuration.replayLingerTimeoutNs` (`Archive.java:555-564`).
+    if (const auto linger = source.get("aeron.archive.replay.linger.timeout"); linger.has_value())
+    {
+        auto parsed = parse_duration_ns(*linger);
+        if (!parsed)
+        {
+            return std::unexpected(parsed.error());
+        }
+        settings.replay_linger_timeout_ns = *parsed;
+    }
+
+    // `Archive.Configuration.replayChecksum` (`Archive.java:676`).
+    if (const auto checksum = source.get("aeron.archive.replay.checksum"); checksum.has_value())
+    {
+        settings.replay_checksum_name = std::string{*checksum};
     }
 
     return settings;

@@ -32,6 +32,9 @@ inline constexpr std::int32_t RESERVED_VALUE_OFFSET = 24;
 inline constexpr std::int32_t DATA_FRAME_TYPE = 0x01;
 inline constexpr std::int32_t PADDING_FRAME_TYPE = 0x02;
 
+/// `LogBufferDescriptor.TERM_MAX_LENGTH`.
+inline constexpr std::int64_t TERM_MAX_LENGTH = 1024LL * 1024 * 1024;
+
 /// `BitUtil.align(value, alignment)`; the reference always passes a power of two.
 [[nodiscard]] constexpr std::int32_t frame_align(std::int32_t value, std::int32_t alignment) noexcept
 {

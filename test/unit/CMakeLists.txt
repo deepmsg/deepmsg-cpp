@@ -46,12 +46,16 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/catalog_golden_test.cpp
         archive/server/channel_uri_test.cpp
         archive/server/archive_config_test.cpp
+        archive/server/archive_counters_test.cpp
         archive/server/archive_launch_test.cpp
         archive/server/recording_pos_test.cpp
         archive/server/recording_session_test.cpp
         archive/server/recording_events_test.cpp
+        archive/server/replay_session_test.cpp
+        archive/server/create_replay_publication_session_test.cpp
     DEPS
         axc_archive_server
+        aeron_static
         GTest::gtest_main)
 
 target_compile_definitions(axc_archive_unit_tests PRIVATE
