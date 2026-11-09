@@ -75,6 +75,13 @@ index_segment_files(std::string_view archive_dir);
 [[nodiscard]] std::expected<std::int64_t, axc::core::Error> parse_segment_file_recording_id(
     const std::string& filename);
 
+/// The digits between `<recordingId>-` and the first `.`, i.e. what
+/// `ArchiveConductor.deleteDetachedSegments` (`:1526-1535`) and
+/// `DeleteSegmentsSession`'s constructor (`:76-86`) read. Also accepts the
+/// `.del` names an interrupted delete leaves behind.
+[[nodiscard]] bool parse_segment_file_position_for_recording(std::string_view file_name, std::int64_t recording_id,
+                                                             std::int64_t& position) noexcept;
+
 /// `ReplaySession.notHeaderAligned` / `ArchiveConductor.eraseRemainingSegment`:
 /// read the 32-byte frame header at `offset` and compare it with the expected
 /// term offset, term id and stream id.

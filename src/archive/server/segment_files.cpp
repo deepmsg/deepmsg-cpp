@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -276,6 +277,34 @@ std::expected<std::int64_t, axc::core::Error> parse_segment_file_recording_id(co
             message_error(axc::core::ErrorCode::invalid_argument, "invalid filename format: " + filename));
     }
     return parse_long_ascii(filename, 0, dash_offset);
+}
+
+bool parse_segment_file_position_for_recording(std::string_view file_name, std::int64_t recording_id,
+                                               std::int64_t& position) noexcept
+{
+    const std::string prefix = std::to_string(recording_id) + "-";
+    if (file_name.size() <= prefix.size() || 0 != file_name.compare(0, prefix.size(), prefix))
+    {
+        return false;
+    }
+
+    const std::size_t dot_index = file_name.find('.', prefix.size());
+    if (std::string::npos == dot_index || dot_index == prefix.size())
+    {
+        return false;
+    }
+
+    std::int64_t value = 0;
+    const char* begin = file_name.data() + prefix.size();
+    const char* end = file_name.data() + dot_index;
+    const auto parsed = std::from_chars(begin, end, value);
+    if (parsed.ec != std::errc{} || parsed.ptr != end)
+    {
+        return false;
+    }
+
+    position = value;
+    return true;
 }
 
 FrameHeaderCheck check_first_frame(int fd, std::int64_t offset, std::int32_t term_offset, std::int32_t term_id,

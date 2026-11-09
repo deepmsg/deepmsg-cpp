@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <algorithm>
+#include <filesystem>
 #include <limits>
 #include <span>
 
@@ -14,7 +15,10 @@
 
 #include "archive/server/archive_counters.h"
 #include "archive/server/channel_uri.h"
+#include "archive/server/frame_layout.h"
 #include "archive/server/recording_pos.h"
+#include "archive/server/segment_files.h"
+#include "archive/server/segment_validation.h"
 #include "core/deepmsg/image_handlers.h"
 #include "core/io/fs.h"
 #include "core/time/clock.h"
@@ -118,6 +122,24 @@ private:
     bool& closed_;
     std::int64_t& registration_id_;
 };
+
+/// The Java enum name `isValidDetach`'s error message prints
+/// (`ArchiveConductor.java:2366`).
+[[nodiscard]] std::string_view replay_state_name(ReplaySession::State state) noexcept
+{
+    switch (state)
+    {
+        case ReplaySession::State::init:
+            return "INIT";
+        case ReplaySession::State::replay:
+            return "REPLAY";
+        case ReplaySession::State::inactive:
+            return "INACTIVE";
+        case ReplaySession::State::done:
+            return "DONE";
+    }
+    return "UNKNOWN";
+}
 
 }  // namespace
 
@@ -2281,6 +2303,408 @@ void ArchiveConductor::mark_counter_closed(std::int32_t counter_id)
     {
         found->second.closed = true;
     }
+}
+
+void ArchiveConductor::on_truncate_recording(const TruncateRecordingRequest& request)
+{
+    // `ControlSession.onTruncateRecording` (`ControlSession.java:505-512`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.truncateRecording` (`:1199-1246`).
+    const std::int64_t recording_id = request.recording_id;
+    if (!require_recording(catalog_, recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(recording_id);
+    if (const auto invalid = validate_truncate(summary, request.position))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+    if (!is_delete_allowed(*session, request.correlation_id, recording_id))
+    {
+        return;
+    }
+
+    const std::int64_t stop_position = summary.stop_position;
+    const std::int64_t start_position = summary.start_position;
+    const std::int32_t segment_length = summary.segment_file_length;
+    const std::int32_t term_length = summary.term_buffer_length;
+    const std::int64_t segment_base_position =
+        segment_file_base_position(start_position, request.position, term_length, segment_length);
+    const auto segment_offset = static_cast<std::int32_t>(request.position - segment_base_position);
+
+    if (auto stopped = catalog_.stop_position(recording_id, request.position); !stopped)
+    {
+        session->send_error_response(request.correlation_id, std::string{stopped.error().message.view()});
+        return;
+    }
+
+    std::vector<std::string> files;
+    if (start_position == request.position)
+    {
+        files = list_segment_files_with_delete_suffix(context_.archive_dir, recording_id);
+    }
+    else
+    {
+        if (segment_offset > 0)
+        {
+            if (stop_position != request.position)
+            {
+                const std::string file_name = segment_file_name(recording_id, segment_base_position);
+                const auto term_count =
+                    static_cast<std::int32_t>(request.position >> position_bits_to_shift(term_length));
+                const std::int32_t term_id = summary.initial_term_id + term_count;
+                auto erased = erase_remaining_segment(context_.archive_dir, file_name, request.position, segment_length,
+                                                      segment_offset, term_length, term_id, summary.stream_id);
+                if (!erased)
+                {
+                    session->send_error_response(request.correlation_id, erased.error());
+                    return;
+                }
+            }
+        }
+        else
+        {
+            files.push_back(segment_file_name(recording_id, segment_base_position));
+        }
+
+        for (std::int64_t position = segment_base_position + segment_length; position <= stop_position;
+             position += segment_length)
+        {
+            files.push_back(segment_file_name(recording_id, position));
+        }
+    }
+
+    stop_all_replays(recording_id);
+    delete_segments(*session, request.correlation_id, recording_id, std::move(files), true);
+}
+
+void ArchiveConductor::on_purge_recording(const PurgeRecordingRequest& request)
+{
+    // `ControlSession.onPurgeRecording` (`ControlSession.java:514-522`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.purgeRecording` (`:1251-1263`).
+    const std::int64_t recording_id = request.recording_id;
+    if (!require_recording(catalog_, recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(recording_id);
+    if (const auto invalid = validate_purge(summary, has_in_progress_replays(recording_id)))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+    if (!is_delete_allowed(*session, request.correlation_id, recording_id))
+    {
+        return;
+    }
+
+    if (auto changed = catalog_.change_state(recording_id, archive_codecs::RecordingState::DELETED); !changed)
+    {
+        session->send_error_response(request.correlation_id, std::string{changed.error().message.view()});
+        return;
+    }
+
+    std::vector<std::string> files = list_segment_files_with_delete_suffix(context_.archive_dir, recording_id);
+    delete_segments(*session, request.correlation_id, recording_id, std::move(files), false);
+}
+
+void ArchiveConductor::on_detach_segments(const SegmentStartPositionRequest& request)
+{
+    // `ControlSession.onDetachSegments` (`ControlSession.java:637-644`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.detachSegments` (`:1502-1514`): the catalog is the only
+    // thing that moves, no file is touched.
+    const std::int64_t recording_id = request.recording_id;
+    if (!require_recording(catalog_, recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(recording_id);
+    if (const auto invalid = validate_detach(summary, request.new_start_position, recorded_position_for(recording_id),
+                                             replays_for(recording_id)))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+
+    if (auto started = catalog_.start_position(recording_id, request.new_start_position); !started)
+    {
+        session->send_error_response(request.correlation_id, std::string{started.error().message.view()});
+        return;
+    }
+
+    session->send_ok_response(request.correlation_id, 0);
+}
+
+void ArchiveConductor::on_delete_detached_segments(const RecordingIdRequest& request)
+{
+    // `ControlSession.onDeleteDetachedSegments` (`ControlSession.java:646-653`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.deleteDetachedSegments` (`:1516-1540`).
+    const std::int64_t recording_id = request.recording_id;
+    if (!require_recording(catalog_, recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+    if (!is_delete_allowed(*session, request.correlation_id, recording_id))
+    {
+        return;
+    }
+
+    std::int64_t min_position = std::numeric_limits<std::int64_t>::max();
+    for (const std::string& name : list_segment_files_with_delete_suffix(context_.archive_dir, recording_id))
+    {
+        std::int64_t position = 0;
+        if (parse_segment_file_position_for_recording(name, recording_id, position))
+        {
+            min_position = std::min(min_position, position);
+        }
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(recording_id);
+    std::vector<std::string> files;
+    if (std::numeric_limits<std::int64_t>::max() != min_position)
+    {
+        files = find_detached_segments(context_.archive_dir, recording_id, summary.start_position, min_position,
+                                       summary.term_buffer_length, summary.segment_file_length);
+    }
+
+    delete_segments(*session, request.correlation_id, recording_id, std::move(files), false);
+}
+
+void ArchiveConductor::on_purge_segments(const SegmentStartPositionRequest& request)
+{
+    // `ControlSession.onPurgeSegments` (`ControlSession.java:655-662`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.purgeSegments` (`:1542-1561`).
+    const std::int64_t recording_id = request.recording_id;
+    if (!require_recording(catalog_, recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(recording_id);
+    if (const auto invalid = validate_detach(summary, request.new_start_position, recorded_position_for(recording_id),
+                                             replays_for(recording_id)))
+    {
+        session->send_error_response(request.correlation_id, invalid->code, invalid->message);
+        return;
+    }
+    if (!is_delete_allowed(*session, request.correlation_id, recording_id))
+    {
+        return;
+    }
+
+    const std::int64_t old_start_position = summary.start_position;
+    if (auto started = catalog_.start_position(recording_id, request.new_start_position); !started)
+    {
+        session->send_error_response(request.correlation_id, std::string{started.error().message.view()});
+        return;
+    }
+
+    std::vector<std::string> files =
+        find_detached_segments(context_.archive_dir, recording_id, request.new_start_position, old_start_position,
+                               summary.term_buffer_length, summary.segment_file_length);
+    delete_segments(*session, request.correlation_id, recording_id, std::move(files), false);
+}
+
+void ArchiveConductor::on_attach_segments(const RecordingIdRequest& request)
+{
+    // `ControlSession.onAttachSegments` (`ControlSession.java:664-671`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.attachSegments` (`:1563-1624`).
+    const std::int64_t recording_id = request.recording_id;
+    if (!require_recording(catalog_, recording_id, request.correlation_id, *session))
+    {
+        return;
+    }
+
+    const RecordingSummary summary = catalog_.recording_summary(recording_id);
+    const std::int32_t segment_length = summary.segment_file_length;
+    const std::int32_t term_length = summary.term_buffer_length;
+    const std::int32_t bits_to_shift = position_bits_to_shift(term_length);
+    const std::int32_t stream_id = summary.stream_id;
+
+    std::int64_t position = summary.start_position - segment_length;
+    std::int64_t count = 0;
+
+    while (position >= 0)
+    {
+        const std::string file_name = segment_file_name(recording_id, position);
+        const std::filesystem::path path = std::filesystem::path(context_.archive_dir) / file_name;
+        std::error_code error;
+        if (!std::filesystem::exists(path, error))
+        {
+            break;
+        }
+
+        const auto file_length = std::filesystem::file_size(path, error);
+        if (error)
+        {
+            session->send_error_response(request.correlation_id, error.message());
+            return;
+        }
+        if (static_cast<std::int64_t>(file_length) != segment_length)
+        {
+            session->send_error_response(request.correlation_id,
+                                         "fileLength=" + std::to_string(file_length) +
+                                             " not equal to segmentLength=" + std::to_string(segment_length));
+            return;
+        }
+
+        const auto term_count = static_cast<std::int32_t>(position >> bits_to_shift);
+        const std::int32_t term_id = summary.initial_term_id + term_count;
+        auto term_offset = find_term_offset_for_start(context_.archive_dir, file_name, stream_id, term_id, term_length);
+        if (!term_offset)
+        {
+            session->send_error_response(request.correlation_id, term_offset.error());
+            return;
+        }
+
+        if (0 == *term_offset)
+        {
+            if (auto started = catalog_.start_position(recording_id, position); !started)
+            {
+                session->send_error_response(request.correlation_id, std::string{started.error().message.view()});
+                return;
+            }
+            count += 1;
+            position -= segment_length;
+        }
+        else
+        {
+            if (auto started = catalog_.start_position(recording_id, position + *term_offset); !started)
+            {
+                session->send_error_response(request.correlation_id, std::string{started.error().message.view()});
+                return;
+            }
+            count += 1;
+            break;
+        }
+    }
+
+    session->send_ok_response(request.correlation_id, count);
+}
+
+bool ArchiveConductor::is_delete_allowed(ControlSession& session, std::int64_t correlation_id,
+                                         std::int64_t recording_id)
+{
+    // `ArchiveConductor.isDeleteAllowed` (`:1969-1979`).
+    if (delete_session_by_recording_id_.find(recording_id) != delete_session_by_recording_id_.end())
+    {
+        session.send_error_response(
+            correlation_id, "another delete operation in progress for recording id: " + std::to_string(recording_id));
+        return false;
+    }
+    return true;
+}
+
+void ArchiveConductor::stop_all_replays(std::int64_t recording_id)
+{
+    // `ArchiveConductor.stopAllReplays(recordingId)` (`:1048-1062`) without the
+    // OK response: the request that triggered it owns that.
+    for (auto& entry : replay_session_by_id_)
+    {
+        if (entry.second->recording_id() == recording_id)
+        {
+            entry.second->abort("stop all replays");
+        }
+    }
+}
+
+std::int64_t ArchiveConductor::recorded_position_for(std::int64_t recording_id) const
+{
+    const auto found = sessions_by_recording_id_.find(recording_id);
+    return found == sessions_by_recording_id_.end() ? NULL_POSITION : found->second->recorded_position();
+}
+
+std::vector<ReplayInProgressInfo> ArchiveConductor::replays_for(std::int64_t recording_id) const
+{
+    std::vector<ReplayInProgressInfo> replays;
+    for (const auto& entry : replay_session_by_id_)
+    {
+        const ReplaySession& session = *entry.second;
+        if (session.recording_id() != recording_id)
+        {
+            continue;
+        }
+
+        ReplayInProgressInfo info;
+        info.recording_id = session.recording_id();
+        info.segment_file_base_position = session.segment_file_base_position();
+        info.session_id = session.session_id();
+        info.stream_id = session.replay_stream_id();
+        info.channel = std::string{session.replay_channel()};
+        info.state = std::string{replay_state_name(session.state())};
+        replays.push_back(std::move(info));
+    }
+    return replays;
 }
 
 bool ArchiveConductor::has_in_progress_replays(std::int64_t recording_id)

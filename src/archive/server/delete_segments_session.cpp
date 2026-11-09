@@ -1,7 +1,6 @@
 #include "archive/server/delete_segments_session.h"
 
 #include <algorithm>
-#include <charconv>
 #include <filesystem>
 #include <limits>
 #include <system_error>
@@ -12,39 +11,6 @@ namespace deepmsg::archive::server
 {
 namespace
 {
-
-/// `org.agrona.AsciiEncoding.digitCount` (`AsciiEncoding.java:185-206`).
-[[nodiscard]] std::int64_t digit_count(std::int64_t value) noexcept
-{
-    if (value < 0)
-    {
-        return digit_count(-value) + 1;
-    }
-
-    std::int64_t count = 1;
-    while (value >= 10)
-    {
-        value /= 10;
-        count++;
-    }
-    return count;
-}
-
-/// `AsciiEncoding.parseLongAscii(text, offset, length)`; the reference throws on
-/// a bad name, which the agent catches and logs. We keep the maximum untouched.
-[[nodiscard]] bool parse_long_ascii(const std::string& text, std::size_t offset, std::size_t length,
-                                    std::int64_t& value) noexcept
-{
-    if (0 == length || offset + length > text.size())
-    {
-        return false;
-    }
-
-    const char* begin = text.data() + offset;
-    const char* end = begin + length;
-    const auto parsed = std::from_chars(begin, end, value);
-    return parsed.ec == std::errc{} && parsed.ptr == end;
-}
 
 }  // namespace
 
@@ -63,17 +29,10 @@ DeleteSegmentsSession::DeleteSegmentsSession(std::int64_t recording_id, std::int
       state_(await_replays_stop ? State::await_replays_stop : State::delete_files)
 {
     // `DeleteSegmentsSession.java:70-99`: the largest position in the file names.
-    const auto prefix_length = static_cast<std::size_t>(digit_count(recording_id) + 1);
     for (const std::string& name : files_)
     {
-        const std::size_t dot_index = name.find('.');
-        if (std::string::npos == dot_index || dot_index < prefix_length)
-        {
-            continue;
-        }
-
         std::int64_t file_position = 0;
-        if (parse_long_ascii(name, prefix_length, dot_index - prefix_length, file_position))
+        if (parse_segment_file_position_for_recording(name, recording_id, file_position))
         {
             max_delete_position_ = std::max(max_delete_position_, file_position);
         }

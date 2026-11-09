@@ -27,6 +27,7 @@
 #include "archive/server/recording_events.h"
 #include "archive/server/replay_session.h"
 #include "archive/server/replayer.h"
+#include "archive/server/segment_validation.h"
 #include "archive/server/session_worker.h"
 #include "core/counters/counter_target.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -121,6 +122,12 @@ public:
     void on_list_recording(const RecordingIdRequest& request) override;
     void on_list_recording_subscriptions(const ListRecordingSubscriptionsRequest& request) override;
     void on_extend_recording(const ExtendRecordingRequest& request) override;
+    void on_truncate_recording(const TruncateRecordingRequest& request) override;
+    void on_purge_recording(const PurgeRecordingRequest& request) override;
+    void on_detach_segments(const SegmentStartPositionRequest& request) override;
+    void on_delete_detached_segments(const RecordingIdRequest& request) override;
+    void on_purge_segments(const SegmentStartPositionRequest& request) override;
+    void on_attach_segments(const RecordingIdRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;
@@ -409,6 +416,21 @@ private:
     /// empty (no session would ever close).
     void delete_segments(ControlSession& session, std::int64_t correlation_id, std::int64_t recording_id,
                          std::vector<std::string> files, bool await_replays_stop);
+
+    /// `ArchiveConductor.isDeleteAllowed` (`:1969-1979`).
+    [[nodiscard]] bool is_delete_allowed(ControlSession& session, std::int64_t correlation_id,
+                                         std::int64_t recording_id);
+
+    /// `ArchiveConductor.stopAllReplays(recordingId)` (`:1048-1062`): abort the
+    /// recording's replay sessions; no OK response.
+    void stop_all_replays(std::int64_t recording_id);
+
+    /// `RecordingSession.recordedPosition()` for the live session, else
+    /// `Aeron.NULL_POSITION`.
+    [[nodiscard]] std::int64_t recorded_position_for(std::int64_t recording_id) const;
+
+    /// The live replays of one recording, in the shape `isValidDetach` reads.
+    [[nodiscard]] std::vector<ReplayInProgressInfo> replays_for(std::int64_t recording_id) const;
 };
 
 }  // namespace deepmsg::archive::server
