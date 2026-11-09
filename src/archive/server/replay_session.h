@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -254,7 +253,6 @@ private:
     std::int64_t connect_deadline_ms_{0};
 
     int fd_{-1};
-    std::array<std::uint8_t, DATA_HEADER_LENGTH> header_{};
 
     State state_{State::init};
     std::string error_message_;

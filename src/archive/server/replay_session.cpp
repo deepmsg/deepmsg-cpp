@@ -558,17 +558,21 @@ bool ReplaySession::open_recording_segment()
 
 bool ReplaySession::not_header_aligned(std::int32_t segment_offset, std::int32_t term_offset, std::int32_t term_id)
 {
-    // `ReplaySession.notHeaderAligned` + `isInvalidHeader` (`:618-661`).
-    const ssize_t bytes_read = ::pread(fd_, header_.data(), header_.size(), static_cast<off_t>(segment_offset));
-    if (static_cast<ssize_t>(header_.size()) != bytes_read)
+    // `ReplaySession.notHeaderAligned` + `isInvalidHeader` (`:618-661`). The
+    // header comparison itself is shared with the archive's segment operations
+    // (`segment_files.h`), so both read the frame header the same way.
+    switch (check_first_frame(fd_, segment_offset, term_offset, term_id, config_.stream_id))
     {
-        raise_error("failed to read fragment header", ERROR_GENERIC);
-        return true;
+        case FrameHeaderCheck::read_error:
+            raise_error("failed to read fragment header", ERROR_GENERIC);
+            return true;
+        case FrameHeaderCheck::unaligned:
+            return true;
+        case FrameHeaderCheck::ok:
+            break;
     }
 
-    return read_int32(header_.data() + TERM_OFFSET_FIELD_OFFSET) != term_offset ||
-           read_int32(header_.data() + TERM_ID_OFFSET) != term_id ||
-           read_int32(header_.data() + STREAM_ID_OFFSET) != config_.stream_id;
+    return false;
 }
 
 void ReplaySession::raise_error(std::string_view message, std::int64_t error_code)
