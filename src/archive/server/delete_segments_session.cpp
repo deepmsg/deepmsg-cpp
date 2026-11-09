@@ -9,10 +9,6 @@
 
 namespace deepmsg::archive::server
 {
-namespace
-{
-
-}  // namespace
 
 DeleteSegmentsSession::DeleteSegmentsSession(std::int64_t recording_id, std::int64_t control_session_id,
                                              std::int64_t correlation_id, std::string archive_dir,
