@@ -36,6 +36,7 @@
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
 #include "io_aeron_archive_codecs/ReplayRequest.h"
 #include "io_aeron_archive_codecs/ReplayTokenRequest.h"
+#include "io_aeron_archive_codecs/ReplicateRequest2.h"
 #include "io_aeron_archive_codecs/SourceLocation.h"
 #include "io_aeron_archive_codecs/StartPositionRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
@@ -45,6 +46,7 @@
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 #include "io_aeron_archive_codecs/StopReplayRequest.h"
+#include "io_aeron_archive_codecs/StopReplicationRequest.h"
 #include "io_aeron_archive_codecs/TruncateRecordingRequest.h"
 #include "io_aeron_archive_codecs/UpdateChannelRequest.h"
 
@@ -71,6 +73,7 @@ using deepmsg::archive::server::PurgeRecordingRequest;
 using deepmsg::archive::server::RecordingIdRequest;
 using deepmsg::archive::server::ReplayRequest;
 using deepmsg::archive::server::ReplayTokenRequest;
+using deepmsg::archive::server::ReplicateRequest;
 using deepmsg::archive::server::ResponsePublication;
 using deepmsg::archive::server::SegmentStartPositionRequest;
 using deepmsg::archive::server::StartRecordingRequest;
@@ -79,6 +82,7 @@ using deepmsg::archive::server::StopRecordingByIdentityRequest;
 using deepmsg::archive::server::StopRecordingRequest;
 using deepmsg::archive::server::StopRecordingSubscriptionRequest;
 using deepmsg::archive::server::StopReplayRequest;
+using deepmsg::archive::server::StopReplicationRequest;
 using deepmsg::archive::server::TruncateRecordingRequest;
 using deepmsg::archive::server::UpdateChannelRequest;
 using deepmsg::archive::server::archive_codecs::AuthConnectRequest;
@@ -104,6 +108,8 @@ using FindLastEncoder = deepmsg::archive::server::archive_codecs::FindLastMatchi
 using ListRecordingEncoder = deepmsg::archive::server::archive_codecs::ListRecordingRequest;
 using ListRecordingsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingsRequest;
 using ListRecordingsForUriEncoder = deepmsg::archive::server::archive_codecs::ListRecordingsForUriRequest;
+using ReplicateRequest2Encoder = deepmsg::archive::server::archive_codecs::ReplicateRequest2;
+using StopReplicationEncoder = deepmsg::archive::server::archive_codecs::StopReplicationRequest;
 using ListRecordingSubscriptionsEncoder = deepmsg::archive::server::archive_codecs::ListRecordingSubscriptionsRequest;
 using MigrateSegmentsEncoder = deepmsg::archive::server::archive_codecs::MigrateSegmentsRequest;
 using StopRecordingByIdentityEncoder = deepmsg::archive::server::archive_codecs::StopRecordingByIdentityRequest;
@@ -265,6 +271,16 @@ public:
         list_recordings_for_uri_requests.push_back(request);
     }
 
+    void on_replicate(const ReplicateRequest& request) override
+    {
+        replicate_requests.push_back(request);
+    }
+
+    void on_stop_replication(const StopReplicationRequest& request) override
+    {
+        stop_replication_requests.push_back(request);
+    }
+
     void on_start_replay(const ReplayRequest& request) override
     {
         start_replay_requests.push_back(request);
@@ -339,6 +355,8 @@ public:
     std::vector<MigrateSegmentsRequest> migrate_segments_requests;
     std::vector<ListRecordingsRequest> list_recordings_requests;
     std::vector<ListRecordingsForUriRequest> list_recordings_for_uri_requests;
+    std::vector<ReplicateRequest> replicate_requests;
+    std::vector<StopReplicationRequest> stop_replication_requests;
     std::vector<ReplayRequest> start_replay_requests;
     std::vector<BoundedReplayRequest> bounded_replay_requests;
     std::vector<StopReplayRequest> stop_replay_requests;
@@ -510,6 +528,48 @@ public:
     AttachSegmentsEncoder encoder;
     encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
     encoder.controlSessionId(control_session_id).correlationId(correlation_id).recordingId(recording_id);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_replicate(std::int64_t control_session_id, std::int64_t correlation_id,
+                                                         std::int64_t src_recording_id, std::int64_t dst_recording_id,
+                                                         std::int64_t stop_position, std::int32_t src_stream_id,
+                                                         const std::string& src_control_channel,
+                                                         const std::string& replication_channel,
+                                                         std::int32_t file_io_max_length,
+                                                         std::int32_t replication_session_id)
+{
+    std::vector<std::uint8_t> buffer(1024, 0);
+    ReplicateRequest2Encoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id)
+        .correlationId(correlation_id)
+        .srcRecordingId(src_recording_id)
+        .dstRecordingId(dst_recording_id)
+        .stopPosition(stop_position)
+        .channelTagId(-1)
+        .subscriptionTagId(-1)
+        .srcControlStreamId(src_stream_id)
+        .fileIoMaxLength(file_io_max_length)
+        .replicationSessionId(replication_session_id);
+    encoder.putSrcControlChannel(src_control_channel.data(), static_cast<std::uint32_t>(src_control_channel.size()));
+    encoder.putLiveDestination("", 0);
+    encoder.putReplicationChannel(replication_channel.data(), static_cast<std::uint32_t>(replication_channel.size()));
+    encoder.putEncodedCredentials("", 0);
+    encoder.putSrcResponseChannel("", 0);
+    buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
+    return buffer;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_stop_replication(std::int64_t control_session_id,
+                                                                std::int64_t correlation_id,
+                                                                std::int64_t replication_id)
+{
+    std::vector<std::uint8_t> buffer(64, 0);
+    StopReplicationEncoder encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.controlSessionId(control_session_id).correlationId(correlation_id).replicationId(replication_id);
     buffer.resize(static_cast<std::size_t>(8 + encoder.encodedLength()));
     return buffer;
 }
@@ -1163,6 +1223,37 @@ TEST_F(ControlSessionAdapterTest, thePagingListingRequestsReachTheHandler)
     EXPECT_EQ(2, handler_.list_recordings_for_uri_requests[0].record_count);
     EXPECT_EQ(33, handler_.list_recordings_for_uri_requests[0].stream_id);
     EXPECT_EQ("endpoint=localhost:3333", handler_.list_recordings_for_uri_requests[0].channel_fragment);
+}
+
+TEST_F(ControlSessionAdapterTest, theReplicationRequestsReachTheHandler)
+{
+    const std::vector<std::uint8_t> connect = encode_connect(5, "aeron:ipc", "", "");
+    ASSERT_EQ(1, adapter_->on_fragment(connect.data(), static_cast<std::int32_t>(connect.size()), &image_));
+    ASSERT_TRUE(handler_.session);
+    handler_.session->set_state(ControlSession::State::authenticated, "test");
+
+    const auto replicate = encode_replicate(7, 80, 9, -1, -1, 33, "aeron:udp?endpoint=localhost:8010",
+                                            "aeron:udp?endpoint=localhost:8012", 4096, 2);
+    EXPECT_EQ(1, adapter_->on_fragment(replicate.data(), static_cast<std::int32_t>(replicate.size()), &image_));
+
+    ASSERT_EQ(1u, handler_.replicate_requests.size());
+    const ReplicateRequest& decoded = handler_.replicate_requests[0];
+    EXPECT_EQ(80, decoded.correlation_id);
+    EXPECT_EQ(9, decoded.src_recording_id);
+    EXPECT_EQ(-1, decoded.dst_recording_id);
+    EXPECT_EQ(33, decoded.src_control_stream_id);
+    EXPECT_EQ("aeron:udp?endpoint=localhost:8010", decoded.src_control_channel);
+    EXPECT_EQ("aeron:udp?endpoint=localhost:8012", decoded.replication_channel);
+    EXPECT_EQ(4096, decoded.file_io_max_length);
+    EXPECT_EQ(2, decoded.replication_session_id);
+    EXPECT_TRUE(decoded.encoded_credentials.empty());
+    EXPECT_EQ(ControlSession::State::active, handler_.session->state());
+
+    const auto stop = encode_stop_replication(7, 81, 2);
+    EXPECT_EQ(1, adapter_->on_fragment(stop.data(), static_cast<std::int32_t>(stop.size()), &image_));
+    ASSERT_EQ(1u, handler_.stop_replication_requests.size());
+    EXPECT_EQ(81, handler_.stop_replication_requests[0].correlation_id);
+    EXPECT_EQ(2, handler_.stop_replication_requests[0].replication_id);
 }
 
 TEST_F(ControlSessionAdapterTest, anUnsupportedTemplateIsNamedAndDropped)

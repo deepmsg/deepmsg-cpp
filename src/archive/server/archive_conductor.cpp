@@ -17,6 +17,7 @@
 #include "archive/server/channel_uri.h"
 #include "archive/server/frame_layout.h"
 #include "archive/server/recording_pos.h"
+#include "archive/server/replication_validation.h"
 #include "archive/server/segment_files.h"
 #include "archive/server/segment_validation.h"
 #include "core/deepmsg/image_handlers.h"
@@ -73,6 +74,8 @@ constexpr std::int64_t INVALID_EXTENSION = 9;
 constexpr std::int64_t STORAGE_SPACE = 11;
 constexpr std::int64_t EMPTY_RECORDING = 15;
 constexpr std::int64_t INVALID_POSITION = 16;
+/// `ArchiveException.UNKNOWN_REPLICATION` (`ArchiveException.java:89`).
+constexpr std::int64_t UNKNOWN_REPLICATION = 12;
 constexpr std::int64_t MAX_REPLAYS = 7;
 
 /// `Aeron.NULL_VALUE` / `Aeron.NULL_POSITION` / `AERON_NULL_COUNTER_ID`.
@@ -444,6 +447,8 @@ void ArchiveConductor::close()
     recorder_.close();
     replayer_.close();
     replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
+    replication_sessions_ = SessionWorker<ReplicationSession>{};
+    replication_session_by_id_.clear();
     list_recordings_sessions_ = SessionWorker<ListRecordingsSession>{};
     delete_sessions_ = SessionWorker<DeleteSegmentsSession>{};
     delete_session_by_recording_id_.clear();
@@ -506,6 +511,12 @@ int ArchiveConductor::do_work()
     work_count += replay_publication_sessions_.do_work([](CreateReplayPublicationSession&) {});
     work_count += replayer_.do_work([this](ReplaySession& session) { close_replay_session(session); });
     work_count += delete_sessions_.do_work([](DeleteSegmentsSession& session) { session.close(); });
+    work_count += replication_sessions_.do_work(
+        [this](ReplicationSession& session)
+        {
+            replication_session_by_id_.erase(session.session_id());
+            session.close();
+        });
     work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
     work_count += sessions_.do_work(
         [this](ControlSession& session)
@@ -2676,6 +2687,108 @@ void ArchiveConductor::on_attach_segments(const RecordingIdRequest& request)
     }
 
     session->send_ok_response(request.correlation_id, count);
+}
+
+void ArchiveConductor::on_replicate(const ReplicateRequest& request)
+{
+    // `ControlSession.onReplicate` (`ControlSession.java:490-500`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.replicate` (`:1385-1478`).
+    const std::string replication_channel =
+        request.replication_channel.empty() ? context_.replication_channel : request.replication_channel;
+
+    if (const auto refusal = validate_replication_channel_configured(replication_channel))
+    {
+        session->send_error_response(request.correlation_id, refusal->code, refusal->message);
+        return;
+    }
+
+    const bool has_tags = NULL_VALUE != request.channel_tag_id || NULL_VALUE != request.subscription_tag_id;
+    if (const auto refusal = validate_replication_channel(is_mds_response_channel(replication_channel),
+                                                          !request.live_destination.empty(), has_tags))
+    {
+        session->send_error_response(request.correlation_id, refusal->code, refusal->message);
+        return;
+    }
+
+    const bool has_recording = catalog_.has_recording(request.dst_recording_id);
+    bool is_active_recording = false;
+    if (has_recording)
+    {
+        const RecordingSummary summary = catalog_.recording_summary(request.dst_recording_id);
+        is_active_recording =
+            NULL_POSITION == summary.stop_position ||
+            sessions_by_recording_id_.find(request.dst_recording_id) != sessions_by_recording_id_.end();
+    }
+
+    if (const auto refusal =
+            validate_replication_destination(request.dst_recording_id, has_recording, is_active_recording))
+    {
+        session->send_error_response(request.correlation_id, refusal->code, refusal->message);
+        return;
+    }
+
+    ReplicationConfig config;
+    config.control_session_id = session->session_id();
+    config.replication_id = next_session_id_++;
+    config.src_recording_id = request.src_recording_id;
+    config.dst_recording_id = request.dst_recording_id;
+    config.stop_position = request.stop_position;
+    config.channel_tag_id = request.channel_tag_id;
+    config.subscription_tag_id = request.subscription_tag_id;
+    config.src_control_stream_id = request.src_control_stream_id;
+    config.file_io_max_length = request.file_io_max_length;
+    config.replication_session_id = request.replication_session_id;
+    config.src_control_channel = request.src_control_channel;
+    config.live_destination = request.live_destination;
+    config.replication_channel = replication_channel;
+    config.src_response_channel = request.src_response_channel;
+    config.encoded_credentials = request.encoded_credentials;
+
+    auto replication = std::make_unique<ReplicationSession>(config);
+    replication_session_by_id_[config.replication_id] = replication.get();
+    replication_sessions_.add(std::move(replication));
+
+    // `:1474-1477`: the OK carries the replication id, not the outcome.
+    session->send_ok_response(request.correlation_id, config.replication_id);
+}
+
+void ArchiveConductor::on_stop_replication(const StopReplicationRequest& request)
+{
+    // `ControlSession.onStopReplication` (`ControlSession.java:502-510`).
+    ControlSession* session = request.session;
+    if (nullptr == session)
+    {
+        return;
+    }
+    session->attempt_to_activate();
+    if (ControlSession::State::active != session->state())
+    {
+        return;
+    }
+
+    // `ArchiveConductor.stopReplication` (`:1480-1493`).
+    const auto found = replication_session_by_id_.find(request.replication_id);
+    if (found == replication_session_by_id_.end())
+    {
+        session->send_error_response(request.correlation_id, UNKNOWN_REPLICATION,
+                                     "unknown replication id " + std::to_string(request.replication_id));
+        return;
+    }
+
+    found->second->abort("stop replication");
+    replication_session_by_id_.erase(found);
+    session->send_ok_response(request.correlation_id, 0);
 }
 
 void ArchiveConductor::on_list_recordings(const ListRecordingsRequest& request)

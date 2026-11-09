@@ -23,6 +23,8 @@ axc_add_library(axc_archive_server
         segment_validation.cpp
         list_recordings_session.cpp
         replication_client.cpp
+        replication_session.cpp
+        replication_validation.cpp
         recording_writer.cpp
         recording_reader.cpp
         replay_publication.cpp

@@ -30,6 +30,7 @@
 #include "io_aeron_archive_codecs/RecordingPositionRequest.h"
 #include "io_aeron_archive_codecs/ReplayRequest.h"
 #include "io_aeron_archive_codecs/ReplayTokenRequest.h"
+#include "io_aeron_archive_codecs/ReplicateRequest2.h"
 #include "io_aeron_archive_codecs/StartPositionRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest.h"
 #include "io_aeron_archive_codecs/StartRecordingRequest2.h"
@@ -39,6 +40,7 @@
 #include "io_aeron_archive_codecs/StopRecordingRequest.h"
 #include "io_aeron_archive_codecs/StopRecordingSubscriptionRequest.h"
 #include "io_aeron_archive_codecs/StopReplayRequest.h"
+#include "io_aeron_archive_codecs/StopReplicationRequest.h"
 #include "io_aeron_archive_codecs/TruncateRecordingRequest.h"
 #include "io_aeron_archive_codecs/UpdateChannelRequest.h"
 
@@ -807,6 +809,85 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
             if (found != sessions_.end() && found->second.image == image)
             {
                 found->second.session->abort(ControlSession::SESSION_CLOSED_MSG);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_REPLICATE_2:
+        {
+            // `ControlSessionAdapter.java:965-1019`. The v7/v8/v10 fields are
+            // absent on older requests; the reference substitutes
+            // `Aeron.NULL_VALUE` for the scalars.
+            archive_codecs::ReplicateRequest2 decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            ReplicateRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            const auto acting_version = static_cast<std::uint64_t>(header.version());
+            request.correlation_id = decoder.correlationId();
+            request.src_recording_id = decoder.srcRecordingId();
+            request.dst_recording_id = decoder.dstRecordingId();
+            request.stop_position = decoder.stopPosition();
+            request.channel_tag_id = decoder.channelTagId();
+            request.subscription_tag_id = decoder.subscriptionTagId();
+            request.src_control_stream_id = decoder.srcControlStreamId();
+            request.file_io_max_length =
+                acting_version >= archive_codecs::ReplicateRequest2::fileIoMaxLengthSinceVersion()
+                    ? decoder.fileIoMaxLength()
+                    : -1;
+            request.replication_session_id =
+                acting_version >= archive_codecs::ReplicateRequest2::replicationSessionIdSinceVersion()
+                    ? decoder.replicationSessionId()
+                    : -1;
+
+            // Variable-length fields advance the decoder, so read them in
+            // schema order.
+            request.src_control_channel = decoder.getSrcControlChannelAsString();
+            request.live_destination = decoder.getLiveDestinationAsString();
+            request.replication_channel = decoder.getReplicationChannelAsString();
+            if (acting_version >= archive_codecs::ReplicateRequest2::encodedCredentialsSinceVersion())
+            {
+                request.encoded_credentials = decoder.getEncodedCredentialsAsString();
+            }
+            request.src_response_channel = decoder.getSrcResponseChannelAsString();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_replicate(request);
+            }
+            return 1;
+        }
+
+        case TEMPLATE_STOP_REPLICATION:
+        {
+            // `ControlSessionAdapter.java:706-724`.
+            archive_codecs::StopReplicationRequest decoder;
+            decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(body)), 0,
+                                  static_cast<std::uint64_t>(block_length), header.version(),
+                                  static_cast<std::uint64_t>(length - MESSAGE_HEADER_LENGTH));
+
+            StopReplicationRequest request;
+            request.session = control_session(decoder.controlSessionId(), image, template_id, decoder.correlationId());
+            if (nullptr == request.session)
+            {
+                return 0;
+            }
+
+            request.correlation_id = decoder.correlationId();
+            request.replication_id = decoder.replicationId();
+
+            request.session->attempt_to_activate();
+            if (ControlSession::State::active == request.session->state())
+            {
+                handler_.on_stop_replication(request);
             }
             return 1;
         }

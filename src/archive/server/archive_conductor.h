@@ -28,6 +28,7 @@
 #include "archive/server/recording_events.h"
 #include "archive/server/replay_session.h"
 #include "archive/server/replayer.h"
+#include "archive/server/replication_session.h"
 #include "archive/server/segment_validation.h"
 #include "archive/server/session_worker.h"
 #include "core/counters/counter_target.h"
@@ -136,6 +137,8 @@ public:
     void on_migrate_segments(const MigrateSegmentsRequest& request) override;
     void on_list_recordings(const ListRecordingsRequest& request) override;
     void on_list_recordings_for_uri(const ListRecordingsForUriRequest& request) override;
+    void on_replicate(const ReplicateRequest& request) override;
+    void on_stop_replication(const StopReplicationRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;
@@ -427,6 +430,10 @@ private:
     /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
     std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
+
+    // Replication (A4b).
+    SessionWorker<ReplicationSession> replication_sessions_;
+    std::unordered_map<std::int64_t, ReplicationSession*> replication_session_by_id_;
 
     // Listing (A3a).
     SessionWorker<ListRecordingsSession> list_recordings_sessions_;
