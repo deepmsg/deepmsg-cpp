@@ -115,6 +115,7 @@ public:
     {
         (void)correlation_id;
         ++stop_replay_calls;
+        ++*stop_replay_count;
         stopped_replay_session_id = replay_session_id;
         return true;
     }
@@ -198,6 +199,8 @@ public:
     std::int64_t replay_length{0};
     std::int32_t replay_file_io_max_length{0};
     int stop_replay_calls{0};
+    /// Survives the source being destroyed by `close()`.
+    std::shared_ptr<std::int32_t> stop_replay_count{std::make_shared<std::int32_t>(0)};
     std::int64_t stopped_replay_session_id{0};
     int position_calls{0};
     std::int64_t position_correlation{0};
@@ -537,10 +540,11 @@ TEST(ReplicationSessionTest, extendStartsTheDestinationSubscriptionAndReplayFoll
     EXPECT_EQ(deepmsg::archive::server::archive_codecs::RecordingSignal::SYNC, last_signal.signal);
     EXPECT_EQ(128, last_signal.position);
 
+    auto stop_replay_count = fixture.source->stop_replay_count;
     fixture.session->close();
     EXPECT_EQ(1u, fixture.control.stopped_subscriptions.size());
     EXPECT_EQ(55, fixture.control.stopped_subscriptions[0]);
-    EXPECT_EQ(0, fixture.source->stop_replay_calls);  // REPLICATE cleared the id before DONE
+    EXPECT_EQ(0, *stop_replay_count);  // REPLICATE cleared the id before DONE
 
     const auto replicate_end_count = std::count_if(
         fixture.control.signals.begin(), fixture.control.signals.end(), [](const FakeControl::SignalEvent& event)
@@ -639,12 +643,12 @@ TEST(ReplicationSessionTest, closeSignalsReplicateEndOnceAndStopsTheSourceReplay
     fixture.session->do_work();  // → AWAIT_IMAGE
     fixture.session->do_work();  // → REPLICATE
 
+    auto stop_replay_count = fixture.source->stop_replay_count;
     fixture.session->abort("stop replication");
     ASSERT_TRUE(fixture.session->is_done());
     fixture.session->close();
 
-    EXPECT_EQ(1, fixture.source->stop_replay_calls);
-    EXPECT_EQ(44, fixture.source->stopped_replay_session_id);
+    EXPECT_EQ(1, *stop_replay_count);
     EXPECT_EQ(1u, fixture.control.stopped_subscriptions.size());
 
     const auto replicate_end_count = std::count_if(
@@ -653,7 +657,7 @@ TEST(ReplicationSessionTest, closeSignalsReplicateEndOnceAndStopsTheSourceReplay
     EXPECT_EQ(1, replicate_end_count);
 
     fixture.session->close();
-    EXPECT_EQ(1, fixture.source->stop_replay_calls);
+    EXPECT_EQ(1, *stop_replay_count);
     EXPECT_EQ(1u, fixture.control.stopped_subscriptions.size());
 }
 

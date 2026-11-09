@@ -15,7 +15,26 @@ commit.
 | control protocol request/response | `aeron-archive-codecs.xml` | A2a |
 | `recording.log` | `RecordingLog.java` | C1a: `test/golden/cluster/recording-log/{mixed,backfill}` (reference-written) + `RecordingLogTest`/`RecordingLogGoldenTest` + `ClusterTool recording-log` interop over a file we wrote |
 | `node-state.dat` | `aeron-cluster-node-state-codecs.xml` | C1a: `test/golden/cluster/node-state/{fresh,updated}` (reference-written, reproduced byte for byte) + `v1_42_x` forward-compat resource + `NodeStateFileTest` |
+| `ReplicateRequest2` (66) / `StopReplicationRequest` (51): v7 `fileIoMaxLength`, v8 `replicationSessionId`/`encodedCredentials`, v10 `srcResponseChannel`, read in schema order | `aeron-archive-codecs.xml` (schema 101) | A4b: adapter arm tests + `ReplicationInteropTest`; the four C replication cases |
+| replication channel rewrites: `rejoin=false`, `session-id=<replaySessionId>`, wildcard-port substitution from the subscription's resolved endpoint | `ReplicationSession.java:527-568`, `:727-744`; `ChannelUri.java:613-636` | A4b: `ReplicationSessionTest` channel cases + the four C replication cases |
+| destination recording descriptor copied from the source descriptor (`addNewRecording` / `replaceRecording`) | `ReplicationSession.java:349-394` | A4b: `ReplicationSessionTest` (row fields) + the C cases (the destination replay reads the frames back) |
 | `cluster-mark*.dat` | `aeron-cluster-mark-codecs.xml` | C1b |
 | cluster counters 200–241 key layout | `ClusterCounters` | C1b |
 | timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
 | ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
+
+## Known gaps (A4b, 2026-11-09)
+
+Deliberately not implemented; none of them is reachable from the reference C
+cases this card is judged by, and each fails loudly rather than silently:
+
+- `ReplicateRequest` (50) and `TaggedReplicateRequest` (62) arms — the C client
+  sends `ReplicateRequest2` (66) only.
+- live merge: `CATCHUP` / `ATTEMPT_LIVE_JOIN` and the `MERGE` signal — a
+  `live_destination` request ends with "live merge is not implemented".
+- response-channel replication: `REPLAY_TOKEN` (105) and the second
+  publication `GET_ARCHIVE_PROXY` builds — a response-mode replication channel
+  ends with "response-channel replication is not implemented".
+- the `encodedCredentials` challenge/response chain for the source client: the
+  request's credentials are supplied as-is (the reference's
+  `ReplicationCredentialsSupplier` does the same for a non-challenging source).

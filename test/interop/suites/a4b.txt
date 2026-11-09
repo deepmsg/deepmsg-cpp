@@ -1,0 +1,55 @@
+# A4b (archive-to-archive replication) criteria: the reference C suite cases
+# this card is judged by, run against our binary with test/interop/run-c-suite.sh.
+#
+# The reference C suite is built once against the shim (see a2b.txt); the shim
+# maps `io.aeron.archive.ArchivingMediaDriver` to build/<preset>/apps/
+# deepmsg-archive-server/deepmsg-archive-server. `AXC_SHIM_DEEPMSG_IDS` selects
+# each archive by `-Daeron.archive.id` (empty = all ours), so the same four
+# cases run in all three pairings:
+#
+#   test/interop/run-c-suite.sh debug --gtest_filter='\
+#     AeronCArchiveTest.shouldRecordReplicateThenReplay:\
+#     AeronCArchiveTest.shouldRecordReplicateTwice:\
+#     AeronCArchive/AeronCArchiveParamTest.shouldRecordReplicateThenStop/*'
+#
+#   default                                  deepmsg -> deepmsg  4/4 green
+#   AXC_SHIM_DEEPMSG_IDS=-7777               java    -> deepmsg  4/4 green
+#   AXC_SHIM_DEEPMSG_IDS=42                  deepmsg -> java    4/4 green
+#
+# Round readings at the A4b close (2026-11-09):
+#   * `AeronCArchiveTest` (46 cases, the merge-from-replay-to-live case
+#     included): 46 green -- it was the last red and passes now.
+#   * the whole `aeron_archive_test` binary (80 cases, merge family included):
+#     80 green.
+#   * persistent subscription: 79/80 (red = `canFallbackToReplayAfterStartingFromLive`,
+#     the upstream drop-wait race named in a3b.txt, not archive behaviour).
+#   * resilience: 50/50.
+#
+# Not expressible in the C suite (unit tests instead,
+# `test/unit/archive/server/replication_session_test.cpp`):
+#   * the state machine transitions and the state each signal goes out in
+#   * the destination row fields copied from the source descriptor
+#   * `replaceRecording` for an existing empty destination recording
+#   * an unknown source recording (`UNKNOWN_RECORDING` with the replication id)
+#   * `fileIoMaxLength` smaller than the descriptor's mtu
+#   * the channel rewrites (`rejoin=false`, `session-id`, wildcard port)
+#   * `close()` cancelling an in-flight extend
+#
+# Known gaps, recorded in `docs/compat.md` and failed loudly at runtime:
+#   * `ReplicateRequest` (50) / `TaggedReplicateRequest` (62) arms
+#   * live merge (`CATCHUP` / `ATTEMPT_LIVE_JOIN`, `MERGE`)
+#   * response-channel replication (`REPLAY_TOKEN` / `GET_ARCHIVE_PROXY` body)
+
+# Source recording stopped, replicate a copy to the destination, SYNC, then
+# replay the copy on the destination: 10 messages and image.position == stop.
+AeronCArchiveTest.shouldRecordReplicateThenReplay
+
+# Bounded first replication (stop_position = halfway, replication_session_id =
+# 1) then a second one (id 2): two REPLICATE_END signals, no replay.
+AeronCArchiveTest.shouldRecordReplicateTwice
+
+# Live source: REPLICATE + EXTEND, replay from the destination, stop the
+# replication (try_stop false for a bogus id, true for the real one), the
+# destination recording stops at the stop position, REPLICATE_END.
+AeronCArchive/AeronCArchiveParamTest.shouldRecordReplicateThenStop/0
+AeronCArchive/AeronCArchiveParamTest.shouldRecordReplicateThenStop/1
