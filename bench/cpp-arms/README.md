@@ -5,16 +5,20 @@
 follows `deepmsg/bench/archive-vs-java/`; the arms and the decision rule are
 frozen in `PREREG.md` before the baseline is measured.
 
-    run-batch.sh --quick              # s2, x-c, fsync=0, 25K:32, 5 iterations
+    run-batch.sh --quick              # s1, x-c, fsync=0, 25K:32, 5 iterations
     run-batch.sh --list               # every cell the defaults would produce
     run-batch.sh --arms j,j-c,x-c,x-j --fsync 0,2 --rounds 2
     read.py <results-dir> [--stat e_lt_p99|p50|p99.9|…]
 
-The archive is always an external process for the three arms that do not own it:
-`j` launches the reference archive in the node's own JVM, `j-c`/`x-c`/`x-j` start
-one before the node and the node connects to it through `patches/external-archive.patch`.
-`patches/install.sh --check|--apply|--revert` is the only way that patch moves,
-and `--check` verifies the source and the built jar agree.
+Scenarios: `s2` is the reference's live-replay (node archives and replays),
+`s1` its live-recording (the client owns the recording and paces itself on the
+archive's recording events; the far end only echoes). The archive is always an
+external process for the three arms that do not own it: `j` launches the
+reference archive in the node's (s2) or client's (s1) own JVM, and
+`j-c`/`x-c`/`x-j` start one before the node and the owner connects to it through
+`patches/external-archive{,-s1}.patch`. `patches/install.sh --check|--apply|--revert`
+is the only way those patches move, and `--check` verifies each source and the
+built jar agree.
 
 Fairness rules (perf spec §6.2): same machine, same core map, same idle
 strategy, same disk; every batch writes `fingerprint.txt` (binary digests,

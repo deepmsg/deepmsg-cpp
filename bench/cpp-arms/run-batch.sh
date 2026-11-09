@@ -68,6 +68,7 @@ while [ $# -gt 0 ]; do
         --list) list=1; shift ;;
         --quick)
             quick=1
+            scenario=s1
             arms=x-c
             fsync_levels=0
             rate=25K
@@ -83,12 +84,8 @@ out=${out:-$BENCH_OUT_DIR/cpp-arms/$(date +%Y-%m-%d)-$(hostname -s)}
 IFS=',' read -ra arm_list <<<"$arms"
 IFS=',' read -ra fsync_list <<<"$fsync_levels"
 
-if [ "$scenario" = s1 ]; then
-    echo "s1 (live-recording) needs the second external-archive patch; not in this slice" >&2
-    exit 2
-fi
-if [ "$scenario" != s2 ]; then
-    echo "unknown scenario $scenario (s2)" >&2
+if [ "$scenario" != s1 ] && [ "$scenario" != s2 ]; then
+    echo "unknown scenario $scenario (s1, s2)" >&2
     exit 2
 fi
 
@@ -135,7 +132,7 @@ aeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0
 aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0
 aeron.archive.file.sync.level=$fsync
 aeron.archive.catalog.file.sync.level=$fsync
-aeron.archive.recording.events.enabled=false
+aeron.archive.recording.events.enabled=$([ "$scenario" = s1 ] && echo true || echo false)
 aeron.archive.threading.mode=DEDICATED
 aeron.archive.idle.strategy=spin
 aeron.archive.recorder.idle.strategy=noop
@@ -144,6 +141,13 @@ aeron.archive.conductor.cycle.threshold=1ms
 aeron.archive.recorder.cycle.threshold=1ms
 aeron.archive.replayer.cycle.threshold=1ms
 EOF
+    # The reference refuses `recording.events.enabled=true` with no channel
+    # (`Archive.java:1240-1245`), and its own `live-recording-client` names
+    # `aeron:ipc`; the archive side must name the same channel or the two ends
+    # subscribe to nothing.
+    if [ "$scenario" = s1 ]; then
+        echo 'aeron.archive.recording.events.channel=aeron:ipc' >>"$dir/archive.properties"
+    fi
 
     cat >"$dir/driver-override.properties" <<EOF
 aeron.dir=$BENCH_AERON_DIR
@@ -233,6 +237,10 @@ _start_node() {
     case "$arm" in
         j-c|x-c|x-j) external="-Dio.aeron.benchmarks.aeron.archive.external=true" ;;
     esac
+    # S2's far end archives and replays; S1's just echoes, and the client owns
+    # the recording. Same two channels, same two properties, different class.
+    local node=$BENCHMARKS_ARCHIVE_NODE
+    [ "$scenario" = s1 ] && node=$BENCHMARKS_ECHO_NODE
     JVM_OPTS="-Daeron.dir=$BENCH_AERON_DIR \
 -Dio.aeron.benchmarks.aeron.destination.channel=aeron:udp?endpoint=localhost:$destination_port|mtu=1408 \
 -Dio.aeron.benchmarks.aeron.source.channel=aeron:udp?endpoint=localhost:$source_port|mtu=1408 \
@@ -245,14 +253,18 @@ _start_node() {
 -Daeron.archive.catalog.file.sync.level=$_fsync \
 -Dio.aeron.benchmarks.output.directory=$dir \
 $external" \
-        taskset -c "$BENCH_NODE_CPU" "$BENCHMARKS_ARCHIVE_NODE" >"$dir/node.log" 2>&1 &
+        taskset -c "$BENCH_NODE_CPU" "$node" >"$dir/node.log" 2>&1 &
     _node_pid=$!
     disown "$_node_pid" 2>/dev/null || true
     sleep 0.5
 }
 
 _run_client() {
-    local dir=$1 run=$2
+    local arm=$1 dir=$2 run=$3
+    # S1's client is the one that owns the recording (and, for arm `j`, the
+    # archive); S2's speaks the live-replay protocol to the node.
+    local client=$BENCHMARKS_ECHO_CLIENT
+    [ "$scenario" = s1 ] && client=$BENCHMARKS_LIVE_RECORDING_CLIENT
     # The client is the other end of the two channels the cell measures, so it
     # has to be told what they are: `LiveReplayMessageTransceiver` publishes to
     # `destinationChannel()` and subscribes to `sourceChannel()`, and without
@@ -261,13 +273,24 @@ _run_client() {
     # cell: the node's IPC publication was linked (32 MiB window) but its
     # destination subscription never saw a publication, and both ends sat in
     # `awaitConnected` for the full 60 s.
+    #
+    # In S1 the same patch switch tells the client whether its recording archive
+    # is one it launches (`j`) or an external process, and the archive directory
+    # is the one the launch-or-connect decision reads.
+    local external=""
+    case "$arm" in
+        j-c|x-c|x-j) external="-Dio.aeron.benchmarks.aeron.archive.external=true" ;;
+    esac
     JVM_OPTS="-Daeron.dir=$BENCH_AERON_DIR \
 -Dio.aeron.benchmarks.aeron.embedded.media.driver=false \
 -Dio.aeron.benchmarks.aeron.destination.channel=aeron:udp?endpoint=localhost:$destination_port|mtu=1408 \
 -Dio.aeron.benchmarks.aeron.source.channel=aeron:udp?endpoint=localhost:$source_port|mtu=1408 \
 -Dio.aeron.benchmarks.aeron.record.channel=aeron:ipc \
+-Daeron.archive.dir=$archive_dir \
+-Daeron.archive.replication.channel=aeron:udp?endpoint=localhost:0 \
+$external \
 -Dio.aeron.benchmarks.output.directory=$dir/run-$run \
--Dio.aeron.benchmarks.output.file=s2 \
+-Dio.aeron.benchmarks.output.file=$scenario \
 -Dio.aeron.benchmarks.message.rate=$rate \
 -Dio.aeron.benchmarks.warmup.message.rate=${rate} \
 -Dio.aeron.benchmarks.iterations=$iterations \
@@ -278,7 +301,7 @@ _run_client() {
 -Dio.aeron.benchmarks.output.time.unit=MICROSECONDS \
 -Daeron.archive.control.channel=aeron:udp?endpoint=localhost:$control_port \
 -Daeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0" \
-        taskset -c "$BENCH_RIG_CPU" "$BENCHMARKS_ECHO_CLIENT" >"$dir/run-$run/client.log" 2>&1
+        taskset -c "$BENCH_RIG_CPU" "$client" >"$dir/run-$run/client.log" 2>&1
 }
 
 _write_run_info() {
@@ -294,7 +317,7 @@ _write_run_info() {
         echo "record          aeron:ipc"
         echo "fsync           $_fsync (file + catalog)"
         echo "archive idle    conductor=spin recorder=noop replayer=noop, threading=DEDICATED"
-        echo "events          false (s2)"
+        echo "events          $([ "$scenario" = s1 ] && echo 'true (s1, aeron:ipc)' || echo 'false (s2)')"
         echo "cores           driver indices $BENCH_DRIVER_CPU_INDICES, node $BENCH_NODE_CPU, rig $BENCH_RIG_CPU"
         echo "rate/length     $rate msg/s, $length bytes, $iterations iterations ($warmup_iterations warmup)"
         for f in "$dir/archive.properties" "$dir/driver-override.properties"; do
@@ -339,7 +362,7 @@ _run_cell() {
     local ok=1
     for run in $(seq 1 "$runs"); do
         mkdir -p "$cell_dir/run-$run"
-        if ! _run_client "$cell_dir" "$run"; then
+        if ! _run_client "$arm" "$cell_dir" "$run"; then
             echo "  run $run: the client failed" >&2
             ok=0
         elif ! cell_validate "$cell_dir" "$run" "$rate" "$iterations"; then
@@ -368,8 +391,20 @@ echo "results: $out"
 
 failures=0
 for round in $(seq 1 "$rounds"); do
-    for arm in "${arm_list[@]}"; do
-        for fsync in "${fsync_list[@]}"; do
+    # ABBA: odd rounds run the arms and the fsync levels in the order given, even
+    # rounds run both reversed. Every cell of the pair is otherwise identical
+    # (`lib/README.md`; the performance spec's §6.3 says the same).
+    round_arms=("${arm_list[@]}")
+    round_fsyncs=("${fsync_list[@]}")
+    if [ 0 -eq $((round % 2)) ]; then
+        reversed_arms=(); reversed_fsyncs=()
+        for (( i=${#arm_list[@]}-1; i>=0; i-- )); do reversed_arms+=("${arm_list[$i]}"); done
+        for (( i=${#fsync_list[@]}-1; i>=0; i-- )); do reversed_fsyncs+=("${fsync_list[$i]}"); done
+        round_arms=("${reversed_arms[@]}")
+        round_fsyncs=("${reversed_fsyncs[@]}")
+    fi
+    for arm in "${round_arms[@]}"; do
+        for fsync in "${round_fsyncs[@]}"; do
             if _run_cell "$round" "$arm" "$fsync"; then
                 printf 'round-%s %-4s fsync=%s  OK\n' "$round" "$arm" "$fsync"
             else

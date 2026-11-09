@@ -38,6 +38,10 @@ BENCHMARKS_SCRIPTS_DIR="$BENCHMARKS_DIR/scripts/aeron"
 BENCHMARKS_DRIVER_JAVA="$BENCHMARKS_SCRIPTS_DIR/media-driver"
 BENCHMARKS_ECHO_CLIENT="$BENCHMARKS_SCRIPTS_DIR/live-replay-client"
 BENCHMARKS_ARCHIVE_NODE="$BENCHMARKS_SCRIPTS_DIR/archive-node"
+# S1's two ends: the echo node answers, the live-recording client records what it
+# sends and paces itself on the archive's recording events.
+BENCHMARKS_ECHO_NODE="$BENCHMARKS_SCRIPTS_DIR/echo-server"
+BENCHMARKS_LIVE_RECORDING_CLIENT="$BENCHMARKS_SCRIPTS_DIR/live-recording-client"
 
 # This build's half: one archive binary (it is the reference's `Archive.main`
 # shape, A5a) and the reference C driver it runs beside.

@@ -51,9 +51,9 @@ The 2026-11-09 decision is to do the **25K:32 band first**; the other two bands
 follow in the same file and under the same rules. `501K:32` is explicitly A6b
 (throughput), not A6a.
 
-Rounds are ABBA: `round-a` runs the arms in the order above, `round-b` runs them
-reversed. A ratio is quoted only when both rounds agree in sign; the pair of
-ratios is always printed together.
+Rounds are ABBA: `round-1` runs the arms (and fsync levels) in the order above,
+`round-2` runs both reversed. A ratio is quoted only when both rounds agree in
+sign; the pair of ratios is always printed together.
 
 ## Reading
 

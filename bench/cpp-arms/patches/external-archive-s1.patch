@@ -1,0 +1,52 @@
+diff --git a/benchmarks-aeron/src/main/java/io/aeron/benchmarks/aeron/LiveRecordingMessageTransceiver.java b/benchmarks-aeron/src/main/java/io/aeron/benchmarks/aeron/LiveRecordingMessageTransceiver.java
+index a25ea19..47e2e43 100644
+--- a/benchmarks-aeron/src/main/java/io/aeron/benchmarks/aeron/LiveRecordingMessageTransceiver.java
++++ b/benchmarks-aeron/src/main/java/io/aeron/benchmarks/aeron/LiveRecordingMessageTransceiver.java
+@@ -32,6 +32,7 @@ import org.agrona.DirectBuffer;
+ import org.agrona.concurrent.NanoClock;
+ import org.agrona.concurrent.SystemNanoClock;
+ 
++import java.io.File;
+ import java.nio.file.Path;
+ 
+ import static io.aeron.ChannelUri.addSessionId;
+@@ -81,7 +82,20 @@ public final class LiveRecordingMessageTransceiver extends MessageTransceiver im
+ 
+     public LiveRecordingMessageTransceiver(final NanoClock nanoClock, final ValueRecorder valueRecorder)
+     {
+-        this(nanoClock, valueRecorder, launchArchivingMediaDriver(), connect(), true);
++        this(nanoClock, valueRecorder, externalArchive() ? null : launchArchivingMediaDriver(), connect(), true);
++    }
++
++    /**
++     * When true this client connects to an archive somebody else runs instead of
++     * launching one of its own; the archive is reached through
++     * {@code aeron.archive.control.channel} exactly as a client reaches it, and
++     * the recording events come from the channel the reference's script names.
++     * The measured loop is untouched: the echo end, the gating on recording
++     * position and the send path are the reference's own lines.
++     */
++    private static boolean externalArchive()
++    {
++        return Boolean.getBoolean(ArchiveNode.ARCHIVE_EXTERNAL_PROP_NAME);
+     }
+ 
+     LiveRecordingMessageTransceiver(
+@@ -134,8 +148,16 @@ public final class LiveRecordingMessageTransceiver extends MessageTransceiver im
+     public void destroy()
+     {
+         final String prefix = "live-recording-client-";
++        // The same dump whichever archive this client talked to: an external
++        // archive is not an `ArchivingMediaDriver` this process owns, so its
++        // directory is named by the property every arm is given.
++        final String aeronDirectoryName = aeronArchive.context().aeron()
++            .context().aeronDirectoryName();
++        final File archiveDir = null == archivingMediaDriver
++            ? new File(System.getProperty("aeron.archive.dir", aeronDirectoryName))
++            : archivingMediaDriver.archive.context().archiveDir();
+         AeronUtil.dumpArchiveErrors(
+-            archivingMediaDriver.archive.context().archiveDir(),
++            archiveDir,
+             logsDir.resolve(prefix + "archive-errors.txt"));
+         AeronUtil.dumpAeronStats(
+             aeronArchive.context().aeron().context().cncFile(),
