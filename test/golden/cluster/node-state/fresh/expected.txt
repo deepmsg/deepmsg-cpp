@@ -1,0 +1,4 @@
+semanticVersion=768
+candidateTermId=-1
+timestamp=-1
+logPosition=-1

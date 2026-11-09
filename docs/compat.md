@@ -13,8 +13,8 @@ commit.
 | archive counters 100–117 key layout | `ArchiveCounters` / `RecordingPos` | A2b |
 | archive counters 102 (`Archive Control Sessions`), 108/109/110 (`archive-replayer max read time in ns`, `archive-replayer total read bytes`, `archive-replayer total read time in ns`) and 112 (`Archive Replay Sessions`): key = 8-byte archive id, label `<name> - archiveId=<id>` | `AeronCounters.java:751-818`, `Archive.java:1626-1730`, `ArchiveCounters.java:52-68` | A3b: `ArchiveCountersTest` (ids/key/label bytes); the C suite exercises 102 (`shouldCloseArchiveConnectionOnFailureInCaseApplicationKeepsPolling`) and the replay family |
 | control protocol request/response | `aeron-archive-codecs.xml` | A2a |
-| `recording.log` | `RecordingLog.java` | C1a |
-| `node-state.dat` | `aeron-cluster-node-state-codecs.xml` | C1a |
+| `recording.log` | `RecordingLog.java` | C1a: `test/golden/cluster/recording-log/{mixed,backfill}` (reference-written) + `RecordingLogTest`/`RecordingLogGoldenTest` + `ClusterTool recording-log` interop over a file we wrote |
+| `node-state.dat` | `aeron-cluster-node-state-codecs.xml` | C1a: `test/golden/cluster/node-state/{fresh,updated}` (reference-written, reproduced byte for byte) + `v1_42_x` forward-compat resource + `NodeStateFileTest` |
 | `cluster-mark*.dat` | `aeron-cluster-mark-codecs.xml` | C1b |
 | cluster counters 200–241 key layout | `ClusterCounters` | C1b |
 | timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
