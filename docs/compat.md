@@ -20,8 +20,8 @@ commit.
 | `ReplicateRequest2` (66) / `StopReplicationRequest` (51): v7 `fileIoMaxLength`, v8 `replicationSessionId`/`encodedCredentials`, v10 `srcResponseChannel`, read in schema order | `aeron-archive-codecs.xml` (schema 101) | A4b: adapter arm tests + `ReplicationInteropTest`; the four C replication cases |
 | replication channel rewrites: `rejoin=false`, `session-id=<replaySessionId>`, wildcard-port substitution from the subscription's resolved endpoint | `ReplicationSession.java:527-568`, `:727-744`; `ChannelUri.java:613-636` | A4b: `ReplicationSessionTest` channel cases + the four C replication cases |
 | destination recording descriptor copied from the source descriptor (`addNewRecording` / `replaceRecording`) | `ReplicationSession.java:349-394` | A4b: `ReplicationSessionTest` (row fields) + the C cases (the destination replay reads the frames back) |
-| `cluster-mark*.dat` | `aeron-cluster-mark-codecs.xml` | C1b |
-| cluster counters 200–241 key layout | `ClusterCounters` | C1b |
+| `cluster-mark*.dat` | `aeron-cluster-mark-codecs.xml` (message header + `MarkFileHeader` + var-ascii fields + error buffer) | C1b: `test/golden/cluster/mark-file/{consensus-module,container,backup}` (reference-written) + `ClusterMarkFileTest`/golden + `ClusterTool pid` interop over a file we wrote |
+| cluster counters 200–241 key layout | `ClusterCounters` / `AeronCounters.java:860-1106` | C1b: `ClusterCountersTest` (key bytes and label text for cluster, service and versioned forms; full type-id table) |
 | timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
 | ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
 

@@ -3,6 +3,10 @@ axc_add_library(axc_cluster_common
         module.cpp
         recording_log.cpp
         node_state_file.cpp
+        cluster_member.cpp
+        cluster_counters.cpp
+        cluster_config.cpp
+        cluster_mark_file.cpp
     DEPS
         axc_core
         axc_sbe)

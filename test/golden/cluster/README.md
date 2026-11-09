@@ -8,10 +8,12 @@ run's field dump; the C++ tests compare against both.
 |---|---|
 | generator (recording.log) | `analysis/cpp/records/c1a/RecordingLogGoldenGen.java` |
 | generator (node-state.dat) | `analysis/cpp/records/c1a/NodeStateGoldenGen.java` |
+| generator (cluster-mark.dat) | `analysis/cpp/records/c1b/ClusterMarkGoldenGen.java` |
 | reference | Aeron 1.54.0 = `454da1e4e6`; jar `third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar` |
 | compile | `javac -proc:none -cp <jar> -d /tmp/c1a-gen <generator>.java` |
 | recording.log | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED -cp <jar>:/tmp/c1a-gen io.aeron.cluster.RecordingLogGoldenGen test/golden/cluster/recording-log` |
 | node-state.dat | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -cp <jar>:/tmp/c1a-gen io.aeron.cluster.NodeStateGoldenGen test/golden/cluster/node-state` |
+| cluster-mark.dat | `java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -cp <jar>:/tmp/c1b-gen io.aeron.cluster.service.ClusterMarkGoldenGen test/golden/cluster/mark-file` |
 
 ## recording.log
 
@@ -56,3 +58,24 @@ forward compatibility.
 
 Regenerate only by re-running the reference generators; never edit any of these
 files by hand.
+
+## cluster-mark.dat
+
+| file | sha256 |
+|---|---|
+| `mark-file/consensus-module/cluster-mark.dat` | `cac71edae2aaefae4b92d790249374846b68a19edc33ba4d28866837b043a7aa` |
+| `mark-file/consensus-module/expected.txt` | `03d7b7f07964227076a262db6be420f41050e148c18148bcc91336fb00aca22d` |
+| `mark-file/container/cluster-mark.dat` | `fdc29ede4e254790302f1ac7f354d6eaa3d6faee4661b07be37033f29a8f6e0c` |
+| `mark-file/container/expected.txt` | `977c79adfb98141646c959ba25bf7a33da2ccec734f93941aeb5a3fa2524e9eb` |
+| `mark-file/backup/cluster-mark.dat` | `6e61ff82d2f83722cebc091dff3a5470af40c01c7ebac0b68d78d9293825e2b7` |
+| `mark-file/backup/expected.txt` | `65052b89b63d0c9c70416a0b060d9839aa37a509d1e0c91f79e75027472c4433` |
+
+Each case was created with `now = 123456`, page size 4096 and a 1 MiB error
+buffer, then `signalReady(123456)`. `pid`/`startTimestamp` are therefore fixed
+in `expected.txt` for the reference run (the pid is the generator JVM's); the
+C++ test reads the file, it does not reproduce it byte for byte because a live
+component writes its own pid and start time.
+
+`test/unit/cluster/common/cluster_mark_file_golden_test.cpp` checks every
+field, and `axc_cluster_interop_tests` has `ClusterTool pid` read a mark file
+written by our code.
