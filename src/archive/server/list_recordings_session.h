@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -28,6 +29,11 @@ public:
     [[nodiscard]] virtual bool control_session_is_done(std::int64_t control_session_id) const = 0;
     virtual void clear_active_listing(std::int64_t control_session_id) = 0;
 };
+
+/// `ArchiveConductor.newListRecordingsSession` (`ArchiveConductor.java:640-645`)
+/// and `newListRecordingsForUriSession` (`:666-671`): the one gate both paging
+/// listings share. Returns the error message to send with `ACTIVE_LISTING`.
+[[nodiscard]] std::optional<std::string> listing_start_error(bool has_active_listing);
 
 /// `ListRecordingsSession` (8) and `ListRecordingsForUriSession` (9) differ only
 /// in `accept_descriptor`; `filter_by_uri` selects that branch.

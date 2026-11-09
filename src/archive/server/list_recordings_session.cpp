@@ -6,6 +6,15 @@
 namespace deepmsg::archive::server
 {
 
+std::optional<std::string> listing_start_error(bool has_active_listing)
+{
+    if (has_active_listing)
+    {
+        return std::string{"active listing already in progress"};
+    }
+    return std::nullopt;
+}
+
 ListRecordingsSession::ListRecordingsSession(const Catalog& catalog, ListRecordingsResponses& responses,
                                              const ListRecordingsConfig& config)
     : catalog_(catalog), responses_(responses), config_(config), recording_id_(config.from_recording_id)

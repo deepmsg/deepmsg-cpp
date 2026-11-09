@@ -1,0 +1,43 @@
+# A3a (paging listings) criteria: the reference C suite cases this card is judged
+# by, run against our binary with test/interop/run-c-suite.sh.
+#
+# The reference C suite is built once against the shim (see a2b.txt); the shim
+# maps `io.aeron.archive.ArchivingMediaDriver` to build/<preset>/apps/
+# deepmsg-archive-server/deepmsg-archive-server.
+#
+# Paging subset (2/2 green at the A3a close, 2026-11-09):
+#
+#   test/interop/run-c-suite.sh debug --gtest_filter='\
+#     AeronCArchiveTest.shouldFindMultipleRecordingDescriptors:\
+#     AeronCArchiveTest.shouldFindRecordingDescriptorForUri'
+#
+# Full AeronCArchiveTest round (45 cases, still excluding the merge-from-live
+# case): 43 green / 2 red. The reds are A4b (replication) -- the whole query and
+# segment surface is green.
+#
+# Not expressible in the C suite (unit tests instead, see
+# `list_recordings_session_test.cpp`):
+#   * the cursor rules: from-id between/after recordings, the linear fallback
+#     for INT64_MIN, a deleted recording in the middle
+#   * the 64-candidate scan bound per pass
+#   * the page-size bound (`sent == count` ends silently)
+#   * count == 0
+#   * a back-pressured descriptor send keeping the cursor
+#   * the terminal RECORDING_UNKNOWN relevantId (cursor vs the unusable entry)
+#   * original-channel filtering (the C channels carry no parameters that only
+#     the original channel would have)
+#
+# The active-listing gate (`ACTIVE_LISTING`) is unit-tested through
+# `listing_start_error`; a deterministic end-to-end concurrent listing is not
+# expressible with the C client (the request creates the listing and the same
+# `do_work` drives it, so a small catalog always finishes in one pass).
+
+# Two live recordings, list from INT64_MIN: both descriptors, then a page of 1.
+AeronCArchiveTest.shouldFindMultipleRecordingDescriptors
+
+# Two live recordings, list-for-uri: "3334" -> 1, "333" -> 2, "no-match" -> 0
+# (the last one only gets an answer after the scan walks past the catalog).
+AeronCArchiveTest.shouldFindRecordingDescriptorForUri
+
+# Known red until a later card (kept here so the gap is named, not silent):
+#   shouldRecordReplicateThenReplay / shouldRecordReplicateTwice -> A4b

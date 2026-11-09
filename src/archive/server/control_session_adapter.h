@@ -205,6 +205,26 @@ struct MigrateSegmentsRequest
     ControlSession* session{nullptr};
 };
 
+/// `ListRecordingsRequest` (8) (`ControlSessionAdapter.java:275-295`).
+struct ListRecordingsRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t from_recording_id{0};
+    std::int32_t record_count{0};
+    ControlSession* session{nullptr};
+};
+
+/// `ListRecordingsForUriRequest` (9) (`ControlSessionAdapter.java:296-324`).
+struct ListRecordingsForUriRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t from_recording_id{0};
+    std::int32_t record_count{0};
+    std::int32_t stream_id{0};
+    std::string channel_fragment;
+    ControlSession* session{nullptr};
+};
+
 /// `UpdateChannelRequest` (107) (`ControlSessionAdapter.java:1107-1128`).
 struct UpdateChannelRequest
 {
@@ -263,6 +283,8 @@ public:
     virtual void on_delete_detached_segments(const RecordingIdRequest& request) = 0;
     virtual void on_purge_segments(const SegmentStartPositionRequest& request) = 0;
     virtual void on_attach_segments(const RecordingIdRequest& request) = 0;
+    virtual void on_list_recordings(const ListRecordingsRequest& request) = 0;
+    virtual void on_list_recordings_for_uri(const ListRecordingsForUriRequest& request) = 0;
     virtual void on_update_channel(const UpdateChannelRequest& request) = 0;
     virtual void on_migrate_segments(const MigrateSegmentsRequest& request) = 0;
 
@@ -318,6 +340,8 @@ public:
     static constexpr std::int32_t TEMPLATE_STOP_POSITION = 15;
     static constexpr std::int32_t TEMPLATE_START_POSITION = 52;
     static constexpr std::int32_t TEMPLATE_MAX_RECORDED_POSITION = 67;
+    static constexpr std::int32_t TEMPLATE_LIST_RECORDINGS = 8;
+    static constexpr std::int32_t TEMPLATE_LIST_RECORDINGS_FOR_URI = 9;
     static constexpr std::int32_t TEMPLATE_LIST_RECORDING = 10;
     static constexpr std::int32_t TEMPLATE_LIST_RECORDING_SUBSCRIPTIONS = 17;
     static constexpr std::int32_t TEMPLATE_FIND_LAST_MATCHING_RECORDING = 16;

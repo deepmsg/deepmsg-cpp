@@ -21,6 +21,7 @@ namespace archive_codecs = deepmsg::archive::server::archive_codecs;
 
 using deepmsg::archive::server::Catalog;
 using deepmsg::archive::server::CatalogOptions;
+using deepmsg::archive::server::listing_start_error;
 using deepmsg::archive::server::ListRecordingsConfig;
 using deepmsg::archive::server::ListRecordingsResponses;
 using deepmsg::archive::server::ListRecordingsSession;
@@ -317,6 +318,18 @@ TEST_F(ListRecordingsSessionTest, closeReleasesTheActiveListing)
     ListRecordingsSession session(*catalog_, responses_, config(0, 10));
     session.close();
     EXPECT_EQ(1, responses_.clear_calls);
+}
+
+TEST(ListRecordingsGateTest, aFreeListingSlotStartsTheSession)
+{
+    EXPECT_FALSE(listing_start_error(false).has_value());
+}
+
+TEST(ListRecordingsGateTest, anActiveListingRefusesTheSecondRequest)
+{
+    const auto error = listing_start_error(true);
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ("active listing already in progress", *error);
 }
 
 }  // namespace
