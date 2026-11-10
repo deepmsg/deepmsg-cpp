@@ -58,6 +58,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/cluster_mark_file_interop_test.cpp
         cluster/container_lc4a_interop_test.cpp
         cluster/container_snapshot_interop_test.cpp
+        cluster/container_binary_interop_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
@@ -73,7 +74,11 @@ target_include_directories(axc_cluster_interop_tests PRIVATE "${CMAKE_CURRENT_SO
 
 target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
-    "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
+    "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
+    "AXC_CONTAINER_BINARY=\"$<TARGET_FILE:deepmsg-clustered-service-container>\""
+    "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\"")
+
+add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container echo_service_dynamic)
 
 # The tool under test is an executable of its own; build it with the suite.
 add_dependencies(axc_archive_interop_tests archive-tool-ro)
