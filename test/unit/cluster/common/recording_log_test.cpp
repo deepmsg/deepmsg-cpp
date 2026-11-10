@@ -499,8 +499,9 @@ TEST_F(RecordingLogTest, shouldFindSnapshotAtOrBeforeOrLowest)
 
     constexpr std::int32_t service_count = 2;
 
+    // `service_count` is a constant expression: clang-20 warns on the capture.
     const auto assert_snapshot =
-        [service_count](const std::optional<std::vector<RecordingLog::Snapshot>>& snapshot, std::int64_t log_position)
+        [](const std::optional<std::vector<RecordingLog::Snapshot>>& snapshot, std::int64_t log_position)
     {
         ASSERT_TRUE(snapshot.has_value());
         ASSERT_EQ(static_cast<std::size_t>(service_count + 1), snapshot->size());
