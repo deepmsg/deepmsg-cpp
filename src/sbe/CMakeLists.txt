@@ -27,4 +27,18 @@ if (AXC_WITH_SBE)
     add_custom_target(axc_sbe_codecs DEPENDS ${axc_sbe_targets})
     add_dependencies(axc_sbe axc_sbe_codecs)
     target_include_directories(axc_sbe PUBLIC "${AXC_SBE_GEN_DIR}")
+
+    # C3c: `SessionEventCodecCompatibilityTest` encodes with a newer schema
+    # version and decodes with an older one. The reference generates
+    # `io.aeron.cluster.codecs.v5` / `v12` for its test source set
+    # (`build.gradle`, `generateTestCodecsV5`); this is the same transform,
+    # C++-side, used only by the unit tests.
+    set(AXC_SBE_V5_GEN_DIR "${PROJECT_BINARY_DIR}/generated/axc/sbe-v5")
+    file(MAKE_DIRECTORY "${AXC_SBE_V5_GEN_DIR}")
+    axc_sbe_generate_with(
+        "${AXC_SBE_SCHEMA_ROOT}/aeron-cluster/src/main/resources/cluster/aeron-cluster-codecs.xml"
+        "${AXC_SBE_V5_GEN_DIR}"
+        "axc_sbe_cluster_codecs_v5"
+        "-Dsbe.target.namespace=io.aeron.cluster.codecs.v5"
+        "-Dsbe.schema.transform.version=*:5")
 endif ()

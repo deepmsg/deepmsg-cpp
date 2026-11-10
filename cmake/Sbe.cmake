@@ -26,10 +26,13 @@ if (AXC_WITH_SBE)
     find_package(Java COMPONENTS Runtime REQUIRED)
 endif ()
 
-# axc_sbe_generate(<schema-file> <out-dir>) defines target axc_sbe_<name>.
-function(axc_sbe_generate schema out_dir)
-    get_filename_component(schema_name "${schema}" NAME_WE)
-    set(stamp "${out_dir}/${schema_name}.stamp")
+# axc_sbe_generate_with(<schema-file> <out-dir> <target-name> [sbe-tool args...])
+# is the one shape both the production codecs and the versioned test codecs
+# use: the extra args are what `sbe.schema.transform.version` and
+# `sbe.target.namespace` are passed through (`build.gradle` generates the
+# reference's `codecs.v5` / `codecs.v12` the same way).
+function(axc_sbe_generate_with schema out_dir target_name)
+    set(stamp "${out_dir}/${target_name}.stamp")
 
     add_custom_command(
         OUTPUT "${stamp}"
@@ -38,14 +41,23 @@ function(axc_sbe_generate schema out_dir)
                 -Dsbe.output.dir=${out_dir}
                 -Dsbe.generate.ir=false
                 -Dsbe.validation.stop.on.error=true
+                ${ARGN}
                 -jar "${AXC_SBE_JAR}"
                 "${schema}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
         DEPENDS "${schema}" "${AXC_SBE_JAR}"
-        COMMENT "SBE C++ codecs: ${schema_name}"
+        COMMENT "SBE C++ codecs: ${target_name}"
         VERBATIM)
 
-    add_custom_target(axc_sbe_${schema_name} DEPENDS "${stamp}")
+    add_custom_target(${target_name} DEPENDS "${stamp}")
+endfunction()
 
-    set_property(GLOBAL APPEND PROPERTY AXC_SBE_TARGETS axc_sbe_${schema_name})
+# axc_sbe_generate(<schema-file> <out-dir>) defines target axc_sbe_<name>.
+function(axc_sbe_generate schema out_dir)
+    get_filename_component(schema_name "${schema}" NAME_WE)
+    set(target_name "axc_sbe_${schema_name}")
+
+    axc_sbe_generate_with("${schema}" "${out_dir}" "${target_name}")
+
+    set_property(GLOBAL APPEND PROPERTY AXC_SBE_TARGETS ${target_name})
 endfunction()

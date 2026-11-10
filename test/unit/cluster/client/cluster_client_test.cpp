@@ -224,6 +224,71 @@ public:
         return last_term_id_;
     }
 
+    /// Drops the ingress subscription: the client's ingress publication turns
+    /// NOT_CONNECTED, which is the reference's
+    /// `makeIngressPublicationReturn(Publication.NOT_CONNECTED)`.
+    void close_ingress_subscription()
+    {
+        subscription_.reset();
+        (void)client_.do_work();
+    }
+
+    [[nodiscard]] bool reopen_ingress_subscription()
+    {
+        auto add = client_.add_subscription("aeron:ipc", 101);
+        std::optional<SubPtr> subscription;
+        const bool ready = pump_until(client_,
+                                      [&]
+                                      {
+                                          if (!subscription.has_value())
+                                          {
+                                              auto polled = add.poll();
+                                              if (polled && polled->has_value())
+                                              {
+                                                  subscription = std::move(**polled);
+                                              }
+                                          }
+                                          return subscription.has_value();
+                                      });
+        if (ready)
+        {
+            subscription_ = std::move(*subscription);
+        }
+        return ready;
+    }
+
+    /// Drops the egress publication: the client's egress image is closed,
+    /// which is the reference's `when(egressImage.isClosed()).thenReturn(true)`.
+    void close_egress_publication()
+    {
+        publication_.reset();
+        (void)client_.do_work();
+    }
+
+    [[nodiscard]] bool reopen_egress_publication()
+    {
+        auto add = client_.add_publication("aeron:ipc", 102);
+        std::optional<PubPtr> publication;
+        const bool ready = pump_until(client_,
+                                      [&]
+                                      {
+                                          if (!publication.has_value())
+                                          {
+                                              auto polled = add.poll();
+                                              if (polled && polled->has_value())
+                                              {
+                                                  publication = std::move(**polled);
+                                              }
+                                          }
+                                          return publication.has_value();
+                                      });
+        if (ready)
+        {
+            publication_ = std::move(*publication);
+        }
+        return ready;
+    }
+
     void pump()
     {
         if (!ready_)
@@ -232,7 +297,16 @@ public:
         }
 
         (void)client_.do_work();
-        (void)aeron_subscription_poll(subscription_.get(), &FakeCluster::on_request, this, 10);
+        // Either half can be dropped by a failover test; the other still has
+        // to work (an egress frame must reach the client with ingress gone).
+        if (nullptr != subscription_)
+        {
+            (void)aeron_subscription_poll(subscription_.get(), &FakeCluster::on_request, this, 10);
+        }
+        if (nullptr == publication_)
+        {
+            return;
+        }
 
         while (!pending_.empty())
         {
@@ -459,8 +533,17 @@ struct RecordingListener final : EgressListener
         std::string payload;
     };
 
+    struct NewLeader
+    {
+        std::int64_t session_id;
+        std::int64_t term_id;
+        std::int32_t member_id;
+        std::string endpoints;
+    };
+
     std::vector<Message> messages{};
     std::vector<codecs::EventCode::Value> events{};
+    std::vector<NewLeader> new_leaders{};
 
     void on_message(std::int64_t cluster_session_id, std::int64_t timestamp,
                     std::span<const std::uint8_t> payload) override
@@ -474,7 +557,12 @@ struct RecordingListener final : EgressListener
         events.push_back(code);
     }
 
-    void on_new_leader(std::int64_t, std::int64_t, std::int32_t, std::string_view) override {}
+    void on_new_leader(std::int64_t cluster_session_id, std::int64_t leadership_term_id, std::int32_t leader_member_id,
+                       std::string_view ingress_endpoints) override
+    {
+        new_leaders.push_back(
+            NewLeader{cluster_session_id, leadership_term_id, leader_member_id, std::string{ingress_endpoints}});
+    }
 
     void on_admin_response(std::int64_t, std::int64_t, codecs::AdminRequestType::Value,
                            codecs::AdminResponseCode::Value, std::string_view, std::span<const std::uint8_t>) override
@@ -550,6 +638,33 @@ TEST(ClusterClientTest, keepAliveCarriesTheTermAndSession)
     EXPECT_TRUE(*sent);
 
     ASSERT_TRUE(pump_session(*session, fake, [&] { return fake.keep_alives() == 1; }));
+}
+
+TEST(ClusterClientTest, aKeepAliveBetweenTwoOffersLeavesBothOnTheWire)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.ok());
+    FakeCluster fake(driver.dir());
+    ASSERT_TRUE(fake.ready());
+
+    auto session = connect_session(driver.dir(), ipc_config(), fake);
+    ASSERT_TRUE(session.has_value());
+
+    const std::string first{"first"};
+    const std::string second{"second"};
+    EXPECT_GT(session->cluster->offer(
+                  std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(first.data()), first.size())),
+              0);
+    auto sent = session->cluster->send_keep_alive();
+    ASSERT_TRUE(sent.has_value());
+    EXPECT_TRUE(*sent);
+    EXPECT_GT(session->cluster->offer(
+                  std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(second.data()), second.size())),
+              0);
+
+    ASSERT_TRUE(pump_session(*session, fake, [&] { return fake.payloads().size() == 2 && fake.keep_alives() == 1; }));
+    EXPECT_EQ("first", std::string(fake.payloads()[0].begin(), fake.payloads()[0].end()));
+    EXPECT_EQ("second", std::string(fake.payloads()[1].begin(), fake.payloads()[1].end()));
 }
 
 TEST(ClusterClientTest, closeSendsSessionCloseRequestWhenConnected)
@@ -673,6 +788,329 @@ TEST(ClusterClientTest, aDisconnectedSessionClosesAfterTheNewLeaderTimeout)
     clock.now_ns += config.new_leader_timeout_ns.value_or(20'000'000'000) - 1;
     EXPECT_EQ(0, session->cluster->poll_state_changes());
     clock.now_ns += 1;
+    EXPECT_EQ(1, session->cluster->poll_state_changes());
+    EXPECT_TRUE(session->cluster->is_closed());
+}
+
+// ---------------------------------------------------------------------------
+// C3c / XC-1: the `AeronClusterTest` cases, ported by name
+// (`aeron-cluster/src/test/java/io/aeron/cluster/client/AeronClusterTest.java`).
+//
+// The reference mocks `Aeron`, `ExclusivePublication` and `Image`; here the
+// driver is real and the scripted cluster supplies the same three states:
+// a dropped ingress subscription (publication NOT_CONNECTED), a dropped egress
+// publication (image closed) and `NewLeaderEvent` frames. The clock is
+// injected through `ClientConfig::clock`, the seam the reference uses too
+// (`ctx.nanoClock()`).
+// ---------------------------------------------------------------------------
+
+/// Pump both sides until `poll_egress()` does work, and return that call's
+/// count -- the reference's `pollEgress()` value.
+[[nodiscard]] std::optional<int> poll_first_work(Session& session, FakeCluster& fake,
+                                                 std::chrono::milliseconds timeout = std::chrono::seconds(5))
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        (void)session.client->do_work();
+        fake.pump();
+        auto polled = session.cluster->poll_egress();
+        if (!polled)
+        {
+            session.last_error = polled.error();
+            return std::nullopt;
+        }
+        if (*polled > 0)
+        {
+            return *polled;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool wait_for_ingress_connection(Session& session, bool connected,
+                                               std::chrono::milliseconds timeout = std::chrono::seconds(5))
+{
+    return pump_until(
+        *session.client, [&] { return session.cluster->ingress_publication().is_connected() == connected; }, timeout);
+}
+
+[[nodiscard]] ClientConfig failover_config(TestClock& clock)
+{
+    ClientConfig config = ipc_config();
+    config.clock = [&clock] { return clock.now_ns; };
+    // The reference's `newLeaderTimeoutNs(1s)`; the message timeout stays the
+    // 5 s default (`AeronCluster.java:1240-1241`).
+    config.new_leader_timeout_ns = 1'000'000'000;
+    return config;
+}
+
+TEST(ClusterClientTest, shouldStayConnectedAfterSuccessfulFailover)
+{
+    for (const bool with_ingress_disconnect : {false, true})
+    {
+        for (const bool with_app_messages : {false, true})
+        {
+            SCOPED_TRACE(std::string{"withIngressDisconnect="} + (with_ingress_disconnect ? "true" : "false") +
+                         " withAppMessages=" + (with_app_messages ? "true" : "false"));
+
+            EmbeddedDriver driver;
+            ASSERT_TRUE(driver.ok());
+            FakeCluster fake(driver.dir());
+            ASSERT_TRUE(fake.ready());
+
+            TestClock clock;
+            const ClientConfig config = failover_config(clock);
+            auto session = connect_session(driver.dir(), config, fake);
+            ASSERT_TRUE(session.has_value());
+            RecordingListener listener;
+            session->cluster->set_egress_listener(&listener);
+
+            if (with_ingress_disconnect)
+            {
+                fake.close_ingress_subscription();
+                ASSERT_TRUE(wait_for_ingress_connection(*session, false));
+            }
+
+            const std::uint8_t payload[] = {'a', 'p', 'p'};
+            if (with_app_messages)
+            {
+                const std::int64_t result = session->cluster->offer(payload);
+                if (with_ingress_disconnect)
+                {
+                    EXPECT_EQ(AERON_PUBLICATION_NOT_CONNECTED, result);
+                }
+                else
+                {
+                    EXPECT_GT(result, 0);
+                    // A real cluster echoes the message; the reference's mock
+                    // does not. Drain it so the next egress poll counts only
+                    // the NewLeaderEvent.
+                    ASSERT_TRUE(pump_session(*session, fake, [&] { return !listener.messages.empty(); }));
+                    listener.messages.clear();
+                }
+            }
+            else
+            {
+                auto sent = session->cluster->send_keep_alive();
+                ASSERT_TRUE(sent.has_value());
+                EXPECT_EQ(!with_ingress_disconnect, *sent);
+            }
+
+            clock.now_ns += config.new_leader_timeout_ns.value() - 1;
+
+            fake.send_new_leader_event(SESSION_ID, TERM_ID + 1, 1, "0=localhost:20000");
+            const auto polled = poll_first_work(*session, fake);
+            ASSERT_TRUE(polled.has_value())
+                << (session->last_error.has_value() ? std::string{session->last_error->message.view()}
+                                                    : std::string{"no work polled"});
+            EXPECT_EQ(1, *polled);
+            ASSERT_EQ(1U, listener.new_leaders.size());
+            EXPECT_EQ(SESSION_ID, listener.new_leaders[0].session_id);
+            EXPECT_EQ(TERM_ID + 1, listener.new_leaders[0].term_id);
+            EXPECT_EQ(1, listener.new_leaders[0].member_id);
+            EXPECT_EQ("0=localhost:20000", listener.new_leaders[0].endpoints);
+            EXPECT_EQ(ClusterClient::State::await_new_leader_connection, session->cluster->state());
+            EXPECT_EQ(0, session->cluster->poll_egress().value());
+
+            clock.now_ns += config.message_timeout_ns - 1;
+
+            if (with_ingress_disconnect)
+            {
+                ASSERT_TRUE(fake.reopen_ingress_subscription());
+            }
+            ASSERT_TRUE(wait_for_ingress_connection(*session, true));
+
+            if (with_app_messages)
+            {
+                EXPECT_GT(session->cluster->offer(payload), 0);
+            }
+            else
+            {
+                auto sent = session->cluster->send_keep_alive();
+                ASSERT_TRUE(sent.has_value());
+                EXPECT_TRUE(*sent);
+            }
+            EXPECT_EQ(ClusterClient::State::connected, session->cluster->state());
+
+            clock.now_ns += 1;
+
+            EXPECT_EQ(0, session->cluster->poll_egress().value());
+            EXPECT_FALSE(session->cluster->is_closed());
+        }
+    }
+}
+
+TEST(ClusterClientTest, shouldCloseItselfWhenDisconnectedForLongerThanNewLeaderTimeout)
+{
+    for (const bool with_app_messages : {false, true})
+    {
+        SCOPED_TRACE(std::string{"withAppMessages="} + (with_app_messages ? "true" : "false"));
+
+        EmbeddedDriver driver;
+        ASSERT_TRUE(driver.ok());
+        FakeCluster fake(driver.dir());
+        ASSERT_TRUE(fake.ready());
+
+        TestClock clock;
+        const ClientConfig config = failover_config(clock);
+        auto session = connect_session(driver.dir(), config, fake);
+        ASSERT_TRUE(session.has_value());
+
+        fake.close_ingress_subscription();
+        ASSERT_TRUE(wait_for_ingress_connection(*session, false));
+
+        const std::uint8_t payload[] = {'a', 'p', 'p'};
+        if (with_app_messages)
+        {
+            EXPECT_EQ(AERON_PUBLICATION_NOT_CONNECTED, session->cluster->offer(payload));
+        }
+        else
+        {
+            auto sent = session->cluster->send_keep_alive();
+            ASSERT_TRUE(sent.has_value());
+            EXPECT_FALSE(*sent);
+        }
+        EXPECT_EQ(ClusterClient::State::await_new_leader, session->cluster->state());
+
+        clock.now_ns += config.new_leader_timeout_ns.value() - 1;
+
+        EXPECT_EQ(0, session->cluster->poll_egress().value());
+        EXPECT_FALSE(session->cluster->is_closed());
+
+        clock.now_ns += 1;
+
+        EXPECT_EQ(1, session->cluster->poll_egress().value());
+        EXPECT_TRUE(session->cluster->is_closed());
+    }
+}
+
+TEST(ClusterClientTest, shouldCloseItselfWhenUnableToSendMessageForLongerThanNewLeaderConnectionTimeout)
+{
+    for (const bool with_app_messages : {false, true})
+    {
+        SCOPED_TRACE(std::string{"withAppMessages="} + (with_app_messages ? "true" : "false"));
+
+        EmbeddedDriver driver;
+        ASSERT_TRUE(driver.ok());
+        FakeCluster fake(driver.dir());
+        ASSERT_TRUE(fake.ready());
+
+        TestClock clock;
+        const ClientConfig config = failover_config(clock);
+        auto session = connect_session(driver.dir(), config, fake);
+        ASSERT_TRUE(session.has_value());
+
+        fake.close_ingress_subscription();
+        ASSERT_TRUE(wait_for_ingress_connection(*session, false));
+
+        const std::uint8_t payload[] = {'a', 'p', 'p'};
+        if (with_app_messages)
+        {
+            EXPECT_EQ(AERON_PUBLICATION_NOT_CONNECTED, session->cluster->offer(payload));
+        }
+        else
+        {
+            auto sent = session->cluster->send_keep_alive();
+            ASSERT_TRUE(sent.has_value());
+            EXPECT_FALSE(*sent);
+        }
+
+        clock.now_ns += config.new_leader_timeout_ns.value() / 2;
+
+        fake.send_new_leader_event(SESSION_ID, TERM_ID + 1, 1, "0=localhost:20000");
+        const auto polled = poll_first_work(*session, fake);
+        ASSERT_TRUE(polled.has_value());
+        EXPECT_EQ(1, *polled);
+        EXPECT_FALSE(session->cluster->is_closed());
+        EXPECT_EQ(ClusterClient::State::await_new_leader_connection, session->cluster->state());
+
+        clock.now_ns += config.message_timeout_ns - 1;
+        if (with_app_messages)
+        {
+            EXPECT_EQ(AERON_PUBLICATION_NOT_CONNECTED, session->cluster->offer(payload));
+        }
+        else
+        {
+            auto sent = session->cluster->send_keep_alive();
+            ASSERT_TRUE(sent.has_value());
+            EXPECT_FALSE(*sent);
+        }
+
+        clock.now_ns += 1;
+
+        EXPECT_EQ(1, session->cluster->poll_egress().value());
+        EXPECT_TRUE(session->cluster->is_closed());
+    }
+}
+
+TEST(ClusterClientTest, shouldCloseIngressPublicationWhenEgressImageCloses)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.ok());
+    FakeCluster fake(driver.dir());
+    ASSERT_TRUE(fake.ready());
+
+    TestClock clock;
+    const ClientConfig config = failover_config(clock);
+    auto session = connect_session(driver.dir(), config, fake);
+    ASSERT_TRUE(session.has_value());
+    RecordingListener listener;
+    session->cluster->set_egress_listener(&listener);
+
+    // in CONNECTED state
+    fake.close_egress_publication();
+    ASSERT_TRUE(pump_until(*session->client,
+                           [&]
+                           {
+                               aeron_image_t* image = session->cluster->egress_image();
+                               return nullptr != image && aeron_image_is_closed(image);
+                           }));
+    EXPECT_EQ(1, session->cluster->poll_egress().value());
+    EXPECT_FALSE(session->cluster->ingress_publication().valid());
+    EXPECT_EQ(ClusterClient::State::await_new_leader, session->cluster->state());
+
+    // and the new leader replaces the publication, so a second close is a
+    // second `onDisconnected` (`AeronCluster.java:933` sets the new image).
+    ASSERT_TRUE(fake.reopen_egress_publication());
+    fake.send_new_leader_event(SESSION_ID, TERM_ID + 1, 1, "0=localhost:20000");
+    const auto polled = poll_first_work(*session, fake);
+    ASSERT_TRUE(polled.has_value());
+    EXPECT_EQ(1, *polled);
+    EXPECT_EQ(ClusterClient::State::await_new_leader_connection, session->cluster->state());
+    ASSERT_EQ(1U, listener.new_leaders.size());
+
+    // and in AWAIT_NEW_LEADER_CONNECTION state too
+    fake.close_egress_publication();
+    ASSERT_TRUE(pump_until(*session->client,
+                           [&]
+                           {
+                               aeron_image_t* image = session->cluster->egress_image();
+                               return nullptr != image && aeron_image_is_closed(image);
+                           }));
+    EXPECT_EQ(1, session->cluster->poll_egress().value());
+    EXPECT_FALSE(session->cluster->ingress_publication().valid());
+    EXPECT_EQ(ClusterClient::State::await_new_leader, session->cluster->state());
+}
+
+TEST(ClusterClientTest, shouldCloseItselfAfterReachingMaxPositionOnTheIngressPublication)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.ok());
+    FakeCluster fake(driver.dir());
+    ASSERT_TRUE(fake.ready());
+
+    auto session = connect_session(driver.dir(), ipc_config(), fake);
+    ASSERT_TRUE(session.has_value());
+
+    // The reference makes `tryClaim`/`offer` return MAX_POSITION_EXCEEDED
+    // (`AeronCluster.java:713-734`); the C publication only reaches it after
+    // 2^31 terms, so the same result goes in through the public tracking seam
+    // `trackIngressPublicationResult`.
+    session->cluster->track_ingress_publication_result(AERON_PUBLICATION_MAX_POSITION_EXCEEDED);
+
+    EXPECT_FALSE(session->cluster->ingress_publication().valid());
     EXPECT_EQ(1, session->cluster->poll_state_changes());
     EXPECT_TRUE(session->cluster->is_closed());
 }

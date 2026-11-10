@@ -60,6 +60,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/container_snapshot_interop_test.cpp
         cluster/container_binary_interop_test.cpp
         cluster/client_connect_interop_test.cpp
+        cluster/xc1_client_interop_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
