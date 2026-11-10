@@ -67,6 +67,6 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
 include(GoogleTest)
-gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
-gtest_discover_tests(axc_archive_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
-gtest_discover_tests(axc_cluster_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
+gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop TIMEOUT 240)
+gtest_discover_tests(axc_archive_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop TIMEOUT 240)
+gtest_discover_tests(axc_cluster_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop TIMEOUT 240)
