@@ -57,6 +57,8 @@ public:
 
     [[nodiscard]] virtual int do_work() = 0;
     [[nodiscard]] virtual bool is_done() const = 0;
+    /// `LogReplay.position()` (`Election.java:963`).
+    [[nodiscard]] virtual std::int64_t position() const = 0;
     virtual void close() = 0;
 };
 
@@ -70,9 +72,28 @@ public:
 
     virtual void on_signal(std::int64_t correlation_id, std::int64_t recording_id, std::int64_t position,
                            std::int32_t signal) = 0;
+    /// `RecordingReplication.poll(long)` (`Election.java:925`).
+    virtual void poll(std::int64_t now_ns) = 0;
+    /// `hasReplicationEnded()` (`Election.java:927`).
+    [[nodiscard]] virtual bool has_replication_ended() const = 0;
+    /// `hasStopped()` (`Election.java:927`).
+    [[nodiscard]] virtual bool has_stopped() const = 0;
+    /// `hasSynced()` (`Election.java:945`).
+    [[nodiscard]] virtual bool has_synced() const = 0;
+    /// `srcArchiveChannel()` (`Election.java:941`).
+    [[nodiscard]] virtual std::string_view src_archive_channel() const = 0;
     [[nodiscard]] virtual std::int64_t recording_id() const = 0;
     [[nodiscard]] virtual std::int64_t position() const = 0;
     virtual void close() = 0;
+};
+
+/// An image on the follower's log subscription, with the position the
+/// subscriber joined it at: the C client exposes the join position as a
+/// constant (`aeron_image_constants_t`), not on the image itself.
+struct LogImage
+{
+    aeron_image_t* image{nullptr};
+    std::int64_t join_position{0};
 };
 
 /// One `Election.state(...)` transition, as the reference's
@@ -126,6 +147,15 @@ struct ElectionContext
     std::int64_t election_status_interval_ns{100'000'000};
     /// `ctx.appVersion()` (`Election.java:1295`).
     std::int32_t app_version{0};
+    /// `ctx.consensusStreamId()` (`Election.java:1242`), for a member's
+    /// consensus publication.
+    std::int32_t consensus_stream_id{0};
+    /// `ctx.logChannel()` (`Election.java:1346`, `:1360`).
+    std::string log_channel{};
+    /// `ctx.logStreamId()` (`Election.java:1382`).
+    std::int32_t log_stream_id{0};
+    /// `ctx.isLogMdc()` (`Election.java:1354`).
+    bool log_is_mdc{false};
     /// `ctx.commitPositionCounter().getPlain()` (`Election.java:265`, `:456`).
     std::function<std::int64_t()> commit_position{[] { return 0; }};
     /// `ctx.random().nextDouble()` (`Election.java:723`).
@@ -302,6 +332,51 @@ public:
 
     /// `pollArchiveEvents()` (`ConsensusModuleAgent.java:2077`).
     [[nodiscard]] virtual std::expected<int, Error> poll_archive_events() = 0;
+
+    // ---- added by C5b: the member publications and the log subscription ----
+    //
+    // Add-only, as the freeze allows: the frozen 30 above are untouched. The
+    // reference reaches these through `ClusterMember.publication()` and its
+    // own `Aeron` client; here the member table is ours to hold but the
+    // publications and the subscription belong to the host.
+
+    /// `null == member.publication()` (`Election.java:1238`).
+    [[nodiscard]] virtual bool member_has_publication(std::int32_t member_id) const = 0;
+
+    /// `ClusterMember.tryAddPublication(...)` (`ClusterMember.java:1073-1098`),
+    /// called for a member with no publication in `publishCanvassPosition`
+    /// (`Election.java:1238-1245`).
+    [[nodiscard]] virtual std::expected<void, Error> try_add_member_publication(std::int32_t member_id) = 0;
+
+    /// `addFollowerSubscription()` (`Election.java:1366-1383`): the manual-MDC
+    /// log subscription a follower joins through, pinned to the leader's
+    /// `logSessionId`. Answers its registration id.
+    [[nodiscard]] virtual std::expected<std::int64_t, Error> add_log_subscription(std::int32_t log_session_id) = 0;
+
+    /// `CloseHelper.close(logSubscription)` (`Election.java:674-676`).
+    [[nodiscard]] virtual std::expected<void, Error> remove_log_subscription(std::int64_t registration_id) = 0;
+
+    /// `logSubscription.addDestination(destination)` (`Election.java:1347`,
+    /// `:1362`).
+    [[nodiscard]] virtual std::expected<void, Error> add_log_destination(std::int64_t registration_id,
+                                                                         std::string_view destination) = 0;
+
+    /// `logSubscription.resolvedEndpoint()` (`Election.java:1032`).
+    [[nodiscard]] virtual std::optional<std::string> log_subscription_resolved_endpoint(
+        std::int64_t registration_id) const = 0;
+
+    /// `ChannelEndpointStatus.ERRORED == logSubscription.channelStatus()`
+    /// (`Election.java:1071`, `:1153`).
+    [[nodiscard]] virtual bool log_subscription_channel_errored(std::int64_t registration_id) const = 0;
+
+    /// `logSubscription.channel()`, for the two failure messages
+    /// (`Election.java:1075`, `:1157`).
+    [[nodiscard]] virtual std::string_view log_subscription_channel(std::int64_t registration_id) const = 0;
+
+    /// `logSubscription.imageBySessionId(logSessionId)` (`Election.java:1062`,
+    /// `:1138`), with the join position the reference reads off the image.
+    [[nodiscard]] virtual std::optional<LogImage> log_image_by_session(std::int64_t registration_id,
+                                                                       std::int32_t session_id) = 0;
 };
 
 /// What the election sends to other members: the exact
