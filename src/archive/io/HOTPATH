@@ -1,2 +1,3 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
-# sync_writer.cpp / uring_writer.cpp / pread_reader.cpp / mmap_reader.cpp land in A1b.
+# The sync writer and the segment readers still need their audit (A1b follow-up).
+archive/io/uring_ring.cpp

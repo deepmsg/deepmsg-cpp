@@ -44,6 +44,7 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/control_session_test.cpp
         archive/server/control_session_adapter_test.cpp
         archive/io/sync_writer_test.cpp
+        archive/io/uring_ring_test.cpp
         archive/server/catalog_test.cpp
         archive/server/catalog_golden_test.cpp
         archive/server/channel_uri_test.cpp

@@ -3,7 +3,6 @@ option(AXC_BUILD_BENCHMARKS "Build micro benchmarks" OFF)
 
 option(AXC_TRACING "Compile in binary tracing events (AXC_TRACING)" OFF)
 option(AXC_STAGE_TIMING "Compile in rdtsc stage timing (AXC_STAGE_TIMING)" OFF)
-option(AXC_WITH_URING "Use liburing for the archive io_uring write backend when found" ON)
 option(AXC_WITH_SBE "Generate SBE C++ codecs from the pinned schemas at build time" ON)
 
 set(AXC_SANITIZER "" CACHE STRING "Sanitizer: address | thread | undefined | (empty)")

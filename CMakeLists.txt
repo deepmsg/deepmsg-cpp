@@ -14,7 +14,6 @@ include(AxcWarnings)
 include(AxcTarget)
 include(Sanitizers)
 include(Pgo)
-include(Uring)
 include(Aeron)
 include(Sbe)
 
