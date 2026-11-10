@@ -61,6 +61,8 @@ struct RecordingWriterContext
     /// checksum is configured.
     std::span<std::uint8_t> record_checksum_buffer{};
     const NanoTimeSource* nano_clock{nullptr};
+    /// `deepmsg.archive.file.io.fallocate` (C++ only; `docs/compat.md`).
+    bool io_fallocate{false};
 };
 
 /// `RecordingWriter` (`RecordingWriter.java:53-274`): writes a term buffer's

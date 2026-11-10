@@ -29,6 +29,7 @@ TEST(ArchiveConfigTest, defaultsMatchTheReference)
     EXPECT_FALSE(settings->recording_events_enabled);
     EXPECT_TRUE(settings->recording_events_channel.empty());
     EXPECT_EQ(30, settings->recording_events_stream_id);
+    EXPECT_FALSE(settings->file_io_fallocate);
 }
 
 TEST(ArchiveConfigTest, sizeSuffixesFollowParseSize)
@@ -148,6 +149,24 @@ TEST(ArchiveConfigTest, replayLingerRejectsAnInvalidDuration)
 
     const auto settings = parse_replay_settings(source);
     EXPECT_FALSE(settings.has_value());
+}
+
+TEST(ArchiveConfigTest, theCppOnlyFallocateSwitchIsRead)
+{
+    {
+        PropertySource source;
+        source.set("deepmsg.archive.file.io.fallocate", "true");
+        const auto settings = parse_recording_settings(source);
+        ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+        EXPECT_TRUE(settings->file_io_fallocate);
+    }
+    {
+        PropertySource source;
+        source.set("deepmsg.archive.file.io.fallocate", "false");
+        const auto settings = parse_recording_settings(source);
+        ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+        EXPECT_FALSE(settings->file_io_fallocate);
+    }
 }
 
 }  // namespace

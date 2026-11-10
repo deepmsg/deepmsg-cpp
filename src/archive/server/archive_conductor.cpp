@@ -1305,6 +1305,7 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     writer_context.archive_dir = context_.archive_dir;
     writer_context.file_sync_level = context_.recording.file_sync_level;
     writer_context.archive_dir_fd = -1;
+    writer_context.io_fallocate = context_.recording.file_io_fallocate;
 
     const auto term_buffer_length = static_cast<std::int32_t>(constants.term_buffer_length);
 
@@ -1702,6 +1703,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     writer_context.archive_dir = context_.archive_dir;
     writer_context.file_sync_level = context_.recording.file_sync_level;
     writer_context.archive_dir_fd = -1;
+    writer_context.io_fallocate = context_.recording.file_io_fallocate;
 
     RecordingSession::Config config;
     config.correlation_id = subscription.correlation_id;

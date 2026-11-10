@@ -295,6 +295,13 @@ std::expected<RecordingSettings, axc::core::Error> parse_recording_settings(
     }
     settings.recording_events_stream_id = *events_stream_id;
 
+    // C++-only switch (`docs/compat.md`): it never joins the reference's 48-name
+    // table, and the default keeps the reference behaviour.
+    if (const auto fallocate = source.get("deepmsg.archive.file.io.fallocate"); fallocate.has_value())
+    {
+        settings.file_io_fallocate = "true" == *fallocate;
+    }
+
     // `Archive.java:1306-1311`.
     if (settings.recording_events_enabled && settings.recording_events_channel.empty())
     {
