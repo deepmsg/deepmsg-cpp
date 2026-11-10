@@ -29,6 +29,10 @@ SyncWriter::~SyncWriter()
 
 std::expected<void, axc::core::Error> SyncWriter::open() noexcept
 {
+    // Nothing is committed before the join position, like `UringWriter`: the
+    // recorder publishes `committed_position()` on every pass, so it must start
+    // where the reference's `RecordingWriter.position()` starts.
+    committed_position_ = config_.start_position;
     return open_segment(config_.segment_base_position, false);
 }
 

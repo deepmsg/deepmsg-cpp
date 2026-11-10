@@ -559,4 +559,57 @@ TEST_F(RecordingInteropTest, truncateAndPurgeLeaveADirectoryTheReferenceToolVeri
         << verified->output;
 }
 
+TEST_F(RecordingInteropTest, aLivePublicationIsRecordedAgainAfterAStop)
+{
+    start_conductor();
+    connect_client();
+    start_local_aeron();
+
+    std::int64_t first_subscription = 0;
+    ASSERT_EQ(0, aeron_archive_start_recording(&first_subscription, client_archive_, recording_channel().c_str(),
+                                               RECORDING_STREAM_ID, AERON_ARCHIVE_SOURCE_LOCATION_LOCAL, false));
+    Published published = publish_messages();
+    const std::int64_t first_counter = wait_for_recording_counter(published.session_id);
+    ASSERT_NE(static_cast<std::int64_t>(AERON_NULL_COUNTER_ID), first_counter);
+    const std::int64_t first_recording = recording_id_of(static_cast<std::int32_t>(first_counter));
+    ASSERT_GE(first_recording, 0);
+    ASSERT_EQ(published.position, wait_for_position(static_cast<std::int32_t>(first_counter), published.position));
+
+    // Stop while the publication is still live.
+    ASSERT_EQ(0, aeron_archive_stop_recording_subscription(client_archive_, first_subscription));
+    for (int iteration = 0; iteration < 20'000 && conductor_->recording_session_count() > 0; iteration++)
+    {
+        ::usleep(200);
+    }
+    ASSERT_EQ(0u, conductor_->recording_session_count());
+
+    // The live image must be recordable again at once — it has not reached end
+    // of stream, so it is not the closed publication's lingering image.
+    std::int64_t second_subscription = 0;
+    ASSERT_EQ(0, aeron_archive_start_recording(&second_subscription, client_archive_, recording_channel().c_str(),
+                                               RECORDING_STREAM_ID, AERON_ARCHIVE_SOURCE_LOCATION_LOCAL, false));
+
+    const std::int64_t second_counter = wait_for_recording_counter(published.session_id);
+    ASSERT_NE(static_cast<std::int64_t>(AERON_NULL_COUNTER_ID), second_counter)
+        << "a recording stopped while its publication stays live must be startable again";
+    const std::int64_t second_recording = recording_id_of(static_cast<std::int32_t>(second_counter));
+    ASSERT_GE(second_recording, 0);
+
+    // More data on the same publication reaches the second recording.
+    std::array<std::uint8_t, MESSAGE_LENGTH> message{};
+    for (std::int32_t index = 0; index < MESSAGE_COUNT; index++)
+    {
+        std::int64_t result = 0;
+        while ((result = aeron_publication_offer(published.publication, message.data(), message.size(), nullptr,
+                                                 nullptr)) < 0)
+        {
+            ::usleep(100);
+        }
+    }
+    const std::int64_t end_position = aeron_publication_position(published.publication);
+    EXPECT_EQ(end_position, wait_for_position(static_cast<std::int32_t>(second_counter), end_position));
+
+    (void)aeron_publication_close(published.publication, nullptr, nullptr);
+}
+
 }  // namespace
