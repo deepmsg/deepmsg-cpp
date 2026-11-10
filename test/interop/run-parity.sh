@@ -34,7 +34,28 @@ cases=(
 passed=0
 failed=0
 for case in "${cases[@]}"; do
-    if timeout 180 "$binary" --gtest_filter="ContentParityTest.$case" > "/tmp/axc-parity-$case.log" 2>&1; then
+    log="/tmp/axc-parity-$case.log"
+    # A timed-out case must not leave the fixture's driver/archive children
+    # behind: they keep the case's UDP ports and the next run then fails with
+    # "publication not connected" (measured on the A6b mutant run). `setsid`
+    # makes the test a process-group leader, so the timeout kills the group.
+    setsid "$binary" --gtest_filter="ContentParityTest.$case" >"$log" 2>&1 &
+    pid=$!
+    waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge 180 ]; then
+            kill -TERM -- -"$pid" 2>/dev/null || true
+            sleep 1
+            kill -KILL -- -"$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            printf '%-40s TIMEOUT (/tmp/axc-parity-%s.log)\n' "$case" "$case"
+            failed=$((failed + 1))
+            continue 2
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if wait "$pid"; then
         printf '%-40s PASS\n' "$case"
         passed=$((passed + 1))
     else
