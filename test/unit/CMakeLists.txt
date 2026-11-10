@@ -12,6 +12,7 @@ axc_add_executable(axc_unit_tests
         core/config_test.cpp
         core/trace_test.cpp
         core/many_to_one_queue_test.cpp
+        core/duty_cycle_tracker_test.cpp
     DEPS
         axc_core
         GTest::gtest_main
