@@ -51,6 +51,13 @@ public:
         return directory_force_count_;
     }
 
+    /// Whether a requested preallocation was refused and the segment stayed
+    /// sparse (test observable; the warning goes to stderr once).
+    [[nodiscard]] bool fallocate_fell_back() const noexcept
+    {
+        return fallocate_warning_emitted_;
+    }
+
 private:
     [[nodiscard]] std::expected<void, axc::core::Error> open_segment(std::int64_t segment_base_position,
                                                                      bool fail_if_exists) noexcept;
@@ -63,6 +70,7 @@ private:
     bool closed_{false};
     std::uint64_t force_count_{0};
     std::uint64_t directory_force_count_{0};
+    bool fallocate_warning_emitted_{false};
 };
 
 }  // namespace deepmsg::archive::server::io

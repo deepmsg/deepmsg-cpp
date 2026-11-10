@@ -21,6 +21,10 @@ struct BlockWrite
     std::int64_t end_position{0};
 };
 
+/// Best-effort preallocation hook: `fallocate(FALLOC_FL_KEEP_SIZE)` in
+/// production, injectable so a test can make it fail without a real filesystem.
+using FallocateFn = int (*)(int fd, std::int64_t offset, std::int64_t length) noexcept;
+
 struct WriterConfig
 {
     std::string archive_dir;
@@ -33,8 +37,13 @@ struct WriterConfig
     /// Directory channel forced when a segment is created (`RecordingWriter.java:221`);
     /// -1 = none.
     int archive_dir_fd{-1};
-    /// Preallocate the segment with `fallocate` instead of `ftruncate` (A6-4).
+    /// Best-effort preallocation *after* the `ftruncate` that fixes the size
+    /// (A6-4). A refused allocation (`EOPNOTSUPP`, `ENOSPC`, ...) leaves the
+    /// segment sparse and defers a full-disk failure to the write, like the
+    /// reference's bare `setLength` (`RecordingWriter.java:219`).
     bool fallocate{false};
+    /// Preallocation syscall; nullptr = `fallocate(FALLOC_FL_KEEP_SIZE)`.
+    FallocateFn fallocate_fn{nullptr};
     /// In-flight block budget for asynchronous backends (A6-3); ignored by the
     /// synchronous one.
     int inflight_max{0};

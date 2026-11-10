@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +31,7 @@ using deepmsg::archive::server::segment_file_base_position;
 using deepmsg::archive::server::segment_file_length;
 using deepmsg::archive::server::segment_file_name;
 using deepmsg::archive::server::io::BlockWrite;
+using deepmsg::archive::server::io::FallocateFn;
 using deepmsg::archive::server::io::make_sync_writer;
 using deepmsg::archive::server::io::SyncWriter;
 using deepmsg::archive::server::io::WriterConfig;
@@ -131,6 +133,34 @@ protected:
     int directory_fd_{-1};
 };
 
+// Injected preallocation hooks: the real `fallocate` needs a filesystem that
+// refuses it on demand, the test needs the refusal by construction.
+std::int64_t g_fallocate_length{0};
+int g_fallocate_calls{0};
+
+int refused_fallocate(int, std::int64_t, std::int64_t length) noexcept
+{
+    ++g_fallocate_calls;
+    g_fallocate_length = length;
+    errno = EOPNOTSUPP;
+    return -1;
+}
+
+int enospc_fallocate(int, std::int64_t, std::int64_t length) noexcept
+{
+    ++g_fallocate_calls;
+    g_fallocate_length = length;
+    errno = ENOSPC;
+    return -1;
+}
+
+int accepted_fallocate(int, std::int64_t, std::int64_t length) noexcept
+{
+    ++g_fallocate_calls;
+    g_fallocate_length = length;
+    return 0;
+}
+
 TEST_F(SyncWriterTest, levelZeroNeverForces)
 {
     auto writer = make_sync_writer(config(0));
@@ -228,6 +258,91 @@ TEST_F(SyncWriterTest, listsAndIndexesSegmentFiles)
     auto highest = find_segment_file_with_highest_position((*index)[RECORDING_ID]);
     ASSERT_TRUE(highest) << highest.error().message.view();
     EXPECT_EQ(segment_file_name(RECORDING_ID, SEGMENT_LENGTH), *highest);
+}
+
+TEST_F(SyncWriterTest, preallocationIsOffByDefaultAndNeverCalled)
+{
+    auto writer_config = config(0);
+    writer_config.fallocate = false;
+    writer_config.fallocate_fn = &refused_fallocate;
+    g_fallocate_calls = 0;
+
+    auto writer = make_sync_writer(writer_config);
+    ASSERT_TRUE(writer) << writer.error().message.view();
+
+    EXPECT_EQ(0, g_fallocate_calls) << "the reference's setLength does not preallocate";
+    auto* sync_writer = dynamic_cast<SyncWriter*>((*writer).get());
+    EXPECT_FALSE(sync_writer->fallocate_fell_back());
+}
+
+TEST_F(SyncWriterTest, aRefusedPreallocationKeepsTheSegmentSizedAndSparse)
+{
+    // EOPNOTSUPP (unsupported filesystem) and ENOSPC (full disk) both fall back:
+    // the size contract is the ftruncate's, and a full disk surfaces at write
+    // time like the reference.
+    for (const FallocateFn fallocate_fn : {FallocateFn{&refused_fallocate}, FallocateFn{&enospc_fallocate}})
+    {
+        auto writer_config = config(0);
+        writer_config.fallocate = true;
+        writer_config.fallocate_fn = fallocate_fn;
+        g_fallocate_calls = 0;
+        g_fallocate_length = 0;
+
+        auto writer = make_sync_writer(writer_config);
+        ASSERT_TRUE(writer) << writer.error().message.view();
+
+        EXPECT_EQ(1, g_fallocate_calls);
+        EXPECT_EQ(SEGMENT_LENGTH, g_fallocate_length);
+
+        auto* sync_writer = dynamic_cast<SyncWriter*>((*writer).get());
+        EXPECT_TRUE(sync_writer->fallocate_fell_back());
+
+        const std::string path = archive_dir_ + "/" + segment_file_name(RECORDING_ID, 0);
+        EXPECT_EQ(static_cast<std::uintmax_t>(SEGMENT_LENGTH), std::filesystem::file_size(path));
+
+        std::vector<std::uint8_t> bytes(64, 9);
+        auto submitted = (*writer)->submit(BlockWrite{bytes.data(), 64, 0, 64});
+        ASSERT_TRUE(submitted) << submitted.error().message.view();
+        EXPECT_TRUE(*submitted);
+        EXPECT_EQ(64, (*writer)->committed_position());
+
+        ASSERT_TRUE((*writer)->close());
+    }
+}
+
+TEST_F(SyncWriterTest, anAcceptedPreallocationLeavesNoFallbackMark)
+{
+    auto writer_config = config(0);
+    writer_config.fallocate = true;
+    writer_config.fallocate_fn = &accepted_fallocate;
+    g_fallocate_calls = 0;
+    g_fallocate_length = 0;
+
+    auto writer = make_sync_writer(writer_config);
+    ASSERT_TRUE(writer) << writer.error().message.view();
+
+    EXPECT_EQ(1, g_fallocate_calls);
+    EXPECT_EQ(SEGMENT_LENGTH, g_fallocate_length);
+
+    auto* sync_writer = dynamic_cast<SyncWriter*>((*writer).get());
+    EXPECT_FALSE(sync_writer->fallocate_fell_back());
+
+    const std::string path = archive_dir_ + "/" + segment_file_name(RECORDING_ID, 0);
+    EXPECT_EQ(static_cast<std::uintmax_t>(SEGMENT_LENGTH), std::filesystem::file_size(path));
+}
+
+TEST_F(SyncWriterTest, theRealPreallocationPathKeepsTheSegmentSized)
+{
+    // No injected hook: this exercises the production `fallocate(KEEP_SIZE)`
+    // call on whatever filesystem /tmp is (it may itself fall back).
+    auto writer_config = config(0);
+    writer_config.fallocate = true;
+
+    auto writer = make_sync_writer(writer_config);
+    ASSERT_TRUE(writer) << writer.error().message.view();
+
+    const std::string path = archive_dir_ + "/" + segment_file_name(RECORDING_ID, 0);
+    EXPECT_EQ(static_cast<std::uintmax_t>(SEGMENT_LENGTH), std::filesystem::file_size(path));
 }
 
 }  // namespace
