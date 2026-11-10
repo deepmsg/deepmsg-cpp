@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -174,6 +175,32 @@ Recording build_unaligned_recording()
     recording.data_frame_count = 1;
     recording.stop_position = TERM_LENGTH;
     return recording;
+}
+
+/// One term with a single data frame written; the rest stays zero until the
+/// recorder appends it (the live-replay shape).
+Recording build_live_recording()
+{
+    Recording recording;
+    recording.bytes.assign(static_cast<std::size_t>(TERM_LENGTH), 0);
+    write_data_frame(recording.bytes.data(), FRAME_LENGTH, 0, INITIAL_TERM_ID, RECORDING_SESSION_ID,
+                     RECORDING_STREAM_ID, 1);
+    recording.data_frame_count = 1;
+    recording.stop_position = TERM_LENGTH;
+    return recording;
+}
+
+/// `pwrite` one frame into an existing segment file, the way the recorder
+/// appends while a live replay is reading.
+void append_frame_to_segment(const std::string& archive_dir, std::int64_t segment_base_position, std::size_t offset,
+                             const std::vector<std::uint8_t>& frame)
+{
+    const std::string path =
+        archive_dir + "/" + std::to_string(RECORDING_ID) + "-" + std::to_string(segment_base_position) + ".rec";
+    const int fd = ::open(path.c_str(), O_RDWR);
+    ASSERT_GE(fd, 0) << path;
+    ASSERT_EQ(static_cast<ssize_t>(frame.size()), ::pwrite(fd, frame.data(), frame.size(), static_cast<off_t>(offset)));
+    ::close(fd);
 }
 
 class TempArchiveDir
@@ -901,6 +928,55 @@ TEST(ReplaySessionTest, aShortReadStillReturnsTheFullLimitSoTheFrameLoopFails)
         EXPECT_NE(std::string::npos, fixture.control.errors[0].message.find("unexpected end of recording"));
         session->close();
     }
+}
+
+TEST(ReplaySessionTest, aLiveReplayKeepsReadingTheGrowingPage)
+{
+    // ★ A6d-4 finding: the first frame-header rewrite copy-on-writes the
+    // mapping's 4 KiB page; a frame the recorder appends into the same page
+    // afterwards must still be seen. A `MAP_PRIVATE` view would freeze the page
+    // as zeros and the frame loop would end the replay with `unexpected end of
+    // recording`, so a live replay (limit counter present) reads through
+    // `pread` even when the mmap backend is configured.
+    const Recording recording = build_live_recording();
+    Fixture fixture(recording, 0, recording.stop_position, 0, FRAME_LENGTH);
+    fixture.config.backend = Backend::mmap;
+
+    auto limit = std::make_unique<FakeLimit>();
+    limit->current = FRAME_LENGTH;
+    FakeLimit* limit_raw = limit.get();
+
+    auto session = fixture.make(std::move(limit));
+    session->do_work();
+    ASSERT_TRUE(session->error_message().empty()) << session->error_message();
+    ASSERT_EQ(static_cast<std::size_t>(FRAME_LENGTH), fixture.publication_raw->offered.size());
+
+    // The recorder appends the next frame into the same page and advances the
+    // live limit the way the position counter does.
+    std::vector<std::uint8_t> frame(static_cast<std::size_t>(FRAME_LENGTH), 0);
+    write_data_frame(frame.data(), FRAME_LENGTH, FRAME_LENGTH, INITIAL_TERM_ID, RECORDING_SESSION_ID,
+                     RECORDING_STREAM_ID, 2);
+    append_frame_to_segment(fixture.dir.path(), 0, static_cast<std::size_t>(FRAME_LENGTH), frame);
+    limit_raw->current = 2 * FRAME_LENGTH;
+
+    session->do_work();
+    ASSERT_TRUE(session->error_message().empty()) << session->error_message();
+    ASSERT_EQ(static_cast<std::size_t>(2 * FRAME_LENGTH), fixture.publication_raw->offered.size());
+
+    std::int32_t published_session_id = 0;
+    std::memcpy(&published_session_id, fixture.publication_raw->offered.data() + FRAME_LENGTH + SESSION_ID_OFFSET,
+                sizeof(published_session_id));
+    EXPECT_EQ(REPLAY_SESSION_ID_SESSION, published_session_id);
+    EXPECT_EQ(2, fixture.publication_raw->offered.back());
+
+    limit_raw->closed = true;
+    limit_raw->current = 2 * FRAME_LENGTH;
+    for (int pass = 0; !session->is_done() && pass < 10; pass++)
+    {
+        session->do_work();
+    }
+    EXPECT_TRUE(session->is_done());
+    session->close();
 }
 
 TEST(ReplaySessionTest, anUnalignedReplayPositionIsRejected)

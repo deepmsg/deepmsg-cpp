@@ -570,7 +570,16 @@ bool ReplaySession::open_recording_segment()
     reader_config.fadvise = config_.fadvise;
     reader_config.fadvise_fn = config_.fadvise_fn;
 
-    auto opened = io::Backend::mmap == config_.backend
+    // ★ A replay that follows a live recording (`limit_` non-null: the
+    // conductor resolved the recording's position counter,
+    // `ArchiveConductor.java:763-929`) must not read through `MAP_PRIVATE`: the
+    // first header rewrite copy-on-writes its 4 KiB page, and every frame the
+    // recorder appends into that page afterwards is invisible to the frozen
+    // private copy (`frameLength <= 0` at the live edge). `pread` re-reads the
+    // page cache each pass, so a live replay stays on it even when the mmap
+    // backend is configured; a finalized recording keeps the mapping.
+    const bool live = nullptr != limit_;
+    auto opened = io::Backend::mmap == config_.backend && !live
                       ? io::make_mmap_reader(reader_config)
                       : io::make_pread_reader(reader_config, static_cast<std::size_t>(buffer_length_));
     if (!opened)
