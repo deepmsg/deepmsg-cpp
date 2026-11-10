@@ -1,5 +1,9 @@
 axc_add_library(axc_cluster_consensus
     SOURCES
+        consensus_module_context.cpp
+        consensus_module_agent.cpp
+        consensus_module.cpp
+        standby_startup_check.cpp
         module.cpp
     DEPS
         axc_cluster_common

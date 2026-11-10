@@ -61,12 +61,14 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/container_binary_interop_test.cpp
         cluster/client_connect_interop_test.cpp
         cluster/xc1_client_interop_test.cpp
+        cluster/consensus_module_interop_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
         axc_cluster_common
         axc_cluster_service
         axc_cluster_client
+        axc_cluster_consensus
         axc_basic_auction_service
         axc_core
         aeron_static

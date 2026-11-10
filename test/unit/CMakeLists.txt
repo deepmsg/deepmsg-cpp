@@ -122,6 +122,15 @@ axc_add_executable(axc_cluster_election_unit_tests
         GTest::gmock
         GTest::gtest_main)
 
+# C4a: the CM context/conclude rules and the Q6 standby startup check.
+axc_add_executable(axc_cluster_consensus_unit_tests
+    SOURCES
+        cluster/consensus/consensus_module_context_test.cpp
+        cluster/consensus/standby_startup_check_test.cpp
+    DEPS
+        axc_cluster_consensus
+        GTest::gtest_main)
+
 # C3c: the same schema transformed to version 5, for the compatibility test.
 if (AXC_WITH_SBE)
     add_dependencies(axc_cluster_client_unit_tests axc_sbe_cluster_codecs_v5)
@@ -140,3 +149,4 @@ gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES L
 gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
 gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
 gtest_discover_tests(axc_cluster_election_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
+gtest_discover_tests(axc_cluster_consensus_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
