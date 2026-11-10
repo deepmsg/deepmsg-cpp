@@ -18,8 +18,14 @@ namespace
 class FakeCounter final : public axc::core::CounterTarget
 {
 public:
-    void set_value(std::int64_t value) noexcept override { value_ = value; }
-    [[nodiscard]] std::int64_t value() const noexcept override { return value_; }
+    void set_value(std::int64_t value) noexcept override
+    {
+        value_ = value;
+    }
+    [[nodiscard]] std::int64_t value() const noexcept override
+    {
+        return value_;
+    }
 
 private:
     std::int64_t value_{0};
