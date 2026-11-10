@@ -31,6 +31,9 @@
 #ifndef AXC_CONTAINER_BINARY
 #define AXC_CONTAINER_BINARY ""
 #endif
+#ifndef AXC_CLUSTER_CLIENT_SMOKE
+#define AXC_CLUSTER_CLIENT_SMOKE ""
+#endif
 
 namespace
 {
@@ -171,7 +174,7 @@ protected:
             "-Daeron.archive.local.control.channel=aeron:ipc?term-length=64k",
             "-Daeron.archive.local.control.stream.id=10",
             "-Daeron.archive.control.response.stream.id=20",
-            "-Ddeepmsg.cluster.service=noop"};
+            "-Ddeepmsg.cluster.service=echo"};
 
         auto process = axc::interop::ChildProcess::spawn(AXC_CONTAINER_BINARY, arguments);
         ASSERT_TRUE(process) << process.error().message.view();
@@ -282,6 +285,24 @@ TEST_F(ClientConnectInteropTest, ourAsyncConnectReachesAllSevenStepsAgainstTheRe
 
     cluster->close();
     EXPECT_TRUE(cluster->is_closed());
+}
+
+// C3b: the C ABI smoke program, a C process, against the same node. The echo
+// business returns the payload unchanged, so one round trip proves the send
+// path, the egress dispatch and the C callback.
+TEST_F(ClientConnectInteropTest, aCProgramConnectsOffersAndReceivesTheEcho)
+{
+    start_java_node();
+    start_container();
+
+    axc::interop::ProcessOptions options;
+    options.arguments = {aeron_dir(), "hello-from-c"};
+    options.timeout = std::chrono::seconds(60);
+
+    auto result = axc::interop::run_process(AXC_CLUSTER_CLIENT_SMOKE, options);
+    ASSERT_TRUE(result) << result.error().message.view();
+    EXPECT_EQ(0, result->exit_code) << result->output;
+    EXPECT_NE(std::string::npos, result->output.find("RECEIVED hello-from-c")) << result->output;
 }
 
 }  // namespace

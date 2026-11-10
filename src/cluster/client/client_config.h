@@ -75,6 +75,10 @@ struct ClientConfig
     /// Empty means "derive from the leader heartbeat timeout"
     /// (`concludeConnect`, `AeronCluster.java:2572-2578`).
     std::optional<std::int64_t> new_leader_timeout_ns{};
+    /// The reference's `NanoClock` (`Context.nanoClock()`); empty uses
+    /// `axc::core::NanoClock`. Tests advance it to exercise the AWAIT
+    /// deadlines.
+    std::function<std::int64_t()> clock{};
     ClientCredentials credentials{};
 
     /// The `Context.conclude()` rules (`AeronCluster.java:1471-1508`), in the

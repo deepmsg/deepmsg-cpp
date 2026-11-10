@@ -102,7 +102,7 @@ private:
     [[nodiscard]] std::expected<void, Error> await_publication_connected(axc::core::DeepmsgClient& client);
     [[nodiscard]] std::expected<void, Error> send_message();
     [[nodiscard]] std::expected<void, Error> poll_response(axc::core::DeepmsgClient& client);
-    [[nodiscard]] std::expected<std::optional<ClusterClient>, Error> conclude_connect();
+    [[nodiscard]] std::expected<std::optional<ClusterClient>, Error> conclude_connect(axc::core::DeepmsgClient& client);
 
     void prepare_connect_request(axc::core::DeepmsgClient& client, std::string_view response_channel);
     void prepare_challenge_response(axc::core::DeepmsgClient& client, std::span<const std::uint8_t> credentials);

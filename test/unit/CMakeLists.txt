@@ -104,6 +104,7 @@ axc_add_executable(axc_cluster_client_unit_tests
         cluster/client/client_config_test.cpp
         cluster/client/egress_poller_test.cpp
         cluster/client/async_connect_test.cpp
+        cluster/client/cluster_client_test.cpp
     DEPS
         axc_cluster_client
         aeron_driver_static

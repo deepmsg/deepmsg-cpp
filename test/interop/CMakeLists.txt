@@ -74,13 +74,23 @@ axc_add_executable(axc_cluster_interop_tests
 
 target_include_directories(axc_cluster_interop_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
+# C3b: the C ABI smoke program is C (not C++), linked against the C++ library.
+axc_add_executable(deepmsg-cluster-client-smoke
+    SOURCES
+        cluster/c_client_smoke.c
+    DEPS
+        axc_cluster_client)
+set_target_properties(deepmsg-cluster-client-smoke PROPERTIES LINKER_LANGUAGE CXX)
+
 target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
     "AXC_CONTAINER_BINARY=\"$<TARGET_FILE:deepmsg-clustered-service-container>\""
-    "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\"")
+    "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
+    "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\"")
 
-add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container echo_service_dynamic)
+add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container echo_service_dynamic
+    deepmsg-cluster-client-smoke)
 
 # The tool under test is an executable of its own; build it with the suite.
 add_dependencies(axc_archive_interop_tests archive-tool-ro)
