@@ -26,6 +26,7 @@
 #include "cluster/service/role.h"
 #include "cluster/service/service_adapter.h"
 #include "cluster/service/session.h"
+#include "cluster/service/snapshot.h"
 extern "C"
 {
 #include "concurrent/aeron_distinct_error_log.h"
@@ -132,6 +133,7 @@ private:
     [[nodiscard]] std::expected<bool, Error> send_ack(std::int64_t position, std::int64_t timestamp,
                                                       std::int64_t relevant_id);
     class EventHandler;
+    class SessionLoadHandler;
 
     // -- duty cycle -------------------------------------------------------
     [[nodiscard]] std::expected<int, Error> do_work_inner();
@@ -145,6 +147,24 @@ private:
     void disconnect_egress() noexcept;
     [[nodiscard]] std::expected<void, Error> set_role(Role new_role);
     [[nodiscard]] std::expected<void, Error> invoke_background_work(std::int64_t now_ns);
+
+    struct SnapshotAction
+    {
+        std::int64_t log_position{-1};
+        std::int64_t leadership_term_id{-1};
+    };
+
+    struct LoadedSnapshot
+    {
+        axc::core::SubPtr subscription{};
+        aeron_image_t* image{nullptr};
+        TimeUnit time_unit{TimeUnit::milliseconds};
+    };
+
+    [[nodiscard]] std::expected<LoadedSnapshot, Error> load_snapshot(std::int64_t recording_id);
+    [[nodiscard]] std::expected<std::int64_t, Error> take_snapshot(std::int64_t log_position,
+                                                                   std::int64_t leadership_term_id);
+    [[nodiscard]] std::expected<void, Error> execute_snapshot_action(const SnapshotAction& action);
 
     void report(const Error& error) noexcept;
     void terminate_with(const Error& error) noexcept;
@@ -175,6 +195,8 @@ private:
     bool error_log_initialised_{false};
 
     std::optional<JoinLogEvent> active_log_event_{};
+    std::optional<SnapshotAction> pending_snapshot_{};
+    std::int64_t snapshot_start_ns_{0};
     std::int64_t termination_position_{-1};
     bool termination_ack_required_{true};
     std::int64_t requested_ack_position_{-1};
@@ -531,6 +553,325 @@ std::expected<bool, Error> ClusteredServiceAgent<S>::send_ack(std::int64_t posit
 }
 
 template <ClusteredService S>
+class ClusteredServiceAgent<S>::SessionLoadHandler final : public SnapshotLoadHandler
+{
+public:
+    explicit SessionLoadHandler(SessionTable& sessions) : sessions_(sessions) {}
+
+    std::expected<void, Error> on_load_begin_snapshot(std::int32_t, TimeUnit) override
+    {
+        return {};
+    }
+
+    std::expected<void, Error> on_load_cluster_session(std::int64_t cluster_session_id, std::int32_t response_stream_id,
+                                                       std::string_view response_channel,
+                                                       std::span<const std::uint8_t> encoded_principal) override
+    {
+        sessions_.add(
+            ContainerClientSession{cluster_session_id, response_stream_id, std::string{response_channel},
+                                   std::vector<std::uint8_t>(encoded_principal.begin(), encoded_principal.end())});
+        return {};
+    }
+
+    std::expected<void, Error> on_load_end_snapshot() override
+    {
+        return {};
+    }
+
+private:
+    SessionTable& sessions_;
+};
+
+template <ClusteredService S>
+std::expected<typename ClusteredServiceAgent<S>::LoadedSnapshot, Error> ClusteredServiceAgent<S>::load_snapshot(
+    std::int64_t recording_id)
+{
+    auto archive = ArchiveClient::connect(*client_, config_);
+    if (!archive)
+    {
+        return std::unexpected(archive.error());
+    }
+
+    // The subscription is created **before** the replay request and named by
+    // its registration id in the request. The C client's `aeron_archive_replay`
+    // creates it after the replay has started, which can join a publication
+    // that is already publishing and lose the beginning of a small snapshot
+    // (deepmsg Rust track, P3-2b).
+    axc::core::SubPtr subscription{};
+    {
+        auto add = client_->add_subscription(config_.replay_channel, config_.replay_stream_id);
+        auto added = await_async(*client_, add, 5'000'000'000);
+        if (!added)
+        {
+            return std::unexpected(added.error());
+        }
+        subscription = std::move(*added);
+    }
+
+    aeron_subscription_constants_t subscription_constants{};
+    if (0 != aeron_subscription_constants(subscription.get(), &subscription_constants))
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::internal_error, "replay subscription constants failed"));
+    }
+
+    auto replay_session = archive->start_replay(recording_id, config_.replay_channel, config_.replay_stream_id,
+                                                subscription_constants.registration_id);
+    if (!replay_session)
+    {
+        return std::unexpected(replay_session.error());
+    }
+
+    aeron_image_t* image = nullptr;
+    {
+        const auto session_id = static_cast<std::int32_t>(*replay_session);
+        while (nullptr == image)
+        {
+            (void)client_->do_work();
+            image = aeron_subscription_image_by_session_id(subscription.get(), session_id);
+            if (nullptr == image)
+            {
+                auto checked = archive->check_error();
+                if (!checked)
+                {
+                    return std::unexpected(checked.error());
+                }
+                auto idled = context_->idle(*client_, 0);
+                if (!idled)
+                {
+                    return std::unexpected(idled.error());
+                }
+            }
+        }
+    }
+
+    ServiceSnapshotLoader loader;
+    SessionLoadHandler handler{sessions_};
+    while (!loader.is_done())
+    {
+        auto work = loader.poll(image, handler);
+        if (!work)
+        {
+            (void)aeron_subscription_image_release(subscription.get(), image);
+            return std::unexpected(work.error());
+        }
+
+        if (0 == *work)
+        {
+            auto checked = archive->check_error();
+            if (!checked)
+            {
+                (void)aeron_subscription_image_release(subscription.get(), image);
+                return std::unexpected(checked.error());
+            }
+            if (aeron_image_is_closed(image))
+            {
+                (void)aeron_subscription_image_release(subscription.get(), image);
+                return std::unexpected(axc::core::make_error(
+                    axc::core::ErrorCode::protocol_error,
+                    "snapshot recordingId=" + std::to_string(recording_id) + " ended unexpectedly"));
+            }
+        }
+
+        auto idled = context_->idle(*client_, *work);
+        if (!idled)
+        {
+            (void)aeron_subscription_image_release(subscription.get(), image);
+            return std::unexpected(idled.error());
+        }
+    }
+
+    constexpr auto MAJOR = [](std::int32_t version) { return (version >> 16) & 0xFF; };
+    if (MAJOR(loader.app_version()) != MAJOR(config_.app_version))
+    {
+        (void)aeron_subscription_image_release(subscription.get(), image);
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                  "incompatible app version: container=" + std::to_string(config_.app_version) +
+                                      " snapshot=" + std::to_string(loader.app_version())));
+    }
+
+    LoadedSnapshot loaded;
+    loaded.subscription = std::move(subscription);
+    loaded.image = image;
+    loaded.time_unit = loader.time_unit();
+    return loaded;
+}
+
+template <ClusteredService S>
+std::expected<std::int64_t, Error> ClusteredServiceAgent<S>::take_snapshot(std::int64_t log_position,
+                                                                           std::int64_t leadership_term_id)
+{
+    auto archive = ArchiveClient::connect(*client_, config_);
+    if (!archive)
+    {
+        return std::unexpected(archive.error());
+    }
+
+    axc::core::ExPubPtr publication{};
+    {
+        auto add = client_->add_exclusive_publication(config_.snapshot_channel, config_.snapshot_stream_id);
+        auto added = await_async(*client_, add, 5'000'000'000);
+        if (!added)
+        {
+            return std::unexpected(added.error());
+        }
+        publication = std::move(*added);
+    }
+
+    SnapshotPublication writer{*client_, *context_, publication.get()};
+    const std::int32_t session_id = writer.session_id();
+    const std::string channel = detail::with_session_id(config_.snapshot_channel, session_id);
+
+    auto recording = archive->start_recording(channel, config_.snapshot_stream_id);
+    if (!recording)
+    {
+        return std::unexpected(recording.error());
+    }
+
+    const std::int64_t deadline = axc::core::NanoClock::now() + 30'000'000'000;
+    std::int32_t counter_id = AERON_NULL_COUNTER_ID;
+    while (AERON_NULL_COUNTER_ID == counter_id)
+    {
+        counter_id = aeron_archive_recording_pos_find_counter_id_by_session_id(client_->counters_reader(), session_id,
+                                                                               archive->archive_id());
+        if (AERON_NULL_COUNTER_ID == counter_id)
+        {
+            auto checked = archive->check_error();
+            if (!checked)
+            {
+                return std::unexpected(checked.error());
+            }
+            if (axc::core::NanoClock::now() >= deadline)
+            {
+                return std::unexpected(axc::core::make_error(
+                    axc::core::ErrorCode::internal_error, "the snapshot recording's position counter never appeared"));
+            }
+            auto idled = context_->idle(*client_, 0);
+            if (!idled)
+            {
+                return std::unexpected(idled.error());
+            }
+        }
+    }
+
+    const std::int64_t recording_id =
+        aeron_archive_recording_pos_get_recording_id(client_->counters_reader(), counter_id);
+
+    ServiceSnapshotTaker taker{writer, time_unit_, config_.app_version};
+    auto begun = taker.mark_begin(log_position, leadership_term_id);
+    if (!begun)
+    {
+        return std::unexpected(begun.error());
+    }
+    for (ContainerClientSession& session : sessions_.sessions())
+    {
+        auto snapped = taker.snapshot_session(session);
+        if (!snapped)
+        {
+            return std::unexpected(snapped.error());
+        }
+    }
+    auto ended = taker.mark_end(log_position, leadership_term_id);
+    if (!ended)
+    {
+        return std::unexpected(ended.error());
+    }
+
+    (void)context_->check_for_clock_tick(*client_, axc::core::NanoClock::now());
+    auto checked = archive->check_error();
+    if (!checked)
+    {
+        return std::unexpected(checked.error());
+    }
+
+    auto taken = service_.on_take_snapshot(writer);
+    if (!taken)
+    {
+        return std::unexpected(taken.error());
+    }
+
+    const std::int64_t position = writer.position();
+    while (true)
+    {
+        std::int64_t* address = aeron_counters_reader_addr(client_->counters_reader(), counter_id);
+        const std::int64_t value = nullptr == address ? 0 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
+        if (value >= position)
+        {
+            break;
+        }
+
+        bool active = false;
+        if (0 != aeron_archive_recording_pos_is_active(&active, client_->counters_reader(), counter_id, recording_id) ||
+            !active)
+        {
+            return std::unexpected(
+                axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                      "recording stopped unexpectedly: " + std::to_string(recording_id)));
+        }
+
+        auto idled = context_->idle(*client_, 0);
+        if (!idled)
+        {
+            return std::unexpected(idled.error());
+        }
+        auto idle_checked = archive->check_error();
+        if (!idle_checked)
+        {
+            return std::unexpected(idle_checked.error());
+        }
+    }
+
+    publication.reset();
+    return recording_id;
+}
+
+template <ClusteredService S>
+std::expected<void, Error> ClusteredServiceAgent<S>::execute_snapshot_action(const SnapshotAction& action)
+{
+    snapshot_start_ns_ = axc::core::NanoClock::now();
+    std::expected<std::int64_t, Error> taken = take_snapshot(action.log_position, action.leadership_term_id);
+
+    const std::int64_t duration_ns = axc::core::NanoClock::now() - snapshot_start_ns_;
+    if (max_snapshot_duration_)
+    {
+        if (std::int64_t* address = aeron_counter_addr(max_snapshot_duration_.get()); nullptr != address)
+        {
+            std::int64_t current = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+            while (duration_ns > current && !__atomic_compare_exchange_n(address, &current, duration_ns, false,
+                                                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            {
+            }
+        }
+    }
+    if (snapshot_threshold_exceeded_ && duration_ns > config_.snapshot_duration_threshold_ns)
+    {
+        if (std::int64_t* address = aeron_counter_addr(snapshot_threshold_exceeded_.get()); nullptr != address)
+        {
+            (void)__atomic_add_fetch(address, 1, __ATOMIC_RELEASE);
+        }
+    }
+
+    const std::int64_t relevant_id = taken.has_value() ? *taken : -1;
+    if (!taken)
+    {
+        report(taken.error());
+    }
+
+    auto acked = send_ack(action.log_position, cluster_time_, relevant_id);
+    if (!acked)
+    {
+        return std::unexpected(acked.error());
+    }
+
+    if (!taken)
+    {
+        return std::unexpected(taken.error());
+    }
+    return {};
+}
+
+template <ClusteredService S>
 std::expected<void, Error> ClusteredServiceAgent<S>::recover_state()
 {
     auto recovery = await_recovery_key();
@@ -543,20 +884,43 @@ std::expected<void, Error> ClusteredServiceAgent<S>::recover_state()
     cluster_time_ = recovery->timestamp;
     cm_proxy_.set_leadership_term_id(recovery->leadership_term_id);
 
+    std::optional<LoadedSnapshot> loaded;
+    std::expected<void, Error> result{};
     if (-1 != recovery->leadership_term_id && -1 != recovery->snapshot_recording_id)
     {
-        // Snapshot loading is C2b's. Failing loudly is better than starting a
-        // service with silently lost state.
-        return std::unexpected(axc::core::make_error(
-            axc::core::ErrorCode::internal_error,
-            "the recovery state names snapshot recordingId=" + std::to_string(recovery->snapshot_recording_id) +
-                "; snapshot loading lands with C2b"));
+        auto snapshot = load_snapshot(recovery->snapshot_recording_id);
+        if (!snapshot)
+        {
+            result = std::unexpected(snapshot.error());
+        }
+        else
+        {
+            time_unit_ = snapshot->time_unit;
+            loaded = std::move(*snapshot);
+        }
     }
 
-    context_->set_lifecycle(LifecycleCallback::on_start);
-    Cluster cluster = make_cluster();
-    std::expected<void, Error> result = service_.on_start(cluster, nullptr);
-    context_->set_lifecycle(LifecycleCallback::none);
+    if (result.has_value())
+    {
+        context_->set_lifecycle(LifecycleCallback::on_start);
+        Cluster cluster = make_cluster();
+        if (loaded.has_value())
+        {
+            SnapshotImage image{loaded->image};
+            result = service_.on_start(cluster, &image);
+        }
+        else
+        {
+            result = service_.on_start(cluster, nullptr);
+        }
+        context_->set_lifecycle(LifecycleCallback::none);
+    }
+
+    if (loaded.has_value())
+    {
+        (void)aeron_subscription_image_release(loaded->subscription.get(), loaded->image);
+        loaded->subscription.reset();
+    }
 
     const std::int64_t relevant_id = result.has_value() ? aeron_client_id(client_->handle()) : -1;
     auto acked = send_ack(log_position_, cluster_time_, relevant_id);
@@ -772,9 +1136,7 @@ public:
                         message.action &&
                     detail::should_snapshot(message.flags, agent_.standby_snapshot_flags_))
                 {
-                    return std::unexpected(
-                        axc::core::make_error(axc::core::ErrorCode::internal_error,
-                                              "ClusterAction(SNAPSHOT) requested; snapshot taking lands with C2b"));
+                    agent_.pending_snapshot_ = SnapshotAction{message.log_position, message.leadership_term_id};
                 }
                 return {};
             }
@@ -833,6 +1195,17 @@ std::expected<std::size_t, Error> ClusteredServiceAgent<S>::poll_log()
     if (!read)
     {
         return std::unexpected(read.error());
+    }
+
+    if (pending_snapshot_.has_value())
+    {
+        const SnapshotAction action = *pending_snapshot_;
+        pending_snapshot_.reset();
+        auto executed = execute_snapshot_action(action);
+        if (!executed)
+        {
+            return std::unexpected(executed.error());
+        }
     }
 
     if (0 == *read && log_adapter_.is_done())

@@ -9,8 +9,10 @@ axc_add_library(axc_cluster_service
         container_context.cpp
         service_adapter.cpp
         log_adapter.cpp
+        snapshot.cpp
     DEPS
         axc_cluster_common
         axc_core
         axc_sbe
-        aeron_static)
+        aeron_static
+        aeron_archive_c_client_static)
