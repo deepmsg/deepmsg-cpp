@@ -138,8 +138,10 @@ protected:
     }
 
     /// Starts the driver (standalone cases) and the archive child in `mode`.
-    /// `recorder_threads` is the A6f extension (default 1 = the reference).
-    void start_archive(std::string_view mode, bool standalone, std::int32_t recorder_threads = 1)
+    /// `recorder_threads` is the A6f extension (default 1 = the reference);
+    /// `events_enabled` turns on the recording-events publication path.
+    void start_archive(std::string_view mode, bool standalone, std::int32_t recorder_threads = 1,
+                       bool events_enabled = false)
     {
         if (standalone)
         {
@@ -157,7 +159,9 @@ protected:
             "-Daeron.archive.id=" + std::to_string(ARCHIVE_ID), "-Daeron.archive.threading.mode=" + std::string{mode},
             "-Daeron.thread.naming=new", "-Daeron.archive.idle.strategy=yield",
             "-Daeron.archive.segment.file.length=131072", "-Daeron.archive.dir.delete.on.start=true",
-            "-Daeron.archive.recording.events.enabled=false",
+            events_enabled ? "-Daeron.archive.recording.events.enabled=true"
+                           : "-Daeron.archive.recording.events.enabled=false",
+            "-Daeron.archive.recording.events.channel=aeron:ipc",
             // LOCAL + UDP records through an `aeron-spy:` subscription; the
             // driver only counts a spy as a subscriber with this on
             // (`TestArchive.h` passes it too).
@@ -468,6 +472,24 @@ TEST_F(ThreadingInteropTest, twoRecordersRunTwoAgentsAndTwoLabelledCounterPairs)
     // conductor + replayer + two recorders.
     EXPECT_EQ(4u, count_type(labels, 103));
     EXPECT_EQ(4u, count_type(labels, 104));
+}
+
+// A6f-3: with events enabled, N recorders own one publication each (a single
+// publication has one writer); the recording path still runs end to end.
+TEST_F(ThreadingInteropTest, twoRecordersWithRecordingEventsCompleteARound)
+{
+    start_archive("DEDICATED", true, 2, true);
+    ASSERT_TRUE(connected_) << "the archive client did not connect";
+
+    const auto names = wait_for_task_names("aeron-ar-cnd", "aeron-ar-rec-0", "aeron-ar-rec-1");
+    EXPECT_TRUE(contains(names, "aeron-ar-rec-0"));
+    EXPECT_TRUE(contains(names, "aeron-ar-rec-1"));
+
+    run_round();
+
+    const auto labels = counter_labels();
+    EXPECT_TRUE(has_label(labels, "archive-recorder-0 max cycle time in ns: DEDICATED"));
+    EXPECT_TRUE(has_label(labels, "archive-recorder-1 max cycle time in ns: DEDICATED"));
 }
 
 TEST_F(ThreadingInteropTest, sharedModeRunsCallerDrivenAndStartsNoWorkerThread)

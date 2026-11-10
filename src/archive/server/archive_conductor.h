@@ -487,11 +487,11 @@ private:
 
     // Recording (A2b).
     Catalog catalog_;
-    /// `ArchiveConductor.java:224-225`: one events publication for every
-    /// recording session (null when `aeron.archive.recording.events.enabled`
-    /// is false).
-    std::unique_ptr<DeepmsgExclusivePublication> events_publication_;
-    std::optional<RecordingEvents> events_;
+    /// `ArchiveConductor.java:224-225`: one events publication shared by every
+    /// recording session (empty when `aeron.archive.recording.events.enabled`
+    /// is false). A6f-3: one per recorder, because a publication has one writer.
+    std::vector<std::unique_ptr<DeepmsgExclusivePublication>> events_publications_;
+    std::vector<std::unique_ptr<RecordingEvents>> events_;
     /// `ctx.numRecorderThreads()`: one `Recorder` in the reference shape, N with
     /// `deepmsg.archive.recorder.threads` (C++ extension, P-A9).
     std::vector<std::unique_ptr<Recorder>> recorders_;

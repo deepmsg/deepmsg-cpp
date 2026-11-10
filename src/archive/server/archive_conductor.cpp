@@ -463,30 +463,45 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     {
         // `ArchiveConductor.java:224-225` and `Archive.Context` validation in
         // `parse_recording_settings` (channel required when enabled).
-        auto async = client_.add_exclusive_publication(context_.recording.recording_events_channel,
-                                                       context_.recording.recording_events_stream_id);
-        for (int attempt = 0; attempt < 5000; attempt++)
+        //
+        // A6f-3: the reference has one publication because it has one recorder
+        // thread. An Aeron publication is not multi-writer, so N recorders get
+        // one each (same channel and stream, so a subscriber sees every
+        // recording; per-recording order is kept because a recording's events
+        // always come from the recorder that runs it).
+        events_publications_.reserve(recorders_.size());
+        events_.reserve(recorders_.size());
+        for (std::size_t index = 0; index < recorders_.size(); index++)
         {
-            auto polled = async.poll();
-            if (!polled)
+            auto async = client_.add_exclusive_publication(context_.recording.recording_events_channel,
+                                                           context_.recording.recording_events_stream_id);
+            bool completed = false;
+            for (int attempt = 0; attempt < 5000 && !completed; attempt++)
             {
-                return std::unexpected(polled.error());
+                auto polled = async.poll();
+                if (!polled)
+                {
+                    return std::unexpected(polled.error());
+                }
+                if (polled->has_value())
+                {
+                    auto handle = std::move(**polled);
+                    events_publications_.push_back(std::make_unique<DeepmsgExclusivePublication>(handle.release()));
+                    events_.push_back(std::make_unique<RecordingEvents>(*events_publications_.back()));
+                    completed = true;
+                }
+                else
+                {
+                    (void)client_.do_work();
+                    ::usleep(1000);
+                }
             }
-            if (polled->has_value())
-            {
-                auto handle = std::move(**polled);
-                events_publication_ = std::make_unique<DeepmsgExclusivePublication>(handle.release());
-                events_.emplace(*events_publication_);
-                break;
-            }
-            (void)client_.do_work();
-            ::usleep(1000);
-        }
 
-        if (!events_)
-        {
-            return std::unexpected(
-                axc::core::make_error(axc::core::ErrorCode::io_error, "recording events publication did not complete"));
+            if (!completed)
+            {
+                return std::unexpected(axc::core::make_error(axc::core::ErrorCode::io_error,
+                                                             "recording events publication did not complete"));
+            }
         }
     }
 
@@ -568,8 +583,8 @@ void ArchiveConductor::close()
     {
         (void)catalog_.close();
     }
-    events_.reset();
-    events_publication_.reset();
+    events_.clear();
+    events_publications_.clear();
 
     // Everything that owns a client resource must be released before the client
     // itself: `aeron_close` deletes every registration, and a later close of the
@@ -1399,7 +1414,9 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     config.original_channel = subscription.original_channel;
     config.stripped_channel = subscription.stripped_channel;
     config.source_identity = source_identity;
-    config.events = events_ ? &*events_ : nullptr;
+    // A6f-3: the session's events go out on the publication of the recorder that
+    // will run it (per-recording order is preserved).
+    config.events = events_.empty() ? nullptr : events_[recorder_index_for(recording_id)].get();
 
     // P-A9: this session's bytes are reported to the recorder that will run it.
     RecordingWriter writer(recording_id, summary.start_position, summary.segment_file_length, term_buffer_length,
@@ -1796,7 +1813,9 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     config.original_channel = subscription.original_channel;
     config.stripped_channel = subscription.stripped_channel;
     config.source_identity = source_identity;
-    config.events = events_ ? &*events_ : nullptr;
+    // A6f-3: the session's events go out on the publication of the recorder that
+    // will run it (per-recording order is preserved).
+    config.events = events_.empty() ? nullptr : events_[recorder_index_for(*recording_id)].get();
 
     // P-A9: this session's bytes are reported to the recorder that will run it.
     RecordingWriter writer(*recording_id, constants.join_position, segment_file_length, term_buffer_length,
