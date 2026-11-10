@@ -65,6 +65,18 @@ axc_add_executable(axc_archive_unit_tests
 target_compile_definitions(axc_archive_unit_tests PRIVATE
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
+axc_add_executable(axc_cluster_unit_tests
+    SOURCES
+        cluster/common/recording_log_test.cpp
+        cluster/common/recording_log_golden_test.cpp
+        cluster/common/node_state_file_test.cpp
+    DEPS
+        axc_cluster_common
+        GTest::gtest_main)
+
+target_compile_definitions(axc_cluster_unit_tests PRIVATE
+    "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
+
 include(GoogleTest)
 # PRE_TEST: discover at test time, not build time. Sanitizer binaries (TSan in
 # particular) cannot always be executed by the build step -- on kernels with high
@@ -73,3 +85,4 @@ include(GoogleTest)
 gtest_discover_tests(axc_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
 gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
 gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
+gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)

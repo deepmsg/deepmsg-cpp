@@ -1,0 +1,4 @@
+semanticVersion=768
+candidateTermId=832234
+timestamp=324234
+logPosition=8923423

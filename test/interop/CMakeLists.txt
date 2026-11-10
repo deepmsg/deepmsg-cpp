@@ -40,6 +40,25 @@ target_compile_definitions(axc_archive_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
     "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\"")
 
+# C1a: the reference `ClusterTool recording-log` as the oracle for a
+# `recording.log` we wrote.
+axc_add_executable(axc_cluster_interop_tests
+    SOURCES
+        cluster/recording_log_interop_test.cpp
+        fixture/java_process.cpp
+        fixture/process.cpp
+    DEPS
+        axc_cluster_common
+        axc_core
+        GTest::gtest_main)
+
+target_include_directories(axc_cluster_interop_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+target_compile_definitions(axc_cluster_interop_tests PRIVATE
+    "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
+    "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
+
 include(GoogleTest)
 gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
 gtest_discover_tests(axc_archive_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
+gtest_discover_tests(axc_cluster_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
