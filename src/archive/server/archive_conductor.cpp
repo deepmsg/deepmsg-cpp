@@ -175,6 +175,21 @@ std::expected<std::unique_ptr<ArchiveConductor>, axc::core::Error> ArchiveConduc
 
 std::expected<void, axc::core::Error> ArchiveConductor::init()
 {
+    // P-A9 (`deepmsg.archive.recorder.threads`): one `Recorder` is the
+    // reference's shape; N > 1 is the C++ extension. The inboxes and duty-cycle
+    // trackers are per recorder, the close queue stays shared (its only consumer
+    // is the conductor).
+    const auto recorder_threads = static_cast<std::size_t>(context_.threading.recorder_threads);
+    recorders_.reserve(recorder_threads);
+    recording_inboxes_.reserve(recorder_threads);
+    recorder_duty_cycles_.reserve(recorder_threads);
+    for (std::size_t index = 0; index < recorder_threads; index++)
+    {
+        recorders_.push_back(std::make_unique<Recorder>());
+        recording_inboxes_.push_back(std::make_unique<axc::core::ManyToOneQueue<RecordingSession>>());
+        recorder_duty_cycles_.push_back(std::make_unique<DutyCycleTrackers>());
+    }
+
     axc::core::ClientConfig config;
     config.dir = context_.aeron_dir;
     config.use_conductor_agent_invoker = true;
@@ -263,7 +278,10 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     // through the close queues.
     if (is_dedicated())
     {
-        recorder_.set_queues(&recording_inbox_, &recording_close_queue_);
+        for (std::size_t index = 0; index < recorders_.size(); index++)
+        {
+            recorders_[index]->set_queues(recording_inboxes_[index].get(), &recording_close_queue_);
+        }
         replayer_.set_queues(&replay_inbox_, &replay_close_queue_);
     }
 
@@ -344,7 +362,10 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     }
     recording_sessions_counter_.emplace(std::move(*recording_sessions));
 
-    recorder_.set_counters(&*total_write_bytes_counter_, &*total_write_time_counter_, &*max_write_time_counter_);
+    // A6f-1: only the first recorder publishes; the per-recorder accumulation and
+    // the conductor-side sum land in A6f-2. The pointers are still handed to it
+    // through the same three counters the reference uses.
+    recorder().set_counters(&*total_write_bytes_counter_, &*total_write_time_counter_, &*max_write_time_counter_);
 
     // `Archive.java:1644-1730`: the replay session count and the three
     // replayer read metrics.
@@ -407,7 +428,10 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     conductor_duty_cycle_.tracker.update(axc::core::NanoClock::now());
     if (is_dedicated())
     {
-        if (auto allocated = allocate_duty_cycle(recorder_duty_cycle_, "archive-recorder",
+        // A6f-1 keeps the reference's single labelled pair on the first
+        // recorder; the per-recorder labels come with A6f-2. The other recorders
+        // run without a tracker (`do_work_threaded` skips a null one).
+        if (auto allocated = allocate_duty_cycle(*recorder_duty_cycles_.front(), "archive-recorder",
                                                  context_.threading.recorder_cycle_threshold_ns);
             !allocated)
         {
@@ -419,7 +443,7 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
         {
             return std::unexpected(allocated.error());
         }
-        recorder_.set_duty_cycle_tracker(&recorder_duty_cycle_.tracker);
+        recorder().set_duty_cycle_tracker(&recorder_duty_cycles_.front()->tracker);
         replayer_.set_duty_cycle_tracker(&replayer_duty_cycle_.tracker);
     }
 
@@ -495,8 +519,12 @@ void ArchiveConductor::close()
     {
         // The runtime has already stopped the recorder/replayer runners
         // (`DedicatedModeArchiveConductor.closeSessionWorkers`, `:96-116`): hand
-        // their remaining sessions back and close them on this thread.
-        recorder_.close_threaded();
+        // their remaining sessions back and close them on this thread. Every
+        // recorder hands back to the same close queue.
+        for (auto& recorder : recorders_)
+        {
+            recorder->close_threaded();
+        }
         replayer_.close_threaded();
         while (!recording_close_queue_.empty() || !replay_close_queue_.empty())
         {
@@ -505,7 +533,10 @@ void ArchiveConductor::close()
     }
     else
     {
-        recorder_.close();
+        for (auto& recorder : recorders_)
+        {
+            recorder->close();
+        }
         replayer_.close();
     }
     replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
@@ -553,7 +584,13 @@ void ArchiveConductor::close()
     total_write_bytes_counter_.reset();
     max_write_time_counter_.reset();
     // The three duty-cycle tracker pairs (103/104) own counters too.
-    for (DutyCycleTrackers* trackers : {&conductor_duty_cycle_, &recorder_duty_cycle_, &replayer_duty_cycle_})
+    for (DutyCycleTrackers* trackers : {&conductor_duty_cycle_, &replayer_duty_cycle_})
+    {
+        trackers->max_cycle_time.reset();
+        trackers->threshold_exceeded.reset();
+        trackers->tracker = axc::core::DutyCycleTracker{};
+    }
+    for (auto& trackers : recorder_duty_cycles_)
     {
         trackers->max_cycle_time.reset();
         trackers->threshold_exceeded.reset();
@@ -595,7 +632,9 @@ int ArchiveConductor::do_work()
         });
     if (!is_dedicated())
     {
-        work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
+        // SHARED/INVOKER have no worker thread, so `recorder_threads` is 1
+        // (`parse_threading_settings` refuses anything else).
+        work_count += recorder().do_work([this](RecordingSession& session) { close_recording_session(session); });
     }
     work_count += sessions_.do_work(
         [this](ControlSession& session)
@@ -1324,8 +1363,9 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     config.source_identity = source_identity;
     config.events = events_ ? &*events_ : nullptr;
 
+    // P-A9: this session's bytes are reported to the recorder that will run it.
     RecordingWriter writer(recording_id, summary.start_position, summary.segment_file_length, term_buffer_length,
-                           constants.join_position, std::move(writer_context), &recorder_);
+                           constants.join_position, std::move(writer_context), &recorder_for(recording_id));
 
     auto session = std::make_unique<RecordingSession>(
         std::move(config), std::move(writer), std::make_unique<axc::core::PositionWriterTarget>(std::move(position)),
@@ -1720,8 +1760,9 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     config.source_identity = source_identity;
     config.events = events_ ? &*events_ : nullptr;
 
+    // P-A9: this session's bytes are reported to the recorder that will run it.
     RecordingWriter writer(*recording_id, constants.join_position, segment_file_length, term_buffer_length,
-                           constants.join_position, std::move(writer_context), &recorder_);
+                           constants.join_position, std::move(writer_context), &recorder_for(*recording_id));
 
     auto session = std::make_unique<RecordingSession>(
         std::move(config), std::move(writer), std::make_unique<axc::core::PositionWriterTarget>(std::move(position)),
@@ -1792,12 +1833,15 @@ void ArchiveConductor::add_recording_session(std::unique_ptr<RecordingSession> s
     // `DedicatedModeRecorder.addSession` (`DedicatedModeArchiveConductor.java:213-218`).
     if (!is_dedicated())
     {
-        recorder_.add_session(std::move(session));
+        recorder().add_session(std::move(session));
         return;
     }
 
+    // P-A9 dispatch: `recording_id % N` (`plan-a6f` §6 Q2). Each recorder has
+    // its own inbox because a `ManyToOneQueue` has exactly one consumer.
+    auto& inbox = *recording_inboxes_[recorder_index_for(session->recording_id())];
     RecordingSession* raw = session.release();
-    while (!recording_inbox_.push(raw))
+    while (!inbox.push(raw))
     {
         // Only an allocation failure can refuse; the reference retries too.
         ::sched_yield();

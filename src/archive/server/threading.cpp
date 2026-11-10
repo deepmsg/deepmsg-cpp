@@ -1,6 +1,8 @@
 #include "archive/server/threading.h"
 
+#include <charconv>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include "archive/server/archive_config.h"
@@ -156,6 +158,30 @@ std::expected<ThreadingSettings, axc::core::Error> parse_threading_settings(
             return std::unexpected(naming.error());
         }
         settings.naming = *naming;
+    }
+
+    // `deepmsg.archive.recorder.threads` (C++ extension, P-A9): 1 is the
+    // reference shape. A value above 1 only means something when there are
+    // worker threads to multiply.
+    if (const auto value = source.get("deepmsg.archive.recorder.threads"); value.has_value())
+    {
+        std::int32_t threads = 0;
+        const char* begin = value->data();
+        const char* end = begin + value->size();
+        const auto parsed = std::from_chars(begin, end, threads);
+        if (parsed.ec != std::errc{} || parsed.ptr != end || threads < 1 || threads > MAX_RECORDER_THREADS)
+        {
+            return std::unexpected(axc::core::make_error(
+                axc::core::ErrorCode::config_error, "invalid deepmsg.archive.recorder.threads: " + std::string{*value} +
+                                                        " (1.." + std::to_string(MAX_RECORDER_THREADS) + ")"));
+        }
+        if (threads > 1 && ArchiveThreadingMode::dedicated != settings.mode)
+        {
+            return std::unexpected(axc::core::make_error(
+                axc::core::ErrorCode::config_error,
+                "deepmsg.archive.recorder.threads>1 requires aeron.archive.threading.mode=DEDICATED"));
+        }
+        settings.recorder_threads = threads;
     }
 
     auto archive_idle = idle_or(source, "aeron.archive.idle.strategy");

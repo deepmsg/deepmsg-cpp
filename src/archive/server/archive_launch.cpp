@@ -488,30 +488,60 @@ std::expected<void, axc::core::Error> ArchiveServer::start()
 
     const ThreadNaming naming = config_.threading.naming;
     conductor_agent_ = std::make_unique<ConductorAgent>(*conductor_, thread_name(naming, AgentRole::conductor));
-    recorder_agent_ = std::make_unique<RecorderAgent>(conductor_->recorder(), thread_name(naming, AgentRole::recorder));
+
+    // P-A9: one recorder agent per `deepmsg.archive.recorder.threads` (one in
+    // the reference shape). N = 1 keeps the reference's thread name; N > 1 adds
+    // the index so a stack dump says which worker it is.
+    auto& recorders = conductor_->recorders();
+    recorder_agents_.reserve(recorders.size());
+    recorder_runners_.reserve(recorders.size());
+    for (std::size_t index = 0; index < recorders.size(); index++)
+    {
+        std::string name{thread_name(naming, AgentRole::recorder)};
+        if (recorders.size() > 1)
+        {
+            name += "-" + std::to_string(index);
+        }
+        recorder_agents_.push_back(std::make_unique<RecorderAgent>(*recorders[index], name));
+        recorder_runners_.push_back(std::make_unique<axc::core::AgentRunner<RecorderAgent>>(
+            *recorder_agents_.back(), config_.threading.recorder_idle, error_handler_,
+            config_.threading.recorder_affinity));
+    }
+
     replayer_agent_ = std::make_unique<ReplayerAgent>(conductor_->replayer(), thread_name(naming, AgentRole::replayer));
 
     conductor_runner_ = std::make_unique<axc::core::AgentRunner<ConductorAgent>>(
         *conductor_agent_, config_.threading.idle, error_handler_, config_.threading.conductor_affinity);
-    recorder_runner_ = std::make_unique<axc::core::AgentRunner<RecorderAgent>>(
-        *recorder_agent_, config_.threading.recorder_idle, error_handler_, config_.threading.recorder_affinity);
     replayer_runner_ = std::make_unique<axc::core::AgentRunner<ReplayerAgent>>(
         *replayer_agent_, config_.threading.replayer_idle, error_handler_, config_.threading.replayer_affinity);
 
     // `DedicatedModeArchiveConductor.onStart` (`:62-77`): workers first, then
     // the conductor (whose first pass may hand sessions over).
-    if (auto started = recorder_runner_->start(); !started)
+    for (auto& runner : recorder_runners_)
     {
-        return started;
+        if (auto started = runner->start(); !started)
+        {
+            for (auto& started_recorder : recorder_runners_)
+            {
+                started_recorder->close();
+            }
+            return started;
+        }
     }
     if (auto started = replayer_runner_->start(); !started)
     {
-        recorder_runner_->close();
+        for (auto& runner : recorder_runners_)
+        {
+            runner->close();
+        }
         return started;
     }
     if (auto started = conductor_runner_->start(); !started)
     {
-        recorder_runner_->close();
+        for (auto& runner : recorder_runners_)
+        {
+            runner->close();
+        }
         replayer_runner_->close();
         return started;
     }
@@ -535,10 +565,14 @@ void ArchiveServer::close()
 {
     // `DedicatedModeArchiveConductor.closeSessionWorkers` (`:96-116`): stop the
     // workers (their agents hand the remaining sessions back), then the
-    // conductor, whose `close()` drains the close queues and closes them.
-    if (runtime_started_ && recorder_runner_)
+    // conductor, whose `close()` drains the close queues and closes them. The
+    // recorder agents stop in reverse start order.
+    if (runtime_started_)
     {
-        recorder_runner_->close();
+        for (auto runner = recorder_runners_.rbegin(); runner != recorder_runners_.rend(); ++runner)
+        {
+            (*runner)->close();
+        }
     }
     if (runtime_started_ && replayer_runner_)
     {
