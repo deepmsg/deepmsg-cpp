@@ -9,6 +9,13 @@
 # (`-version` during CMake configure, unrelated main classes) goes to the real
 # JVM.
 #
+# `AXC_SHIM_DEEPMSG_IDS` (from `mapped.conf` next to this script, written by the
+# test runner) selects by `-Daeron.archive.id`: a comma-separated list sends
+# exactly those archive ids to our binary and every other one to the real JVM,
+# so a replication test can pair `java -> deepmsg`, `deepmsg -> java` or
+# `deepmsg -> deepmsg`. Empty (or missing) keeps the historical behaviour: every
+# archive goes to our binary.
+#
 # The binary directory comes from `mapped.conf` next to this script when it
 # exists (written by the test runner), then `AXC_BIN_DIR`, then the debug
 # preset default.
@@ -24,11 +31,38 @@ fi
 
 bin_dir=${AXC_BIN_DIR:-"$here/../../../build/debug/apps/deepmsg-archive-server"}
 real_java=${AXC_REAL_JAVA:-/usr/bin/java}
+deepmsg_ids=${AXC_SHIM_DEEPMSG_IDS:-}
 
+is_archive=0
+archive_id=""
 for argument in "$@"; do
-    if [ "$argument" = "io.aeron.archive.ArchivingMediaDriver" ]; then
-        exec "$bin_dir/deepmsg-archive-server" "$@"
-    fi
+    case "$argument" in
+        io.aeron.archive.ArchivingMediaDriver)
+            is_archive=1
+            ;;
+        -Daeron.archive.id=*)
+            archive_id=${argument#-Daeron.archive.id=}
+            ;;
+    esac
 done
+
+to_deepmsg=0
+if [ 1 -eq "$is_archive" ]; then
+    if [ -z "$deepmsg_ids" ]; then
+        to_deepmsg=1
+    else
+        IFS=',' read -r -a ids <<< "$deepmsg_ids"
+        for id in "${ids[@]}"; do
+            if [ "$id" = "$archive_id" ]; then
+                to_deepmsg=1
+                break
+            fi
+        done
+    fi
+fi
+
+if [ 1 -eq "$to_deepmsg" ]; then
+    exec "$bin_dir/deepmsg-archive-server" "$@"
+fi
 
 exec "$real_java" "$@"

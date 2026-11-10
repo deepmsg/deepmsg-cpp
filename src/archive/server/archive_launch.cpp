@@ -178,6 +178,7 @@ std::expected<ArchiveLaunchConfig, axc::core::Error> parse_launch_config(
     config.control_channel = string_or(source, "aeron.archive.control.channel", config.control_channel);
     config.local_control_channel =
         string_or(source, "aeron.archive.local.control.channel", config.local_control_channel);
+    config.replication_channel = string_or(source, "aeron.archive.replication.channel", config.replication_channel);
 
     auto control_stream_id = int32_or(source, "aeron.archive.control.stream.id", config.control_stream_id);
     if (!control_stream_id)
@@ -375,6 +376,7 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     conductor_context.control_stream_id = config_.control_stream_id;
     conductor_context.local_control_channel = config_.local_control_channel;
     conductor_context.local_control_stream_id = config_.local_control_stream_id;
+    conductor_context.replication_channel = config_.replication_channel;
     conductor_context.aeron_dir = config_.aeron_dir;
     conductor_context.connect_timeout_ms = config_.connect_timeout_ms;
     conductor_context.session_liveness_check_interval_ms = config_.session_liveness_check_interval_ms;

@@ -20,6 +20,8 @@ axc_add_executable(axc_archive_interop_tests
         archive/catalog_interop_test.cpp
         archive/conductor_interop_test.cpp
         archive/recording_interop_test.cpp
+        archive/replication_client_probe_test.cpp
+        archive/replication_interop_test.cpp
         fixture/c_driver.cpp
         fixture/java_process.cpp
         fixture/process.cpp

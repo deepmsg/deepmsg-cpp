@@ -205,6 +205,35 @@ struct MigrateSegmentsRequest
     ControlSession* session{nullptr};
 };
 
+/// `ReplicateRequest2` (66) (`ControlSessionAdapter.java:965-1019`). The v7/v8
+/// fields are `Aeron.NULL_VALUE` when the request predates them.
+struct ReplicateRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t src_recording_id{0};
+    std::int64_t dst_recording_id{-1};
+    std::int64_t stop_position{-1};
+    std::int64_t channel_tag_id{-1};
+    std::int64_t subscription_tag_id{-1};
+    std::int32_t src_control_stream_id{0};
+    std::int32_t file_io_max_length{-1};
+    std::int32_t replication_session_id{-1};
+    std::string src_control_channel;
+    std::string live_destination;
+    std::string replication_channel;
+    std::string src_response_channel;
+    std::string encoded_credentials;
+    ControlSession* session{nullptr};
+};
+
+/// `StopReplicationRequest` (51) (`ControlSessionAdapter.java:706-724`).
+struct StopReplicationRequest
+{
+    std::int64_t correlation_id{0};
+    std::int64_t replication_id{0};
+    ControlSession* session{nullptr};
+};
+
 /// `ListRecordingsRequest` (8) (`ControlSessionAdapter.java:275-295`).
 struct ListRecordingsRequest
 {
@@ -285,6 +314,8 @@ public:
     virtual void on_attach_segments(const RecordingIdRequest& request) = 0;
     virtual void on_list_recordings(const ListRecordingsRequest& request) = 0;
     virtual void on_list_recordings_for_uri(const ListRecordingsForUriRequest& request) = 0;
+    virtual void on_replicate(const ReplicateRequest& request) = 0;
+    virtual void on_stop_replication(const StopReplicationRequest& request) = 0;
     virtual void on_update_channel(const UpdateChannelRequest& request) = 0;
     virtual void on_migrate_segments(const MigrateSegmentsRequest& request) = 0;
 
@@ -360,6 +391,8 @@ public:
     static constexpr std::int32_t TEMPLATE_ATTACH_SEGMENTS = 56;
     static constexpr std::int32_t TEMPLATE_MIGRATE_SEGMENTS = 57;
     static constexpr std::int32_t TEMPLATE_UPDATE_CHANNEL = 107;
+    static constexpr std::int32_t TEMPLATE_STOP_REPLICATION = 51;
+    static constexpr std::int32_t TEMPLATE_REPLICATE_2 = 66;
     static constexpr std::int32_t TEMPLATE_AUTH_CONNECT = 58;
     static constexpr std::int32_t TEMPLATE_CHALLENGE_RESPONSE = 60;
     static constexpr std::int32_t TEMPLATE_KEEP_ALIVE = 61;

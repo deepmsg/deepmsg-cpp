@@ -34,6 +34,11 @@ if [ ! -x "$test_bin" ]; then
 fi
 
 # `archive-java` reads this because the spawned child cannot be given env vars.
-printf 'AXC_BIN_DIR=%s\n' "$bin_dir" > "$root/test/interop/shim/mapped.conf"
+# `AXC_SHIM_DEEPMSG_IDS` picks which archive ids (by `-Daeron.archive.id`) go to
+# our binary; unset sends every archive there, so the two pairing runs are
+# `AXC_SHIM_DEEPMSG_IDS=42` (only the source is ours) and `=-7777` (only the
+# destination is ours).
+printf 'AXC_BIN_DIR=%s\nAXC_SHIM_DEEPMSG_IDS=%s\n' "$bin_dir" "${AXC_SHIM_DEEPMSG_IDS:-}" \
+    > "$root/test/interop/shim/mapped.conf"
 
 exec "$test_bin" "$@"

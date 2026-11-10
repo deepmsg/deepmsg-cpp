@@ -28,6 +28,7 @@
 #include "archive/server/recording_events.h"
 #include "archive/server/replay_session.h"
 #include "archive/server/replayer.h"
+#include "archive/server/replication_session.h"
 #include "archive/server/segment_validation.h"
 #include "archive/server/session_worker.h"
 #include "core/counters/counter_target.h"
@@ -50,6 +51,8 @@ struct ArchiveConductorContext
     /// (`Archive.java:484-500`): the privileged local control channel.
     std::string local_control_channel{"aeron:ipc?term-length=64k"};
     std::int32_t local_control_stream_id{10};
+    /// `Archive.Context.replicationChannel` (`Archive.java:1301-1303`).
+    std::string replication_channel;
     /// Empty ⇒ the Aeron default (`/dev/shm/aeron-<user>`).
     std::string aeron_dir;
     std::int64_t connect_timeout_ms{3000};
@@ -90,7 +93,8 @@ class ArchiveConductor final : public ControlSessionHandler,
                                public CreateReplayPublicationSessionHandler,
                                public DeleteSegmentsControl,
                                public DeleteSegmentsResponder,
-                               public ListRecordingsResponses
+                               public ListRecordingsResponses,
+                               public ReplicationControl
 {
 public:
     /// `AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION`.
@@ -134,6 +138,8 @@ public:
     void on_migrate_segments(const MigrateSegmentsRequest& request) override;
     void on_list_recordings(const ListRecordingsRequest& request) override;
     void on_list_recordings_for_uri(const ListRecordingsForUriRequest& request) override;
+    void on_replicate(const ReplicateRequest& request) override;
+    void on_stop_replication(const StopReplicationRequest& request) override;
     void on_start_replay(const ReplayRequest& request) override;
     void on_start_bounded_replay(const BoundedReplayRequest& request) override;
     void on_stop_replay(const StopReplayRequest& request) override;
@@ -160,6 +166,37 @@ public:
                             std::unique_ptr<ReplayPublication> publication) override;
 
     void log_warning(std::string_view message) override;
+
+    // ReplicationControl (`ReplicationSession`'s view of the conductor).
+    void send_replication_signal(std::int64_t control_session_id, std::int64_t replication_id,
+                                 std::int64_t recording_id, std::int64_t subscription_id, std::int64_t position,
+                                 archive_codecs::RecordingSignal::Value signal) override;
+    void send_replication_error(std::int64_t control_session_id, std::int64_t replication_id, std::int64_t error_code,
+                                std::string_view message) override;
+    [[nodiscard]] bool stop_recording_subscription(std::int64_t registration_id) override;
+    [[nodiscard]] std::int64_t catalog_stop_position(std::int64_t recording_id) override;
+    [[nodiscard]] std::expected<std::int64_t, std::string> add_new_recording(
+        std::int64_t start_position, std::int64_t stop_position, std::int64_t start_timestamp,
+        std::int64_t stop_timestamp, std::int32_t image_initial_term_id, std::int32_t segment_file_length,
+        std::int32_t term_buffer_length, std::int32_t mtu_length, std::int32_t session_id, std::int32_t stream_id,
+        std::string_view stripped_channel, std::string_view original_channel,
+        std::string_view source_identity) override;
+    [[nodiscard]] std::expected<void, std::string> replace_recording(
+        std::int64_t recording_id, std::int64_t start_position, std::int64_t stop_position,
+        std::int64_t start_timestamp, std::int64_t stop_timestamp, std::int32_t image_initial_term_id,
+        std::int32_t segment_file_length, std::int32_t term_buffer_length, std::int32_t mtu_length,
+        std::int32_t session_id, std::int32_t stream_id, std::string_view stripped_channel,
+        std::string_view original_channel, std::string_view source_identity) override;
+    [[nodiscard]] std::expected<std::int64_t, std::string> start_extend_recording(
+        std::int64_t control_session_id, std::int64_t correlation_id, std::int64_t recording_id, std::int32_t stream_id,
+        std::int32_t source_location, bool auto_stop, std::string_view original_channel) override;
+    [[nodiscard]] std::optional<ExtendRecordingOutcome> take_extend_recording_outcome(std::int64_t token) override;
+    void cancel_extend_recording(std::int64_t token) override;
+    [[nodiscard]] aeron_image_t* image_by_session_id(std::int64_t registration_id, std::int32_t session_id) override;
+    [[nodiscard]] std::int64_t image_position(aeron_image_t* image) override;
+    [[nodiscard]] bool image_is_closed(aeron_image_t* image) override;
+    [[nodiscard]] bool image_is_end_of_stream(aeron_image_t* image) override;
+    [[nodiscard]] std::optional<std::string> subscription_resolved_endpoint(std::int64_t registration_id) override;
 
     // DeleteSegmentsControl (`ControlSession.archiveConductor()`).
     [[nodiscard]] bool has_in_progress_replays(std::int64_t recording_id) override;
@@ -251,6 +288,11 @@ private:
         bool auto_stop{false};
         bool extend{false};
         std::int64_t extend_recording_id{0};
+        /// Non-zero when a replication session started this add: its outcome
+        /// is published in `extend_outcomes_` under this token
+        /// (`ArchiveConductor.extendRecording` returns the `Subscription`
+        /// synchronously in the reference; ours is a driver round trip).
+        std::int64_t extend_token{0};
         axc::core::AsyncAdd<axc::core::SubPtr> subscription_add;
     };
 
@@ -291,6 +333,18 @@ private:
     void mark_counter_closed(std::int32_t counter_id);
     [[nodiscard]] int start_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
     [[nodiscard]] int extend_recording_session(RecordingSubscription& subscription, aeron_image_t* image);
+
+    /// `ArchiveConductor.extendRecording` (`ArchiveConductor.java:1067-1151`):
+    /// validation, the recording-subscription add and the OK/ERROR, shared by
+    /// the wire handler and a replication session (which passes its
+    /// `replicationId` as the correlation).
+    ///
+    /// Success returns a token for `take_extend_recording_outcome()`; failure
+    /// returns the message that already went out as the ERROR.
+    [[nodiscard]] std::expected<std::int64_t, std::string> extend_recording(
+        std::int64_t correlation_id, std::int64_t recording_id, std::int32_t stream_id, std::int32_t source_location,
+        bool auto_stop, std::string_view original_channel, ControlSession& session);
+
     void close_recording_session(RecordingSession& session);
     void abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason);
     [[nodiscard]] std::optional<RecordingSubscription> remove_recording_subscription(std::int64_t registration_id);
@@ -368,6 +422,10 @@ private:
     /// subscription registration id -> `recording_subscriptions_` key.
     std::unordered_map<std::int64_t, std::string> recording_subscription_keys_;
     std::vector<PendingRecordingSubscription> pending_recording_subscriptions_;
+    /// `extend_token` → outcome for the replication path; the wire path has no
+    /// waiter and leaves its token zero.
+    std::unordered_map<std::int64_t, ExtendRecordingOutcome> extend_outcomes_;
+    std::int64_t next_extend_token_{1};
     std::unordered_map<aeron_image_t*, RecordingSession*> sessions_by_image_;
 
     /// A listing in progress (`ListRecordingByIdSession` /
@@ -425,6 +483,10 @@ private:
     /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
     std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
+
+    // Replication (A4b).
+    SessionWorker<ReplicationSession> replication_sessions_;
+    std::unordered_map<std::int64_t, ReplicationSession*> replication_session_by_id_;
 
     // Listing (A3a).
     SessionWorker<ListRecordingsSession> list_recordings_sessions_;
