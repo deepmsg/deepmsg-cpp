@@ -24,15 +24,18 @@ commit.
 | timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
 | ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
 
-## C++-only switches (A6c, 2026-11-10)
+## C++-only switches (A6c/A6d, 2026-11-10)
 
 These never join the reference's 48-name table (`archive_config_names()`), whose
 test asserts every entry starts with `aeron.archive.`. The defaults reproduce the
-reference behaviour.
+reference behaviour (sparse `setLength`, `FileChannel.read` into a buffer, no
+advice).
 
 | Name | Default | Meaning | Pinned by |
 |---|---|---|---|
 | `deepmsg.archive.file.io.fallocate` | `false` | Best-effort preallocation after the reference's `ftruncate`/`setLength` (`RecordingWriter.java:219`): `fallocate(FALLOC_FL_KEEP_SIZE)`. A refusal (unsupported filesystem, `ENOSPC`) leaves the segment sparse and defers a full-disk failure to the write, with one warning. | `ArchiveConfigTest`, `SyncWriterTest` |
+| `deepmsg.archive.replay.io.backend` | `pread` | How `ReplaySession` reads segment files: `pread` copies into the session's read window (the reference's shape) or `mmap` maps the file `MAP_PRIVATE` so the frame loop walks the mapping (frame-header rewrites COW and never reach the file). | `ArchiveConfigTest`, `SegmentReaderTest`, `ReplaySessionTest` |
+| `deepmsg.archive.replay.io.fadvise` | `none` | `willneed` issues `POSIX_FADV_WILLNEED` when a segment is opened and `POSIX_FADV_DONTNEED` before it is dropped; a refused advice (`EINVAL`/`ENOSYS`) is not an error. | `ArchiveConfigTest`, `SegmentReaderTest` |
 
 ## Known gaps (A4b, 2026-11-09)
 

@@ -14,6 +14,8 @@ using axc::core::PropertySource;
 using deepmsg::archive::server::parse_recording_settings;
 using deepmsg::archive::server::parse_replay_settings;
 using deepmsg::archive::server::parse_size;
+using deepmsg::archive::server::io::Backend;
+using deepmsg::archive::server::io::Fadvise;
 
 TEST(ArchiveConfigTest, defaultsMatchTheReference)
 {
@@ -167,6 +169,51 @@ TEST(ArchiveConfigTest, theCppOnlyFallocateSwitchIsRead)
         ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
         EXPECT_FALSE(settings->file_io_fallocate);
     }
+}
+
+// A6d-3: the two C++-only read-backend switches (`docs/compat.md`).
+
+TEST(ArchiveConfigTest, replayIoDefaultsKeepTheReferenceBehaviour)
+{
+    PropertySource source;
+    const auto settings = parse_replay_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+
+    EXPECT_EQ(Backend::pread, settings->io_backend);
+    EXPECT_EQ(Fadvise::none, settings->io_fadvise);
+}
+
+TEST(ArchiveConfigTest, replayIoSwitchesAreRead)
+{
+    PropertySource source;
+    source.set("deepmsg.archive.replay.io.backend", "mmap");
+    source.set("deepmsg.archive.replay.io.fadvise", "willneed");
+
+    const auto settings = parse_replay_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+
+    EXPECT_EQ(Backend::mmap, settings->io_backend);
+    EXPECT_EQ(Fadvise::willneed, settings->io_fadvise);
+}
+
+TEST(ArchiveConfigTest, replayIoRejectsAnUnknownBackend)
+{
+    PropertySource source;
+    source.set("deepmsg.archive.replay.io.backend", "io_uring");
+
+    const auto settings = parse_replay_settings(source);
+    ASSERT_FALSE(settings.has_value());
+    EXPECT_EQ("invalid deepmsg.archive.replay.io.backend=io_uring (pread, mmap)", settings.error().message.view());
+}
+
+TEST(ArchiveConfigTest, replayIoRejectsAnUnknownFadvise)
+{
+    PropertySource source;
+    source.set("deepmsg.archive.replay.io.fadvise", "dontneed");
+
+    const auto settings = parse_replay_settings(source);
+    ASSERT_FALSE(settings.has_value());
+    EXPECT_EQ("invalid deepmsg.archive.replay.io.fadvise=dontneed (none, willneed)", settings.error().message.view());
 }
 
 }  // namespace

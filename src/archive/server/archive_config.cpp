@@ -342,6 +342,45 @@ std::expected<ReplaySettings, axc::core::Error> parse_replay_settings(const axc:
         settings.replay_checksum_name = std::string{*checksum};
     }
 
+    // C++-only read-backend switches (`docs/compat.md`): they never join the
+    // reference's 48-name table, and the defaults keep the reference behaviour
+    // (`pread` + no advice).
+    if (const auto backend = source.get("deepmsg.archive.replay.io.backend"); backend.has_value())
+    {
+        if ("pread" == *backend)
+        {
+            settings.io_backend = io::Backend::pread;
+        }
+        else if ("mmap" == *backend)
+        {
+            settings.io_backend = io::Backend::mmap;
+        }
+        else
+        {
+            return std::unexpected(axc::core::make_error(
+                axc::core::ErrorCode::config_error,
+                "invalid deepmsg.archive.replay.io.backend=" + std::string{*backend} + " (pread, mmap)"));
+        }
+    }
+
+    if (const auto fadvise = source.get("deepmsg.archive.replay.io.fadvise"); fadvise.has_value())
+    {
+        if ("none" == *fadvise)
+        {
+            settings.io_fadvise = io::Fadvise::none;
+        }
+        else if ("willneed" == *fadvise)
+        {
+            settings.io_fadvise = io::Fadvise::willneed;
+        }
+        else
+        {
+            return std::unexpected(axc::core::make_error(
+                axc::core::ErrorCode::config_error,
+                "invalid deepmsg.archive.replay.io.fadvise=" + std::string{*fadvise} + " (none, willneed)"));
+        }
+    }
+
     return settings;
 }
 

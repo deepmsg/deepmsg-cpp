@@ -264,6 +264,16 @@ protected:
         {
             arguments.emplace_back(std::string{"-Ddeepmsg.archive.file.io.fallocate="} + fallocate);
         }
+        // A6d: the parity suite on the mmap read backend / with read-ahead
+        // advice (C++ only, docs/compat.md).
+        if (const char* backend = std::getenv("AXC_REPLAY_IO_BACKEND"); nullptr != backend)
+        {
+            arguments.emplace_back(std::string{"-Ddeepmsg.archive.replay.io.backend="} + backend);
+        }
+        if (const char* fadvise = std::getenv("AXC_REPLAY_IO_FADVISE"); nullptr != fadvise)
+        {
+            arguments.emplace_back(std::string{"-Ddeepmsg.archive.replay.io.fadvise="} + fadvise);
+        }
         arguments.emplace_back("io.aeron.archive.Archive");
         auto spawned = axc::interop::ChildProcess::spawn(AXC_ARCHIVE_SERVER_BIN, arguments);
         ASSERT_TRUE(spawned) << spawned.error().message.view();

@@ -2510,6 +2510,8 @@ void ArchiveConductor::new_replay_session(const CreateReplayPublicationSession::
     replay_config.control_session_id = config.control_session_id;
     replay_config.connect_timeout_ms = context_.connect_timeout_ms;
     replay_config.archive_dir = context_.archive_dir;
+    replay_config.backend = context_.replay.io_backend;
+    replay_config.fadvise = context_.replay.io_fadvise;
 
     auto session = std::make_unique<ReplaySession>(std::move(replay_config), std::move(publication), *this, replayer_,
                                                    replay_clock_, context_.replay_checksum, std::move(limit),
