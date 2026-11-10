@@ -1116,16 +1116,23 @@ std::expected<void, Error> RecordingLog::ensure_coherent(
             }
         }
 
-        for (std::int64_t term_id = last_term->leadership_term_id + 1; term_id < leadership_term_id; ++term_id)
+        // `append_term` grows `entries_`, so the pointer into it must not be
+        // carried across the loop: Java keeps its `lastTerm` object alive, a
+        // `std::vector` moves it (ASan caught the use-after-free in the
+        // `shouldBackFill...` case).
+        const std::int64_t prior_leadership_term_id = last_term->leadership_term_id;
+        const std::int64_t prior_log_position = last_term->log_position;
+
+        for (std::int64_t term_id = prior_leadership_term_id + 1; term_id < leadership_term_id; ++term_id)
         {
-            auto appended = append_term(recording_id, term_id, last_term->log_position, timestamp);
+            auto appended = append_term(recording_id, term_id, prior_log_position, timestamp);
             if (!appended)
             {
                 return std::unexpected(appended.error());
             }
         }
 
-        auto appended = append_term(recording_id, leadership_term_id, last_term->log_position, timestamp);
+        auto appended = append_term(recording_id, leadership_term_id, prior_log_position, timestamp);
         if (!appended)
         {
             return std::unexpected(appended.error());
