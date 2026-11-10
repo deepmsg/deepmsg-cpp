@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -93,6 +94,13 @@ enum class FrameHeaderCheck
 };
 
 [[nodiscard]] FrameHeaderCheck check_first_frame(int fd, std::int64_t offset, std::int32_t term_offset,
+                                                 std::int32_t term_id, std::int32_t stream_id) noexcept;
+
+/// The same comparison over bytes the caller already holds. `ReplaySession`
+/// reads the header through its `SegmentReader` (pread or mmap) instead of a
+/// descriptor, so the comparison itself must not require an fd. A view shorter
+/// than one header is `read_error`, exactly like a short `pread`.
+[[nodiscard]] FrameHeaderCheck check_first_frame(std::span<const std::uint8_t> header, std::int32_t term_offset,
                                                  std::int32_t term_id, std::int32_t stream_id) noexcept;
 
 /// `ArchiveConductor.eraseRemainingSegment` (`ArchiveConductor.java:2570-2623`):

@@ -118,9 +118,10 @@ void PreadReader::close_fd() noexcept
     }
 }
 
-std::expected<std::unique_ptr<SegmentReader>, axc::core::Error> make_pread_reader(const ReaderConfig& config)
+std::expected<std::unique_ptr<SegmentReader>, axc::core::Error> make_pread_reader(const ReaderConfig& config,
+                                                                                  std::size_t buffer_length)
 {
-    auto reader = std::make_unique<PreadReader>(config);
+    auto reader = std::make_unique<PreadReader>(config, buffer_length);
     auto opened = reader->open();
     if (!opened)
     {

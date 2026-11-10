@@ -7,7 +7,9 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
+#include "archive/io/segment_reader.h"
 #include "archive/server/checksum.h"
 #include "archive/server/epoch_clock_source.h"
 #include "archive/server/frame_layout.h"
@@ -148,11 +150,20 @@ public:
         std::int64_t control_session_id{0};
         std::int64_t connect_timeout_ms{0};
         std::string archive_dir;
+        /// Segment read backend (`deepmsg.archive.replay.io.backend`).
+        io::Backend backend{io::Backend::pread};
+        /// Read-ahead advice (`deepmsg.archive.replay.io.fadvise`).
+        io::Fadvise fadvise{io::Fadvise::none};
+        /// Advice syscall hook; production leaves nullptr (`posix_fadvise`).
+        io::FadviseFn fadvise_fn{nullptr};
     };
 
+    /// `buffer_length` is the per-session slice of `ctx.replayBuffer`
+    /// (`min(request.fileIoMaxLength, ctx.replayBuffer)`, `ArchiveConductor.java:941-994`):
+    /// the read window, not a buffer the session owns.
     ReplaySession(Config config, std::unique_ptr<ReplayPublication> publication, ReplayControlResponses& control,
                   ReplayMetrics& metrics, ReplayClock& clock, const Checksum* checksum,
-                  std::unique_ptr<ReplayLimitSource> limit, std::span<std::uint8_t> buffer,
+                  std::unique_ptr<ReplayLimitSource> limit, std::int32_t buffer_length,
                   ReplayWarningSink* warnings = nullptr) noexcept;
 
     ~ReplaySession();
@@ -243,7 +254,18 @@ private:
     const Checksum* checksum_{nullptr};
     std::unique_ptr<ReplayLimitSource> limit_{};
     ReplayWarningSink* warnings_{nullptr};
-    std::span<std::uint8_t> buffer_{};
+    /// The segment reader for the current segment file: pread or mmap, chosen
+    /// by `config_.backend`; nullptr until `init` opens the first segment.
+    std::unique_ptr<io::SegmentReader> reader_{};
+    std::int32_t buffer_length_{0};
+    /// The `limit`-sized view the frame loop walks this pass. Points either
+    /// into the reader (zero copy for mmap, the pread reader's own copy) or,
+    /// after a short read, into `short_read_buffer_`.
+    std::span<std::uint8_t> window_{};
+    /// Backs `window_` when the file ends before `limit`: the reference returns
+    /// the whole limit and lets the stale tail become a `frameLength <= 0`
+    /// error (`ReplaySession.java:510-530`). Grown on first use only.
+    std::vector<std::uint8_t> short_read_buffer_{};
 
     std::int64_t segment_file_base_position_{0};
     std::int32_t term_base_segment_offset_{0};
@@ -252,8 +274,6 @@ private:
     std::int64_t stop_position_{0};
     std::int64_t replay_limit_{0};
     std::int64_t connect_deadline_ms_{0};
-
-    int fd_{-1};
 
     State state_{State::init};
     std::string error_message_;

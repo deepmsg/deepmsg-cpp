@@ -32,6 +32,14 @@ using deepmsg::archive::server::io::SegmentReader;
 constexpr std::int64_t RECORDING_ID = 7;
 constexpr std::int32_t SEGMENT_LENGTH = 64 * 1024;
 
+/// Same signature as `make_mmap_reader`: the two-parameter `make_pread_reader`
+/// (A6d-2 passes the caller's window) cannot share a function-pointer list
+/// directly.
+std::expected<std::unique_ptr<SegmentReader>, axc::core::Error> pread_reader(const ReaderConfig& config)
+{
+    return make_pread_reader(config);
+}
+
 int g_advice_calls{0};
 int g_last_advice{-1};
 
@@ -106,7 +114,7 @@ TEST_F(SegmentReaderTest, bothBackendsReturnTheSameBytes)
 {
     write_segment(0, 0x5a);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         auto reader = make(config());
         ASSERT_TRUE(reader) << reader.error().message.view();
@@ -137,7 +145,7 @@ TEST_F(SegmentReaderTest, rewritingTheReturnedSpanDoesNotTouchTheFile)
 {
     write_segment(0, 0x11);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         auto reader = make(config());
         ASSERT_TRUE(reader) << reader.error().message.view();
@@ -167,7 +175,7 @@ TEST_F(SegmentReaderTest, rollSegmentSwitchesFiles)
     write_segment(0, 0x01);
     write_segment(SEGMENT_LENGTH, 0x02);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         auto reader = make(config());
         ASSERT_TRUE(reader) << reader.error().message.view();
@@ -193,7 +201,7 @@ TEST_F(SegmentReaderTest, willneedIsAdvisedOnOpenAndDontneedOnClose)
 {
     write_segment(0, 0x2a);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         ReaderConfig value = config(Fadvise::willneed);
         value.fadvise_fn = &counting_fadvise;
@@ -215,7 +223,7 @@ TEST_F(SegmentReaderTest, fadviseNoneIssuesNothing)
 {
     write_segment(0, 0x2a);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         ReaderConfig value = config(Fadvise::none);
         value.fadvise_fn = &counting_fadvise;
@@ -232,7 +240,7 @@ TEST_F(SegmentReaderTest, aRefusedAdviceIsNotAnError)
 {
     write_segment(0, 0x2a);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         ReaderConfig value = config(Fadvise::willneed);
         value.fadvise_fn = &refused_fadvise;
@@ -251,7 +259,7 @@ TEST_F(SegmentReaderTest, theRealAdvicePathKeepsTheReadsWorking)
 {
     write_segment(0, 0x2a);
 
-    for (auto make : {&make_pread_reader, &make_mmap_reader})
+    for (auto make : {&pread_reader, &make_mmap_reader})
     {
         auto reader = make(config(Fadvise::willneed));
         ASSERT_TRUE(reader) << reader.error().message.view();

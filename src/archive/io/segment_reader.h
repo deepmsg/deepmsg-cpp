@@ -10,6 +10,15 @@
 namespace deepmsg::archive::server::io
 {
 
+/// How a segment file is read. `pread` copies into an internal buffer and is
+/// the reference's behaviour; `mmap` maps the file `MAP_PRIVATE` and hands the
+/// frame loop the mapping directly (A6-5).
+enum class Backend
+{
+    pread,
+    mmap
+};
+
 /// Kernel read-ahead advice for a segment. `willneed` issues
 /// `POSIX_FADV_WILLNEED` when the segment is opened and `POSIX_FADV_DONTNEED`
 /// before it is dropped; `none` is the reference's behaviour (no advice).
