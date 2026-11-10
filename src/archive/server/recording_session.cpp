@@ -102,6 +102,9 @@ int RecordingSession::do_work()
     {
         set_state(State::stopped, "");
         (void)writer_.close();
+        // `close` drains the asynchronous backend, so the final position is
+        // known only now.
+        position_->set_value(writer_.committed_position());
 
         if (nullptr != config_.events)
         {
@@ -163,43 +166,62 @@ int RecordingSession::init()
 int RecordingSession::record()
 {
     // `RecordingSession.record` (`RecordingSession.java:233-278`).
-    const int work_count = image_->block_poll(writer_, config_.block_length_limit);
-
-    auto write_error = image_->take_error();
-    if (!write_error)
+    //
+    // Drain first: an asynchronous writer advances the position when a
+    // completion arrives, which is not tied to a pass that also delivers a new
+    // block. Then (only with a free in-flight slot) poll the image: one
+    // `block_poll` delivers at most one block, so the check cannot overshoot.
+    (void)writer_.poll_completions();
+    if (auto writer_error = writer_.take_error(); !writer_error)
     {
-        error_message_ = write_error.error().message.view();
+        error_message_ = writer_error.error().message.view();
         set_state(State::inactive, error_message_);
         return 1;
     }
 
+    int work_count = 0;
+    if (writer_.has_capacity())
+    {
+        work_count = image_->block_poll(writer_, config_.block_length_limit);
+
+        auto write_error = image_->take_error();
+        if (!write_error)
+        {
+            error_message_ = write_error.error().message.view();
+            set_state(State::inactive, error_message_);
+            return 1;
+        }
+    }
+
+    // Publish after the pass: the synchronous backend wrote inside
+    // `block_poll`, and an asynchronous one may have completed on a pass that
+    // delivered no block at all.
+    position_->set_value(writer_.committed_position());
+
+    if (nullptr != config_.events)
+    {
+        // `RecordingSession.java:243-254`: only a successful progress event
+        // advances `progressEventPosition`.
+        const std::int64_t recorded_position = writer_.committed_position();
+        if (progress_event_position_ < recorded_position &&
+            config_.events->progress(config_.recording_id, config_.join_position, recorded_position))
+        {
+            progress_event_position_ = recorded_position;
+        }
+    }
+
     if (work_count > 0)
     {
-        position_->set_value(writer_.position());
-
-        if (nullptr != config_.events)
-        {
-            // `RecordingSession.java:243-254`: only a successful progress event
-            // advances `progressEventPosition`.
-            const std::int64_t recorded_position = writer_.position();
-            if (progress_event_position_ < recorded_position &&
-                config_.events->progress(config_.recording_id, config_.join_position, recorded_position))
-            {
-                progress_event_position_ = recorded_position;
-            }
-        }
-
         return work_count;
     }
 
-    if (image_->is_end_of_stream())
+    if (writer_.has_capacity() && image_->is_end_of_stream())
     {
         set_state(State::inactive, "image end of stream");
     }
 
     return 0;
 }
-
 void RecordingSession::set_state(State next, std::string_view /*reason*/)
 {
     state_ = next;

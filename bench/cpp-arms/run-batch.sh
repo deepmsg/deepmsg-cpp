@@ -117,7 +117,7 @@ _port_base() {
 }
 
 _write_cell_files() {
-    local dir=$1 fsync=$2
+    local dir=$1 fsync=$2 arm=$3
     local base
     base=$(_port_base)
     control_port=$((base + 1))
@@ -147,6 +147,15 @@ EOF
     # subscribe to nothing.
     if [ "$scenario" = s1 ]; then
         echo 'aeron.archive.recording.events.channel=aeron:ipc' >>"$dir/archive.properties"
+    fi
+
+    # C++-only io switches (docs/compat.md). Only the C++ archive reads them;
+    # the Java arms keep the reference's file channel.
+    if [ "$arm" = x-c ] || [ "$arm" = x-j ]; then
+        echo "deepmsg.archive.file.io.backend=${DEEPMSG_IO_BACKEND:-sync}" >>"$dir/archive.properties"
+        echo "deepmsg.archive.file.io.inflight.max=${DEEPMSG_IO_INFLIGHT_MAX:-4}" >>"$dir/archive.properties"
+        echo "deepmsg.archive.file.io.uring.copy_before_submit=${DEEPMSG_IO_COPY_BEFORE_SUBMIT:-true}" \
+            >>"$dir/archive.properties"
     fi
 
     cat >"$dir/driver-override.properties" <<EOF
@@ -304,6 +313,22 @@ $external \
         taskset -c "$BENCH_RIG_CPU" "$client" >"$dir/run-$run/client.log" 2>&1
 }
 
+_backend_label() {
+    local dir=$1 arm=$2
+    case "$arm" in
+        j|j-c)
+            echo "java FileChannel (no io_uring)"
+            ;;
+        *)
+            if grep -q 'io_uring write backend unavailable' "$dir/archive.log" 2>/dev/null; then
+                echo "sync (fallback; see archive.log)"
+            else
+                echo "${DEEPMSG_IO_BACKEND:-sync} (inflight ${DEEPMSG_IO_INFLIGHT_MAX:-4}, copy_before_submit ${DEEPMSG_IO_COPY_BEFORE_SUBMIT:-true})"
+            fi
+            ;;
+    esac
+}
+
 _write_run_info() {
     local dir=$1 arm=$2
     {
@@ -316,6 +341,7 @@ _write_run_info() {
         echo "source          aeron:udp?endpoint=localhost:$source_port|mtu=1408"
         echo "record          aeron:ipc"
         echo "fsync           $_fsync (file + catalog)"
+        echo "backend         $(_backend_label "$dir" "$arm")"
         echo "archive idle    conductor=spin recorder=noop replayer=noop, threading=DEDICATED"
         echo "events          $([ "$scenario" = s1 ] && echo 'true (s1, aeron:ipc)' || echo 'false (s2)')"
         echo "cores           driver indices $BENCH_DRIVER_CPU_INDICES, node $BENCH_NODE_CPU, rig $BENCH_RIG_CPU"
@@ -351,7 +377,7 @@ _run_cell() {
     mkdir -p "$archive_dir"
 
     wait_idle || return 1
-    _write_cell_files "$cell_dir" "$fsync"
+    _write_cell_files "$cell_dir" "$fsync" "$arm"
     _fsync=$fsync
     _write_run_info "$cell_dir" "$arm"
 

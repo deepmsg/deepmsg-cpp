@@ -24,6 +24,19 @@ commit.
 | timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
 | ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
 
+## C++-only switches (A6b, 2026-11-09)
+
+These never join the reference's 48-name table (`archive_config_names()`), whose
+test asserts every entry starts with `aeron.archive.`. The defaults reproduce the
+reference behaviour, so a configuration that does not name them behaves exactly
+like the Java archive.
+
+| Name | Default | Meaning | Pinned by |
+|---|---|---|---|
+| `deepmsg.archive.file.io.backend` | `sync` | `sync` (the reference's file channel) or `uring`. `uring` falls back to `sync` with a stderr warning when `io_uring_setup` is refused; `RUN-INFO.txt` records `sync (fallback)`. | `ArchiveConfigTest`, `RecordingWriterTest`, `UringWriterTest` |
+| `deepmsg.archive.file.io.inflight.max` | `4` | In-flight block budget of the io_uring backend (1..127, the slot index travels in the completion's `user_data`). | `ArchiveConfigTest`, `UringWriterTest` |
+| `deepmsg.archive.file.io.uring.copy_before_submit` | `true` | Copy each block into a private slot before submitting it (`impl-archive` §4.1 option ①); `false` is only for the A6b measurement mutants. | `UringWriterTest`, `RecordingWriterTest` |
+
 ## Known gaps (A4b, 2026-11-09)
 
 Deliberately not implemented; none of them is reachable from the reference C

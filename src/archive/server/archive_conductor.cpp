@@ -1305,6 +1305,9 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     writer_context.archive_dir = context_.archive_dir;
     writer_context.file_sync_level = context_.recording.file_sync_level;
     writer_context.archive_dir_fd = -1;
+    writer_context.io_backend = context_.recording.file_io_backend;
+    writer_context.io_inflight_max = context_.recording.file_io_inflight_max;
+    writer_context.io_copy_before_submit = context_.recording.file_io_copy_before_submit;
 
     const auto term_buffer_length = static_cast<std::int32_t>(constants.term_buffer_length);
 
@@ -1318,6 +1321,7 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
     config.segment_length = summary.segment_file_length;
     config.term_length = term_buffer_length;
     config.block_length_limit = std::min(term_buffer_length, context_.recording.file_io_max_length);
+    writer_context.max_block_length = config.block_length_limit;
     config.session_id = constants.session_id;
     config.stream_id = subscription.stream_id;
     config.image = image;
@@ -1702,6 +1706,9 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     writer_context.archive_dir = context_.archive_dir;
     writer_context.file_sync_level = context_.recording.file_sync_level;
     writer_context.archive_dir_fd = -1;
+    writer_context.io_backend = context_.recording.file_io_backend;
+    writer_context.io_inflight_max = context_.recording.file_io_inflight_max;
+    writer_context.io_copy_before_submit = context_.recording.file_io_copy_before_submit;
 
     RecordingSession::Config config;
     config.correlation_id = subscription.correlation_id;
@@ -1713,6 +1720,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
     config.segment_length = segment_file_length;
     config.term_length = term_buffer_length;
     config.block_length_limit = std::min(term_buffer_length, context_.recording.file_io_max_length);
+    writer_context.max_block_length = config.block_length_limit;
     config.session_id = constants.session_id;
     config.stream_id = subscription.stream_id;
     config.image = image;

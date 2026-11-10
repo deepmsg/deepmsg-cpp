@@ -130,10 +130,10 @@ UringWriter::UringWriter(WriterConfig config, UringRing ring) noexcept
       ring_(std::move(ring)),
       order_(static_cast<unsigned>(config_.inflight_max), config_.file_sync_level)
 {
-    buffers_.resize(static_cast<std::size_t>(config_.inflight_max));
-    for (auto& buffer : buffers_)
+    slots_.resize(static_cast<std::size_t>(config_.inflight_max));
+    for (Slot& slot : slots_)
     {
-        buffer.resize(static_cast<std::size_t>(config_.max_block_length));
+        slot.buffer.resize(static_cast<std::size_t>(config_.max_block_length));
     }
 }
 
@@ -186,18 +186,24 @@ std::expected<bool, axc::core::Error> UringWriter::submit(const BlockWrite& bloc
         return false;
     }
 
+    Slot& slot = slots_[handle->slot];
+    slot.length = static_cast<std::uint32_t>(block.len);
+    slot.seq = handle->seq;
+    slot.submitted_ns = nullptr != config_.clock ? config_.clock->nano_time() : 0;
+
     const std::uint8_t* source = block.src;
     if (config_.copy_before_submit)
     {
         // Option ①: the bytes leave the term buffer before `submit` returns,
         // so the recorder may advance its subscriber position immediately.
-        std::memcpy(buffers_[handle->slot].data(), block.src, static_cast<std::size_t>(block.len));
-        source = buffers_[handle->slot].data();
+        std::memcpy(slot.buffer.data(), block.src, static_cast<std::size_t>(block.len));
+        source = slot.buffer.data();
     }
 
     const bool link = config_.file_sync_level > 0;
-    auto queued = ring_.queue_write(fd_, static_cast<std::uint64_t>(block.file_offset), source,
-                                    static_cast<std::uint32_t>(block.len), entry_id(handle->seq, false), link);
+    auto queued =
+        ring_.queue_write(fd_, static_cast<std::uint64_t>(block.file_offset), source,
+                          static_cast<std::uint32_t>(block.len), entry_id(handle->slot, handle->seq, false), link);
     if (!queued)
     {
         fail(queued.error().code, queued.error().message.view(), queued.error().errcode);
@@ -207,7 +213,7 @@ std::expected<bool, axc::core::Error> UringWriter::submit(const BlockWrite& bloc
     if (link)
     {
         ++force_count_;
-        auto forced = ring_.queue_fsync(fd_, 1 == config_.file_sync_level, entry_id(handle->seq, true));
+        auto forced = ring_.queue_fsync(fd_, 1 == config_.file_sync_level, entry_id(handle->slot, handle->seq, true));
         if (!forced)
         {
             fail(forced.error().code, forced.error().message.view(), forced.error().errcode);
@@ -247,8 +253,15 @@ void UringWriter::process(const UringCompletion& completion) noexcept
         return;
     }
 
-    const std::uint64_t seq = completion.user_data >> 1;
+    const std::uint64_t seq = completion.user_data >> 8;
+    const unsigned slot_index = static_cast<unsigned>((completion.user_data >> 1) & 0x7fu);
     const bool is_force = 0 != (completion.user_data & 1u);
+
+    if (slot_index >= slots_.size())
+    {
+        fail(axc::core::ErrorCode::internal_error, "completion for an unknown slot");
+        return;
+    }
 
     if (is_force)
     {
@@ -267,7 +280,12 @@ void UringWriter::process(const UringCompletion& completion) noexcept
         if (!order_.force_completed(seq))
         {
             fail(axc::core::ErrorCode::internal_error, "completion for an unknown request");
+            return;
         }
+        // `file.sync.level > 0`: the reference's write time is the whole
+        // `onBlock`, force included, so the block is timed from submit to the
+        // force's completion.
+        report_written(slots_[slot_index]);
         return;
     }
 
@@ -280,6 +298,10 @@ void UringWriter::process(const UringCompletion& completion) noexcept
     switch (order_.write_completed(seq, completion.result))
     {
         case CommitOrder::Completion::accepted:
+            if (0 == config_.file_sync_level)
+            {
+                report_written(slots_[slot_index]);
+            }
             break;
         case CommitOrder::Completion::unknown:
             fail(axc::core::ErrorCode::internal_error, "completion for an unknown request");
@@ -372,6 +394,20 @@ void UringWriter::fail(axc::core::ErrorCode code, std::string_view message, std:
     }
 }
 
+void UringWriter::report_written(const Slot& slot) noexcept
+{
+    if (nullptr == config_.metrics)
+    {
+        return;
+    }
+
+    config_.metrics->bytes_written(static_cast<std::int32_t>(slot.length));
+    if (nullptr != config_.clock)
+    {
+        config_.metrics->write_time_ns(config_.clock->nano_time() - slot.submitted_ns);
+    }
+}
+
 void UringWriter::close_fd() noexcept
 {
     if (fd_ >= 0)
@@ -392,6 +428,12 @@ std::expected<std::unique_ptr<SegmentWriter>, axc::core::Error> make_uring_write
     {
         return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument,
                                                      "the io_uring writer needs a maximum block length"));
+    }
+    if (config.inflight_max > 127)
+    {
+        // The slot index travels in the top of user_data (see `entry_id`).
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument,
+                                                     "the io_uring writer supports at most 127 slots"));
     }
     if (!UringRing::is_available())
     {

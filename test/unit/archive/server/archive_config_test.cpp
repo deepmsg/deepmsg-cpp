@@ -29,6 +29,10 @@ TEST(ArchiveConfigTest, defaultsMatchTheReference)
     EXPECT_FALSE(settings->recording_events_enabled);
     EXPECT_TRUE(settings->recording_events_channel.empty());
     EXPECT_EQ(30, settings->recording_events_stream_id);
+    // C++-only switches keep the reference behaviour by default.
+    EXPECT_EQ("sync", settings->file_io_backend);
+    EXPECT_EQ(4, settings->file_io_inflight_max);
+    EXPECT_TRUE(settings->file_io_copy_before_submit);
 }
 
 TEST(ArchiveConfigTest, sizeSuffixesFollowParseSize)
@@ -148,6 +152,39 @@ TEST(ArchiveConfigTest, replayLingerRejectsAnInvalidDuration)
 
     const auto settings = parse_replay_settings(source);
     EXPECT_FALSE(settings.has_value());
+}
+
+TEST(ArchiveConfigTest, cppOnlyIoSwitchesAreRead)
+{
+    PropertySource source;
+    source.set("deepmsg.archive.file.io.backend", "uring");
+    source.set("deepmsg.archive.file.io.inflight.max", "8");
+    source.set("deepmsg.archive.file.io.uring.copy_before_submit", "false");
+
+    const auto settings = parse_recording_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+    EXPECT_EQ("uring", settings->file_io_backend);
+    EXPECT_EQ(8, settings->file_io_inflight_max);
+    EXPECT_FALSE(settings->file_io_copy_before_submit);
+}
+
+TEST(ArchiveConfigTest, cppOnlyIoSwitchesRejectBadValues)
+{
+    {
+        PropertySource source;
+        source.set("deepmsg.archive.file.io.backend", "io_uring");
+        EXPECT_FALSE(parse_recording_settings(source).has_value());
+    }
+    {
+        PropertySource source;
+        source.set("deepmsg.archive.file.io.inflight.max", "0");
+        EXPECT_FALSE(parse_recording_settings(source).has_value());
+    }
+    {
+        PropertySource source;
+        source.set("deepmsg.archive.file.io.inflight.max", "128");
+        EXPECT_FALSE(parse_recording_settings(source).has_value());
+    }
 }
 
 }  // namespace

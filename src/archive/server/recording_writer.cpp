@@ -1,5 +1,6 @@
 #include "archive/server/recording_writer.h"
 
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -43,7 +44,11 @@ std::int64_t SystemNanoTime::nano_time() const noexcept
 RecordingWriter::RecordingWriter(std::int64_t recording_id, std::int64_t start_position, std::int32_t segment_length,
                                  std::int32_t term_length, std::int64_t join_position, RecordingWriterContext context,
                                  RecordingMetrics* metrics)
-    : recording_id_(recording_id), segment_length_(segment_length), context_(std::move(context)), metrics_(metrics)
+    : recording_id_(recording_id),
+      segment_length_(segment_length),
+      context_(std::move(context)),
+      metrics_(metrics),
+      join_position_(join_position)
 {
     // `RecordingWriter.java:98-101`.
     segment_base_position_ = segment_file_base_position(start_position, join_position, term_length, segment_length);
@@ -61,13 +66,47 @@ std::expected<void, axc::core::Error> RecordingWriter::init()
     config.segment_length = segment_length_;
     config.file_sync_level = context_.file_sync_level;
     config.archive_dir_fd = context_.archive_dir_fd;
+    config.inflight_max = context_.io_inflight_max;
+    config.copy_before_submit = context_.io_copy_before_submit;
+    config.max_block_length = context_.max_block_length;
+    config.start_position = join_position_;
+    config.metrics = metrics_;
+    const NanoTimeSource& nano_clock = nullptr != context_.nano_clock ? *context_.nano_clock : system_nano_clock();
+    config.clock = &nano_clock;
 
-    auto writer = io::make_sync_writer(config);
-    if (!writer)
+    std::unique_ptr<io::SegmentWriter> selected;
+    backend_name_ = "sync";
+
+    if ("uring" == context_.io_backend)
     {
-        return std::unexpected(writer.error());
+        auto uring = io::make_uring_writer(config);
+        if (uring)
+        {
+            selected = std::move(*uring);
+            backend_name_ = "uring";
+        }
+        else
+        {
+            // The plan's fallback: keep recording on the reference's file
+            // channel, but never silently (`records/a6b.md`).
+            const std::string_view reason = uring.error().message.view();
+            std::fprintf(stderr, "WARNING: io_uring write backend unavailable (%.*s); falling back to sync\n",
+                         static_cast<int>(reason.size()), reason.data());
+            backend_name_ = "sync (fallback)";
+        }
     }
-    writer_ = std::move(*writer);
+
+    if (!selected)
+    {
+        auto sync = io::make_sync_writer(config);
+        if (!sync)
+        {
+            return std::unexpected(sync.error());
+        }
+        selected = std::move(*sync);
+    }
+
+    writer_ = std::move(selected);
     return {};
 }
 
@@ -120,12 +159,27 @@ std::expected<void, axc::core::Error> RecordingWriter::on_block(const std::uint8
     {
         return std::unexpected(submitted.error());
     }
-
-    const std::int64_t write_time_ns = clock.nano_time() - start_ns;
-    if (nullptr != metrics_)
+    if (!*submitted)
     {
-        metrics_->bytes_written(data_length);
-        metrics_->write_time_ns(write_time_ns);
+        // The session checks `has_capacity()` before it polls the image, and
+        // one poll is at most one block, so this is a contract violation and
+        // not something to paper over: the image would move its subscriber
+        // position past a block that was never handed to the backend.
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::internal_error,
+                                                     "the recording writer ran out of in-flight capacity"));
+    }
+
+    // The synchronous backend writes and forces inside `submit`, so this is
+    // its write time. An asynchronous one reports from `poll_completions`
+    // instead (submit-to-completion, queueing included).
+    if (!writer_->is_asynchronous())
+    {
+        const std::int64_t write_time_ns = clock.nano_time() - start_ns;
+        if (nullptr != metrics_)
+        {
+            metrics_->bytes_written(data_length);
+            metrics_->write_time_ns(write_time_ns);
+        }
     }
 
     // `RecordingWriter.java:147-151`: the block advances the position by the
@@ -137,6 +191,26 @@ std::expected<void, axc::core::Error> RecordingWriter::on_block(const std::uint8
     }
 
     return {};
+}
+
+std::int64_t RecordingWriter::committed_position() const noexcept
+{
+    return writer_ ? writer_->committed_position() : segment_base_position_ + segment_offset_;
+}
+
+bool RecordingWriter::has_capacity() const noexcept
+{
+    return !writer_ || writer_->has_capacity();
+}
+
+int RecordingWriter::poll_completions() noexcept
+{
+    return writer_ ? writer_->poll_completions() : 0;
+}
+
+std::expected<void, axc::core::Error> RecordingWriter::take_error() const noexcept
+{
+    return writer_ ? writer_->take_error() : std::expected<void, axc::core::Error>{};
 }
 
 std::expected<void, axc::core::Error> RecordingWriter::close()

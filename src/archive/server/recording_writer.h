@@ -5,6 +5,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "archive/io/segment_writer.h"
 #include "archive/server/checksum.h"
@@ -14,18 +15,9 @@ namespace deepmsg::archive::server
 {
 
 /// Nanosecond clock the writer samples around each block; injectable so the
-/// write-duration metric can be pinned in a test.
-class NanoTimeSource
-{
-public:
-    NanoTimeSource() = default;
-    virtual ~NanoTimeSource() = default;
-
-    NanoTimeSource(const NanoTimeSource&) = delete;
-    NanoTimeSource& operator=(const NanoTimeSource&) = delete;
-
-    [[nodiscard]] virtual std::int64_t nano_time() const noexcept = 0;
-};
+/// write-duration metric can be pinned in a test. The interface lives in the io
+/// layer because an asynchronous backend times its completions there.
+using NanoTimeSource = io::NanoClock;
 
 class SystemNanoTime final : public NanoTimeSource
 {
@@ -34,19 +26,9 @@ public:
 };
 
 /// The reference's `ArchiveConductor.Recorder` metrics that the writer feeds
-/// (`RecordingWriter.java:144-145`).
-class RecordingMetrics
-{
-public:
-    RecordingMetrics() = default;
-    virtual ~RecordingMetrics() = default;
-
-    RecordingMetrics(const RecordingMetrics&) = delete;
-    RecordingMetrics& operator=(const RecordingMetrics&) = delete;
-
-    virtual void bytes_written(std::int32_t length) noexcept = 0;
-    virtual void write_time_ns(std::int64_t duration) noexcept = 0;
-};
+/// (`RecordingWriter.java:144-145`). Shared with the asynchronous backends,
+/// which report from their completions instead of `on_block`.
+using RecordingMetrics = io::WriteMetrics;
 
 /// The values `RecordingWriter` takes from `Archive.Context`
 /// (`RecordingWriter.java:84-96`).
@@ -61,6 +43,15 @@ struct RecordingWriterContext
     /// checksum is configured.
     std::span<std::uint8_t> record_checksum_buffer{};
     const NanoTimeSource* nano_clock{nullptr};
+    /// `deepmsg.archive.file.io.backend`: `sync` (default) or `uring`.
+    /// C++-only; see `docs/compat.md`.
+    std::string io_backend{"sync"};
+    /// `deepmsg.archive.file.io.inflight.max`.
+    int io_inflight_max{4};
+    /// `deepmsg.archive.file.io.uring.copy_before_submit`.
+    bool io_copy_before_submit{true};
+    /// The recorder's `block_length_limit`; sizes the async copy buffers.
+    std::int32_t max_block_length{0};
 };
 
 /// `RecordingWriter` (`RecordingWriter.java:53-274`): writes a term buffer's
@@ -97,10 +88,28 @@ public:
     /// without forcing, like the reference.
     [[nodiscard]] std::expected<void, axc::core::Error> close();
 
-    /// `RecordingWriter.position` (`RecordingWriter.java:183`).
+    /// `RecordingWriter.position` (`RecordingWriter.java:183`): the published
+    /// recording position. With an asynchronous backend this is the committed
+    /// position, not the handed one.
     [[nodiscard]] std::int64_t position() const noexcept
     {
-        return segment_base_position_ + segment_offset_;
+        return committed_position();
+    }
+
+    [[nodiscard]] std::int64_t committed_position() const noexcept;
+
+    /// False when the backend has no free in-flight slot.
+    [[nodiscard]] bool has_capacity() const noexcept;
+
+    /// Drains the backend's completions; `-1` after a failure.
+    int poll_completions() noexcept;
+
+    [[nodiscard]] std::expected<void, axc::core::Error> take_error() const noexcept;
+
+    /// `sync`, `uring` or `sync (fallback)`.
+    [[nodiscard]] std::string_view backend_name() const noexcept
+    {
+        return backend_name_;
     }
 
 private:
@@ -116,7 +125,9 @@ private:
     RecordingMetrics* metrics_{nullptr};
 
     std::int64_t segment_base_position_{0};
+    std::int64_t join_position_{0};
     std::int32_t segment_offset_{0};
+    std::string backend_name_{"sync"};
     std::unique_ptr<io::SegmentWriter> writer_;
     bool closed_{false};
 };

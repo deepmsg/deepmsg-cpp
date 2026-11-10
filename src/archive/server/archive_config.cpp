@@ -295,6 +295,33 @@ std::expected<RecordingSettings, axc::core::Error> parse_recording_settings(
     }
     settings.recording_events_stream_id = *events_stream_id;
 
+    // C++-only switches (`docs/compat.md`): they never join the reference's
+    // 48-name table, and the defaults keep the reference behaviour.
+    if (const auto backend = source.get("deepmsg.archive.file.io.backend"); backend.has_value())
+    {
+        if (*backend != "sync" && *backend != "uring")
+        {
+            return std::unexpected(axc::core::make_error(axc::core::ErrorCode::config_error,
+                                                         "deepmsg.archive.file.io.backend must be sync or uring"));
+        }
+        settings.file_io_backend = std::string{*backend};
+    }
+    auto io_inflight = get_int32(source, "deepmsg.archive.file.io.inflight.max", settings.file_io_inflight_max);
+    if (!io_inflight)
+    {
+        return std::unexpected(io_inflight.error());
+    }
+    if (*io_inflight < 1 || *io_inflight > 127)
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::config_error,
+                                                     "deepmsg.archive.file.io.inflight.max must be in [1, 127]"));
+    }
+    settings.file_io_inflight_max = *io_inflight;
+    if (const auto copy = source.get("deepmsg.archive.file.io.uring.copy_before_submit"); copy.has_value())
+    {
+        settings.file_io_copy_before_submit = "true" == *copy;
+    }
+
     // `Archive.java:1306-1311`.
     if (settings.recording_events_enabled && settings.recording_events_channel.empty())
     {

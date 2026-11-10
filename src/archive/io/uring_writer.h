@@ -122,12 +122,22 @@ public:
         return order_.committed_position();
     }
 
+    [[nodiscard]] bool has_capacity() const noexcept override
+    {
+        return order_.in_flight() < static_cast<unsigned>(config_.inflight_max);
+    }
+
+    [[nodiscard]] bool is_asynchronous() const noexcept override
+    {
+        return true;
+    }
+
     [[nodiscard]] std::expected<void, axc::core::Error> roll_segment(std::int64_t next_base_position) noexcept override;
 
     [[nodiscard]] std::expected<void, axc::core::Error> close() noexcept override;
 
     /// The sticky failure, if any.
-    [[nodiscard]] std::expected<void, axc::core::Error> take_error() const noexcept;
+    [[nodiscard]] std::expected<void, axc::core::Error> take_error() const noexcept override;
 
     [[nodiscard]] std::uint64_t completed_blocks() const noexcept
     {
@@ -146,9 +156,11 @@ public:
     }
 
 private:
-    static std::uint64_t entry_id(std::uint64_t seq, bool force) noexcept
+    /// `user_data` carries the sequence (ordering), the slot (metrics and the
+    /// copy buffer) and the operation kind.
+    static std::uint64_t entry_id(unsigned slot, std::uint64_t seq, bool force) noexcept
     {
-        return (seq << 1) | (force ? 1u : 0u);
+        return (seq << 8) | (static_cast<std::uint64_t>(slot) << 1) | (force ? 1u : 0u);
     }
 
     void process(const UringCompletion& completion) noexcept;
@@ -161,10 +173,21 @@ private:
 
     void close_fd() noexcept;
 
+    struct Slot
+    {
+        std::vector<std::uint8_t> buffer;
+        std::uint32_t length{0};
+        std::uint64_t seq{0};
+        std::int64_t submitted_ns{0};
+    };
+
+    /// Feeds the completion metrics (`bytes_written` / `write_time_ns`).
+    void report_written(const Slot& slot) noexcept;
+
     WriterConfig config_;
     UringRing ring_;
     CommitOrder order_;
-    std::vector<std::vector<std::uint8_t>> buffers_;
+    std::vector<Slot> slots_;
 
     int fd_{-1};
     axc::core::Error failure_;

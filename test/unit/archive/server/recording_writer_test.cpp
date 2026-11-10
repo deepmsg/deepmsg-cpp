@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <sched.h>
+
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "archive/io/uring_ring.h"
 #include "archive/server/frame_layout.h"
 #include "archive/server/recording_writer.h"
 #include "archive/server/segment_files.h"
@@ -31,6 +34,7 @@ using deepmsg::archive::server::RecordingMetrics;
 using deepmsg::archive::server::RecordingWriter;
 using deepmsg::archive::server::RecordingWriterContext;
 using deepmsg::archive::server::segment_file_name;
+using deepmsg::archive::server::io::UringRing;
 
 constexpr std::int32_t TERM_LENGTH = 64 * 1024;  // `LogBufferDescriptor.TERM_MIN_LENGTH`
 constexpr std::int32_t SEGMENT_LENGTH = TERM_LENGTH * 4;
@@ -412,6 +416,72 @@ TEST_F(RecordingWriterTest, onBlockShouldNotComputeCrcForThePaddingFrame)
     EXPECT_EQ(term_id, get<std::int32_t>(file, deepmsg::archive::server::TERM_ID_OFFSET));
     EXPECT_EQ(length, get<std::int32_t>(file, 0));
     EXPECT_EQ(session_id, get<std::int32_t>(file, deepmsg::archive::server::SESSION_ID_OFFSET));
+}
+
+TEST_F(RecordingWriterTest, theUringBackendPublishesOnlyWhenTheCompletionArrives)
+{
+    if (!UringRing::is_available())
+    {
+        GTEST_SKIP() << "io_uring is not available on this kernel";
+    }
+
+    MetricsRecorder metrics;
+    RecordingWriterContext ctx = context();
+    ctx.io_backend = "uring";
+    ctx.max_block_length = TERM_LENGTH;
+    ctx.io_inflight_max = 4;
+    ctx.io_copy_before_submit = true;
+
+    RecordingWriter writer{1, 0, SEGMENT_LENGTH, TERM_LENGTH, 0, ctx, &metrics};
+    ASSERT_TRUE(writer.init());
+    EXPECT_EQ("uring", writer.backend_name());
+
+    std::vector<std::uint8_t> term_buffer(128, 0);
+    set_frame_type(term_buffer, 0, deepmsg::archive::server::DATA_FRAME_TYPE);
+    set_frame_length(term_buffer, 0, 128);
+    std::memset(term_buffer.data() + DATA_HEADER_LENGTH, 7, 96);
+
+    ASSERT_TRUE(writer.on_block(term_buffer.data(), 0, 128, -1, -1));
+    // `submit` returned: the block is in flight, not published, and no metric
+    // has fired (the async backend reports from the completion).
+    EXPECT_EQ(0, writer.position());
+    EXPECT_EQ(0, metrics.blocks);
+
+    for (int attempt = 0; attempt < 2000000 && writer.position() < 128; ++attempt)
+    {
+        writer.poll_completions();
+        ::sched_yield();
+    }
+    EXPECT_EQ(128, writer.position());
+    EXPECT_EQ(1, metrics.blocks);
+    EXPECT_EQ(128, metrics.last_bytes_written);
+
+    ASSERT_TRUE(writer.take_error());
+    ASSERT_TRUE(writer.close());
+}
+
+TEST_F(RecordingWriterTest, anUnavailableUringBackendFallsBackToSync)
+{
+    RecordingWriterContext ctx = context();
+    ctx.io_backend = "uring";
+    // The maker rejects this before it touches the kernel, so the test does not
+    // depend on io_uring being absent.
+    ctx.max_block_length = 0;
+
+    MetricsRecorder metrics;
+    RecordingWriter writer{1, 0, SEGMENT_LENGTH, TERM_LENGTH, 0, ctx, &metrics};
+    ASSERT_TRUE(writer.init());
+    EXPECT_EQ("sync (fallback)", writer.backend_name());
+
+    std::vector<std::uint8_t> term_buffer(128, 0);
+    set_frame_type(term_buffer, 0, deepmsg::archive::server::DATA_FRAME_TYPE);
+    set_frame_length(term_buffer, 0, 128);
+    ASSERT_TRUE(writer.on_block(term_buffer.data(), 0, 128, -1, -1));
+
+    // The synchronous backend publishes inside `on_block`.
+    EXPECT_EQ(128, writer.position());
+    EXPECT_EQ(1, metrics.blocks);
+    ASSERT_TRUE(writer.close());
 }
 
 }  // namespace

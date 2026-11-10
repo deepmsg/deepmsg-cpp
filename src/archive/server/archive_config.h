@@ -24,6 +24,13 @@ struct RecordingSettings
     bool recording_events_enabled{false};
     std::string recording_events_channel;
     std::int32_t recording_events_stream_id{30};
+    /// `deepmsg.archive.file.io.backend`: `sync` (reference behaviour) or
+    /// `uring` (C++ only; `docs/compat.md`).
+    std::string file_io_backend{"sync"};
+    /// `deepmsg.archive.file.io.inflight.max`.
+    std::int32_t file_io_inflight_max{4};
+    /// `deepmsg.archive.file.io.uring.copy_before_submit`.
+    bool file_io_copy_before_submit{true};
 };
 
 /// Reads the nine names and applies the reference's startup checks

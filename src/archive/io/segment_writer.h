@@ -10,6 +10,36 @@
 namespace deepmsg::archive::server::io
 {
 
+/// Where a backend reports finished blocks. The synchronous writer reports
+/// through `RecordingWriter.on_block`; an asynchronous one calls this when the
+/// completion arrives, with the time from submission to completion (the
+/// reference's `max/total write time` then includes the queueing).
+class WriteMetrics
+{
+public:
+    WriteMetrics() = default;
+    virtual ~WriteMetrics() = default;
+
+    WriteMetrics(const WriteMetrics&) = delete;
+    WriteMetrics& operator=(const WriteMetrics&) = delete;
+
+    virtual void bytes_written(std::int32_t length) noexcept = 0;
+    virtual void write_time_ns(std::int64_t duration) noexcept = 0;
+};
+
+/// Monotonic nanosecond clock used to time completions.
+class NanoClock
+{
+public:
+    NanoClock() = default;
+    virtual ~NanoClock() = default;
+
+    NanoClock(const NanoClock&) = delete;
+    NanoClock& operator=(const NanoClock&) = delete;
+
+    [[nodiscard]] virtual std::int64_t nano_time() const noexcept = 0;
+};
+
 /// One block handed to a `SegmentWriter`. `end_position` is the recording
 /// position just past the block, i.e. what `committed_position()` reaches once
 /// the block (and, at a sync level above zero, its force) has completed.
@@ -47,6 +77,11 @@ struct WriterConfig
     /// Recording position the writer starts from (the join position); nothing
     /// is committed before it.
     std::int64_t start_position{0};
+    /// Completion sink for asynchronous backends; the synchronous one reports
+    /// through `RecordingWriter.on_block` instead.
+    WriteMetrics* metrics{nullptr};
+    /// Clock for completion durations; nullptr means "do not measure".
+    const NanoClock* clock{nullptr};
 };
 
 /// `/home/gavin/trader/analysis/cpp/impl-2026-11-07-cpp-archive.md` §4.1.
@@ -69,8 +104,30 @@ public:
     [[nodiscard]] virtual std::expected<bool, axc::core::Error> submit(const BlockWrite& block) noexcept = 0;
 
     /// Completions collected since the last call; always 0 for the synchronous
-    /// backend.
+    /// backend. `-1` when an asynchronous backend has failed (see
+    /// `take_error()`).
     virtual int poll_completions() noexcept = 0;
+
+    /// False when an asynchronous backend has no free in-flight slot; the
+    /// caller then leaves the image unpolled this pass (one poll delivers at
+    /// most one block).
+    [[nodiscard]] virtual bool has_capacity() const noexcept
+    {
+        return true;
+    }
+
+    /// True when completions, not `submit`, advance the published position.
+    [[nodiscard]] virtual bool is_asynchronous() const noexcept
+    {
+        return false;
+    }
+
+    /// The sticky failure of an asynchronous backend (always success for the
+    /// synchronous one).
+    [[nodiscard]] virtual std::expected<void, axc::core::Error> take_error() const noexcept
+    {
+        return {};
+    }
 
     [[nodiscard]] virtual std::int64_t committed_position() const noexcept = 0;
 
