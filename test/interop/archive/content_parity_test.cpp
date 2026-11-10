@@ -258,8 +258,23 @@ protected:
             "-Daeron.archive.threading.mode=SHARED",
             "-Daeron.archive.idle.strategy=yield",
             "-Daeron.archive.dir.delete.on.start=true",
-            "-Daeron.spies.simulate.connection=true",
-            "io.aeron.archive.Archive"};
+            "-Daeron.spies.simulate.connection=true"};
+        // A6b-4: the parity suite under a non-default write backend. The
+        // defaults reproduce the reference, so an unset environment is the A5b
+        // criterion; `AXC_IO_BACKEND=uring` is the A6b one.
+        if (const char* backend = std::getenv("AXC_IO_BACKEND"); nullptr != backend)
+        {
+            arguments.emplace_back(std::string{"-Ddeepmsg.archive.file.io.backend="} + backend);
+        }
+        if (const char* inflight = std::getenv("AXC_IO_INFLIGHT_MAX"); nullptr != inflight)
+        {
+            arguments.emplace_back(std::string{"-Ddeepmsg.archive.file.io.inflight.max="} + inflight);
+        }
+        if (const char* copy = std::getenv("AXC_IO_COPY_BEFORE_SUBMIT"); nullptr != copy)
+        {
+            arguments.emplace_back(std::string{"-Ddeepmsg.archive.file.io.uring.copy_before_submit="} + copy);
+        }
+        arguments.emplace_back("io.aeron.archive.Archive");
         auto spawned = axc::interop::ChildProcess::spawn(AXC_ARCHIVE_SERVER_BIN, arguments);
         ASSERT_TRUE(spawned) << spawned.error().message.view();
         our_archive_ = std::move(*spawned);
