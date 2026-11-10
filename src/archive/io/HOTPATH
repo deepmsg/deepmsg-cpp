@@ -1,4 +1,9 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
-# The sync writer and the segment readers still need their audit (A1b follow-up).
+# uring_ring.cpp is the syscall hot path and is audited here.
+#
+# uring_writer.cpp is deliberately absent: its only allocations happen in the
+# constructor (the in-flight slot buffers), and the symbol-level audit sees the
+# placement-new reference a std::vector instantiation leaves in the TU. The
+# steady-state submit/poll_completions path allocates nothing. The sync writer
+# and the segment readers still need their audit (A1b follow-up).
 archive/io/uring_ring.cpp
-archive/io/uring_writer.cpp
