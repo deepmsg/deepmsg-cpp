@@ -495,17 +495,30 @@ std::expected<void, axc::core::Error> ArchiveServer::start()
     auto& recorders = conductor_->recorders();
     recorder_agents_.reserve(recorders.size());
     recorder_runners_.reserve(recorders.size());
+    const auto& recorder_affinity = config_.threading.recorder_affinity;
     for (std::size_t index = 0; index < recorders.size(); index++)
     {
         std::string name{thread_name(naming, AgentRole::recorder)};
+        axc::core::CpuAffinity affinity = recorder_affinity;
         if (recorders.size() > 1)
         {
-            name += "-" + std::to_string(index);
+            // `pthread_setname_np` takes 15 characters and the reference's own
+            // `archive-recorder` already fills 15 (`AgentRunner` truncates it),
+            // so the extension uses a short stem that keeps the index visible
+            // in `ps`/`/proc/<pid>/task`.
+            name = ThreadNaming::new_names == naming ? "aeron-ar-rec-" : "archive-rec-";
+            name += std::to_string(index);
+            // One configured affinity, N agents: give each its own core instead
+            // of letting them fight over the same one (A6f §2.5).
+            if (recorder_affinity.any())
+            {
+                affinity = recorder_affinity.is_index() ? recorder_affinity.nth(index)
+                                                        : recorder_affinity.nth(index % recorder_affinity.count());
+            }
         }
         recorder_agents_.push_back(std::make_unique<RecorderAgent>(*recorders[index], name));
         recorder_runners_.push_back(std::make_unique<axc::core::AgentRunner<RecorderAgent>>(
-            *recorder_agents_.back(), config_.threading.recorder_idle, error_handler_,
-            config_.threading.recorder_affinity));
+            *recorder_agents_.back(), config_.threading.recorder_idle, error_handler_, affinity));
     }
 
     replayer_agent_ = std::make_unique<ReplayerAgent>(conductor_->replayer(), thread_name(naming, AgentRole::replayer));

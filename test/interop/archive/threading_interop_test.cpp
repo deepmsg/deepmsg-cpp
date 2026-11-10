@@ -138,7 +138,8 @@ protected:
     }
 
     /// Starts the driver (standalone cases) and the archive child in `mode`.
-    void start_archive(std::string_view mode, bool standalone)
+    /// `recorder_threads` is the A6f extension (default 1 = the reference).
+    void start_archive(std::string_view mode, bool standalone, std::int32_t recorder_threads = 1)
     {
         if (standalone)
         {
@@ -160,8 +161,12 @@ protected:
             // LOCAL + UDP records through an `aeron-spy:` subscription; the
             // driver only counts a spy as a subscriber with this on
             // (`TestArchive.h` passes it too).
-            "-Daeron.spies.simulate.connection=true",
-            standalone ? "io.aeron.archive.Archive" : "io.aeron.archive.ArchivingMediaDriver"};
+            "-Daeron.spies.simulate.connection=true"};
+        if (1 != recorder_threads)
+        {
+            arguments.push_back("-Ddeepmsg.archive.recorder.threads=" + std::to_string(recorder_threads));
+        }
+        arguments.push_back(standalone ? "io.aeron.archive.Archive" : "io.aeron.archive.ArchivingMediaDriver");
 
         auto spawned = ChildProcess::spawn(AXC_ARCHIVE_SERVER_BIN, arguments);
         ASSERT_TRUE(spawned) << spawned.error().message.view();
@@ -439,6 +444,30 @@ TEST_F(ThreadingInteropTest, dedicatedModeRunsThreeNamedAgentsAndTheRecorderRepl
     EXPECT_TRUE(has_label(labels, "archive-conductor work cycle time exceeded count: threshold="));
     EXPECT_EQ(3u, count_type(labels, 103));
     EXPECT_EQ(3u, count_type(labels, 104));
+}
+
+// A6f: N > 1 recorders start one agent each (the classic name is truncated by
+// `pthread_setname_np`, hence the short stem) and get one labelled duty-cycle
+// pair each, while the three write counters keep a single writer.
+TEST_F(ThreadingInteropTest, twoRecordersRunTwoAgentsAndTwoLabelledCounterPairs)
+{
+    start_archive("DEDICATED", true, 2);
+    ASSERT_TRUE(connected_) << "the archive client did not connect";
+
+    const auto names = wait_for_task_names("aeron-ar-cnd", "aeron-ar-rec-0", "aeron-ar-rec-1");
+    EXPECT_TRUE(contains(names, "aeron-ar-rec-0"));
+    EXPECT_TRUE(contains(names, "aeron-ar-rec-1"));
+
+    run_round();
+
+    const auto labels = counter_labels();
+    EXPECT_TRUE(has_label(labels, "archive-recorder-0 max cycle time in ns: DEDICATED"));
+    EXPECT_TRUE(has_label(labels, "archive-recorder-1 max cycle time in ns: DEDICATED"));
+    EXPECT_TRUE(has_label(labels, "archive-recorder-0 work cycle time exceeded count: threshold="));
+    EXPECT_TRUE(has_label(labels, "archive-recorder-1 work cycle time exceeded count: threshold="));
+    // conductor + replayer + two recorders.
+    EXPECT_EQ(4u, count_type(labels, 103));
+    EXPECT_EQ(4u, count_type(labels, 104));
 }
 
 TEST_F(ThreadingInteropTest, sharedModeRunsCallerDrivenAndStartsNoWorkerThread)

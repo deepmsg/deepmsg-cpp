@@ -402,6 +402,11 @@ private:
                                                                             std::string_view role,
                                                                             std::int64_t threshold_ns);
 
+    /// A6f-2: the single writer of the type 105/106/107 counters. Sums the
+    /// per-recorder locals and publishes only if some recorder did work this
+    /// pass (the reference's `Recorder.doWork` condition).
+    void publish_recording_metrics() noexcept;
+
     /// P-A9 dispatch (`plan-a6f-multi-recorder.md` §6 Q2): `recording_id % N`.
     [[nodiscard]] std::size_t recorder_index_for(std::int64_t recording_id) const noexcept
     {
@@ -490,6 +495,9 @@ private:
     /// `ctx.numRecorderThreads()`: one `Recorder` in the reference shape, N with
     /// `deepmsg.archive.recorder.threads` (C++ extension, P-A9).
     std::vector<std::unique_ptr<Recorder>> recorders_;
+    /// The same recorders as raw pointers, built once in `init()` so the
+    /// per-pass sum does not allocate.
+    std::vector<Recorder*> recorder_handles_;
     std::optional<axc::core::PositionWriterTarget> max_write_time_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_bytes_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_time_counter_;

@@ -56,6 +56,12 @@ public:
 
     [[nodiscard]] std::size_t count() const noexcept;
 
+    /// The `n`-th CPU of this affinity: the set mode's n-th member, or
+    /// `index + n` for index mode. `none()` for no affinity or out of range.
+    /// A6f uses it to give each recorder agent its own core from the one
+    /// configured `aeron.archive.recorder.cpu.affinity`.
+    [[nodiscard]] CpuAffinity nth(std::size_t n) const noexcept;
+
     /// Applies to the calling thread. Returns false and leaves the thread
     /// unpinned when the kernel refuses (seccomp/cpuset restrictions).
     [[nodiscard]] bool apply_to_current_thread() const noexcept;

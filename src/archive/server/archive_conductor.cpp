@@ -183,9 +183,11 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     recorders_.reserve(recorder_threads);
     recording_inboxes_.reserve(recorder_threads);
     recorder_duty_cycles_.reserve(recorder_threads);
+    recorder_handles_.reserve(recorder_threads);
     for (std::size_t index = 0; index < recorder_threads; index++)
     {
         recorders_.push_back(std::make_unique<Recorder>());
+        recorder_handles_.push_back(recorders_.back().get());
         recording_inboxes_.push_back(std::make_unique<axc::core::ManyToOneQueue<RecordingSession>>());
         recorder_duty_cycles_.push_back(std::make_unique<DutyCycleTrackers>());
     }
@@ -362,10 +364,9 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     }
     recording_sessions_counter_.emplace(std::move(*recording_sessions));
 
-    // A6f-1: only the first recorder publishes; the per-recorder accumulation and
-    // the conductor-side sum land in A6f-2. The pointers are still handed to it
-    // through the same three counters the reference uses.
-    recorder().set_counters(&*total_write_bytes_counter_, &*total_write_time_counter_, &*max_write_time_counter_);
+    // A6f-2: the three counters keep one writer — the conductor — which sums the
+    // per-recorder locals in `publish_recording_metrics`; the recorders
+    // themselves never touch a counter.
 
     // `Archive.java:1644-1730`: the replay session count and the three
     // replayer read metrics.
@@ -428,14 +429,22 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     conductor_duty_cycle_.tracker.update(axc::core::NanoClock::now());
     if (is_dedicated())
     {
-        // A6f-1 keeps the reference's single labelled pair on the first
-        // recorder; the per-recorder labels come with A6f-2. The other recorders
-        // run without a tracker (`do_work_threaded` skips a null one).
-        if (auto allocated = allocate_duty_cycle(*recorder_duty_cycles_.front(), "archive-recorder",
-                                                 context_.threading.recorder_cycle_threshold_ns);
-            !allocated)
+        // One labelled pair per recorder (`Archive.java:1477-1487` labels carry
+        // the role). N == 1 keeps the reference's `archive-recorder` label; the
+        // extension appends the index.
+        for (std::size_t index = 0; index < recorders_.size(); index++)
         {
-            return std::unexpected(allocated.error());
+            std::string role{"archive-recorder"};
+            if (recorders_.size() > 1)
+            {
+                role += "-" + std::to_string(index);
+            }
+            if (auto allocated = allocate_duty_cycle(*recorder_duty_cycles_[index], role,
+                                                     context_.threading.recorder_cycle_threshold_ns);
+                !allocated)
+            {
+                return std::unexpected(allocated.error());
+            }
         }
         if (auto allocated = allocate_duty_cycle(replayer_duty_cycle_, "archive-replayer",
                                                  context_.threading.replayer_cycle_threshold_ns);
@@ -443,7 +452,10 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
         {
             return std::unexpected(allocated.error());
         }
-        recorder().set_duty_cycle_tracker(&recorder_duty_cycles_.front()->tracker);
+        for (std::size_t index = 0; index < recorders_.size(); index++)
+        {
+            recorders_[index]->set_duty_cycle_tracker(&recorder_duty_cycles_[index]->tracker);
+        }
         replayer_.set_duty_cycle_tracker(&replayer_duty_cycle_.tracker);
     }
 
@@ -599,6 +611,30 @@ void ArchiveConductor::close()
     client_.close();
 }
 
+void ArchiveConductor::publish_recording_metrics() noexcept
+{
+    // A6f-2: one writer for the three type 105/106/107 counters. In the
+    // reference shape (one recorder) this is exactly `Recorder.doWork`'s
+    // publish-on-work condition; with N recorders it is the sum of the pass.
+    const auto summary = Recorder::summarise(recorder_handles_.data(), recorder_handles_.size());
+    if (!summary.worked)
+    {
+        return;
+    }
+    if (total_write_bytes_counter_)
+    {
+        total_write_bytes_counter_->set_value(summary.bytes);
+    }
+    if (total_write_time_counter_)
+    {
+        total_write_time_counter_->set_value(summary.time_ns);
+    }
+    if (max_write_time_counter_)
+    {
+        max_write_time_counter_->set_value(summary.max_ns);
+    }
+}
+
 int ArchiveConductor::do_work()
 {
     // `ArchiveConductor.doWork` (`ArchiveConductor.java:363-395`) for the control
@@ -690,6 +726,8 @@ int ArchiveConductor::do_work()
                 }
             }
         });
+
+    publish_recording_metrics();
 
     return work_count;
 }
