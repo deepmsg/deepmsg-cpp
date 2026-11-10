@@ -4,8 +4,14 @@
 # archive swapped.
 #
 #   run-batch.sh [--scenario s2] [--arms j,j-c,x-c,x-j] [--fsync 0,2]
-#                [--rate 25K] [--length 32] [--runs 1] [--iterations 60]
-#                [--out DIR] [--list] [--quick] [--no-read]
+#                [--fsync-catalog 2] [--rate 25K] [--length 32] [--runs 1]
+#                [--iterations 60] [--out DIR] [--list] [--quick] [--no-read]
+#
+# `--fsync` sets the *file* level of each cell and, unless `--fsync-catalog`
+# overrides it, the catalog level too (the archive refuses catalog < file).
+# The cell name keeps `fsync=<file level>`; RUN-INFO.txt carries the pair.
+# `DEEPMSG_IO_FALLOCATE=true` travels to the C++ archive as
+# `deepmsg.archive.file.io.fallocate` (C++ only, docs/compat.md).
 #
 # The four arms (perf spec §6.1):
 #
@@ -40,6 +46,7 @@ BENCH_DIR=$(dirname "$here")
 scenario=s2
 arms=j,j-c,x-c,x-j
 fsync_levels=0,2
+catalog_fsync_levels=""
 rate=25K
 length=32
 runs=1
@@ -58,6 +65,7 @@ while [ $# -gt 0 ]; do
         --scenario) scenario=$2; shift 2 ;;
         --arms) arms=$2; shift 2 ;;
         --fsync) fsync_levels=$2; shift 2 ;;
+        --fsync-catalog) catalog_fsync_levels=$2; shift 2 ;;
         --rate) rate=$2; shift 2 ;;
         --length) length=$2; shift 2 ;;
         --runs) runs=$2; shift 2 ;;
@@ -83,6 +91,14 @@ done
 out=${out:-$BENCH_OUT_DIR/cpp-arms/$(date +%Y-%m-%d)-$(hostname -s)}
 IFS=',' read -ra arm_list <<<"$arms"
 IFS=',' read -ra fsync_list <<<"$fsync_levels"
+if [ -n "$catalog_fsync_levels" ]; then
+    for file_level in "${fsync_list[@]}"; do
+        if [ "$catalog_fsync_levels" -lt "$file_level" ]; then
+            echo "catalog sync level $catalog_fsync_levels < file level $file_level (the archive refuses it)" >&2
+            exit 2
+        fi
+    done
+fi
 
 if [ "$scenario" != s1 ] && [ "$scenario" != s2 ]; then
     echo "unknown scenario $scenario (s1, s2)" >&2
@@ -117,7 +133,7 @@ _port_base() {
 }
 
 _write_cell_files() {
-    local dir=$1 fsync=$2
+    local dir=$1 fsync=$2 arm=$3 catalog_fsync=$4
     local base
     base=$(_port_base)
     control_port=$((base + 1))
@@ -131,7 +147,7 @@ aeron.archive.control.channel=aeron:udp?endpoint=localhost:$control_port
 aeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0
 aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0
 aeron.archive.file.sync.level=$fsync
-aeron.archive.catalog.file.sync.level=$fsync
+aeron.archive.catalog.file.sync.level=$catalog_fsync
 aeron.archive.recording.events.enabled=$([ "$scenario" = s1 ] && echo true || echo false)
 aeron.archive.threading.mode=DEDICATED
 aeron.archive.idle.strategy=spin
@@ -147,6 +163,11 @@ EOF
     # subscribe to nothing.
     if [ "$scenario" = s1 ]; then
         echo 'aeron.archive.recording.events.channel=aeron:ipc' >>"$dir/archive.properties"
+    fi
+
+    # C++-only switches (docs/compat.md); the Java arms never read them.
+    if [ "$arm" = x-c ] || [ "$arm" = x-j ]; then
+        echo "deepmsg.archive.file.io.fallocate=${DEEPMSG_IO_FALLOCATE:-false}" >>"$dir/archive.properties"
     fi
 
     cat >"$dir/driver-override.properties" <<EOF
@@ -250,7 +271,7 @@ _start_node() {
 -Daeron.archive.replication.channel=aeron:udp?endpoint=localhost:0 \
 -Daeron.archive.dir=$archive_dir \
 -Daeron.archive.file.sync.level=$_fsync \
--Daeron.archive.catalog.file.sync.level=$_fsync \
+-Daeron.archive.catalog.file.sync.level=$_catalog_fsync \
 -Dio.aeron.benchmarks.output.directory=$dir \
 $external" \
         taskset -c "$BENCH_NODE_CPU" "$node" >"$dir/node.log" 2>&1 &
@@ -315,7 +336,10 @@ _write_run_info() {
         echo "destination     aeron:udp?endpoint=localhost:$destination_port|mtu=1408"
         echo "source          aeron:udp?endpoint=localhost:$source_port|mtu=1408"
         echo "record          aeron:ipc"
-        echo "fsync           $_fsync (file + catalog)"
+        echo "fsync           file=$_fsync catalog=$_catalog_fsync"
+        if [ "$arm" = x-c ] || [ "$arm" = x-j ]; then
+            echo "fallocate       ${DEEPMSG_IO_FALLOCATE:-false}"
+        fi
         echo "archive idle    conductor=spin recorder=noop replayer=noop, threading=DEDICATED"
         echo "events          $([ "$scenario" = s1 ] && echo 'true (s1, aeron:ipc)' || echo 'false (s2)')"
         echo "cores           driver indices $BENCH_DRIVER_CPU_INDICES, node $BENCH_NODE_CPU, rig $BENCH_RIG_CPU"
@@ -339,8 +363,27 @@ _report_run() {
     du -sb "$archive_dir" 2>/dev/null | cut -f1 >"$dir/run-$run/archive-du.txt" || true
 }
 
+# A6c: the segment's allocation picture (E-D). `st_blocks` separates a sparse
+# `setLength` file from a preallocated one; `filefrag` adds the extent count.
+# Best effort: a missing tool or no segment is not a cell failure.
+_report_filefrag() {
+    local dir=$1
+    command -v filefrag >/dev/null 2>&1 || return 0
+    local segment
+    segment=$(find "$archive_dir" -maxdepth 1 -name '*.rec' -print -quit 2>/dev/null)
+    [ -n "$segment" ] || return 0
+    {
+        echo "file            $(basename "$segment")"
+        echo "size            $(stat -c %s "$segment")"
+        echo "blocks          $(stat -c %b "$segment")"
+        echo "extents         $(filefrag "$segment" 2>/dev/null | sed -n 's/.*: \([0-9]*\) extent.*/\1/p')"
+        filefrag -v "$segment" 2>&1 | sed -n '1,8p'
+    } >"$dir/filefrag.txt"
+}
+
 _run_cell() {
     local round=$1 arm=$2 fsync=$3
+    local catalog_fsync=${catalog_fsync_levels:-$fsync}
     cell_dir="$out/round-$round/${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}"
     archive_dir="$cell_dir/archive"
     # A cell that is re-run must not be read beside its own leftovers: an old
@@ -351,8 +394,9 @@ _run_cell() {
     mkdir -p "$archive_dir"
 
     wait_idle || return 1
-    _write_cell_files "$cell_dir" "$fsync"
+    _write_cell_files "$cell_dir" "$fsync" "$arm" "$catalog_fsync"
     _fsync=$fsync
+    _catalog_fsync=$catalog_fsync
     _write_run_info "$cell_dir" "$arm"
 
     _start_driver "$arm" "$cell_dir" || return 1
@@ -371,6 +415,7 @@ _run_cell() {
         fi
         _report_run "$cell_dir" "$run"
     done
+    _report_filefrag "$cell_dir"
 
     [ -n "${_node_pid:-}" ] && kill -9 "$_node_pid" 2>/dev/null || true
     [ -n "${_archive_pid:-}" ] && kill -9 "$_archive_pid" 2>/dev/null || true
