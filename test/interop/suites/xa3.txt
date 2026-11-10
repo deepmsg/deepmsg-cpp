@@ -1,0 +1,26 @@
+# XA-3 (content parity): the same deterministic stream recorded by our archive
+# and by the reference `io.aeron.archive.Archive`, compared at three layers.
+#
+#   test/interop/run-parity.sh debug
+#
+# One reference Java media driver, one publication created *after* both archives
+# are told to record, so both images join at the same position: identical input
+# by construction.
+#
+#   L0  descriptors (our Catalog reads both files): start/stop, initial term id,
+#       segment/term/mtu, session/stream, channels (endpoint port normalised
+#       across drivers), source identity. Recording id/timestamps are excluded.
+#   L1  every segment file's logical range [start, stop), byte for byte; across
+#       drivers the session id (12..16) and term id (20..24) of each frame are
+#       masked.
+#   L2  both recordings replayed through the reference C archive client and each
+#       message compared with the generator's payload; the reference
+#       `ArchiveTool checksum CRC-32 -a` then runs over both directories.
+#
+# Configurations: single (500), multi-segment (20,000), empty, two concurrent
+# streams, UDP with mtu=512, paced (2,000 at 1k/s); the same single/multi/UDP
+# across the reference Java driver + its archive versus the reference C driver
+# + ours.
+#
+# Each case runs in its own process: a fixture that fails early must not leave a
+# driver child behind holding a port for the next fixture.

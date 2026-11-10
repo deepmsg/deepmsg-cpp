@@ -38,7 +38,8 @@ fi
 # our binary; unset sends every archive there, so the two pairing runs are
 # `AXC_SHIM_DEEPMSG_IDS=42` (only the source is ours) and `=-7777` (only the
 # destination is ours).
-printf 'AXC_BIN_DIR=%s\nAXC_SHIM_DEEPMSG_IDS=%s\n' "$bin_dir" "${AXC_SHIM_DEEPMSG_IDS:-}" \
+printf 'AXC_BIN_DIR=%s\nAXC_SHIM_DEEPMSG_IDS=%s\nAXC_SHIM_THREADING_MODE=%s\n' \
+    "$bin_dir" "${AXC_SHIM_DEEPMSG_IDS:-}" "${AXC_SHIM_THREADING_MODE:-}" \
     > "$root/test/interop/shim/mapped.conf"
 
 exec "$test_bin" "$@"

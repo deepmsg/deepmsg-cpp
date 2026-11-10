@@ -23,6 +23,8 @@ axc_add_executable(axc_archive_interop_tests
         archive/replication_client_probe_test.cpp
         archive/replication_interop_test.cpp
         archive/threading_interop_test.cpp
+        archive/reference_java_client_test.cpp
+        archive/content_parity_test.cpp
         fixture/c_driver.cpp
         fixture/java_process.cpp
         fixture/process.cpp

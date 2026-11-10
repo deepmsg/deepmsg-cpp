@@ -28,9 +28,10 @@ inline constexpr std::int32_t STREAM_ID_OFFSET = 16;
 inline constexpr std::int32_t TERM_ID_OFFSET = 20;
 inline constexpr std::int32_t RESERVED_VALUE_OFFSET = 24;
 
-/// `HeaderFlyweight.HDR_TYPE_DATA` / `HDR_TYPE_PAD`.
+/// `HeaderFlyweight.HDR_TYPE_DATA` / `HDR_TYPE_PAD`
+/// (`aeron_udp_protocol.h:171-172`: DATA = 0x01, **PAD = 0x00**).
 inline constexpr std::int32_t DATA_FRAME_TYPE = 0x01;
-inline constexpr std::int32_t PADDING_FRAME_TYPE = 0x02;
+inline constexpr std::int32_t PADDING_FRAME_TYPE = 0x00;
 
 /// `LogBufferDescriptor.TERM_MAX_LENGTH`.
 inline constexpr std::int64_t TERM_MAX_LENGTH = 1024LL * 1024 * 1024;
