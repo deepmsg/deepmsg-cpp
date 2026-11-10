@@ -1,3 +1,4 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
 # The sync writer and the segment readers still need their audit (A1b follow-up).
 archive/io/uring_ring.cpp
+archive/io/uring_writer.cpp

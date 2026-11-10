@@ -1,15 +1,12 @@
 #include "archive/io/sync_writer.h"
 
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
-#include <cstring>
-#include <string>
+#include <string_view>
 #include <utility>
 
-#include "archive/server/segment_files.h"
+#include "archive/io/segment_file.h"
 
 namespace deepmsg::archive::server::io
 {
@@ -41,44 +38,17 @@ std::expected<void, axc::core::Error> SyncWriter::open_segment(std::int64_t segm
     closed_ = false;
     segment_base_position_ = segment_base_position;
 
-    const std::string path = config_.archive_dir + "/" + segment_file_name(config_.recording_id, segment_base_position);
-
-    if (fail_if_exists && 0 == ::access(path.c_str(), F_OK))
+    auto opened = open_segment_file(config_, segment_base_position, fail_if_exists);
+    if (!opened)
     {
-        return std::unexpected(
-            axc::core::make_error(axc::core::ErrorCode::invalid_argument, "segment file already exists: " + path));
+        return std::unexpected(opened.error());
     }
 
-    // `RandomAccessFile(segmentFile, "rw")` + `setLength(segmentLength)`
-    // (`RecordingWriter.java:218-219`).
-    fd_ = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
-    if (fd_ < 0)
-    {
-        return std::unexpected(io_error(axc::core::ErrorCode::io_error, "open segment file failed"));
-    }
-
-    if (0 != ::ftruncate(fd_, static_cast<off_t>(config_.segment_length)))
-    {
-        const axc::core::Error error = io_error(axc::core::ErrorCode::io_error, "resize segment file failed");
-        close_fd();
-        return std::unexpected(error);
-    }
-
-    // `RecordingWriter.java:221`: the directory entry is forced only when the
-    // archive also forces file contents.
-    if (config_.file_sync_level > 0 && config_.archive_dir_fd >= 0)
+    fd_ = opened->fd;
+    if (opened->directory_forced)
     {
         ++directory_force_count_;
-        const int result =
-            config_.file_sync_level > 1 ? ::fsync(config_.archive_dir_fd) : ::fdatasync(config_.archive_dir_fd);
-        if (0 != result)
-        {
-            const axc::core::Error error = io_error(axc::core::ErrorCode::io_error, "archive directory force failed");
-            close_fd();
-            return std::unexpected(error);
-        }
     }
-
     return {};
 }
 
@@ -155,13 +125,6 @@ std::expected<std::unique_ptr<SegmentWriter>, axc::core::Error> make_sync_writer
         return std::unexpected(opened.error());
     }
     return std::unique_ptr<SegmentWriter>{std::move(writer)};
-}
-
-std::expected<std::unique_ptr<SegmentWriter>, axc::core::Error> make_uring_writer(const WriterConfig& config)
-{
-    (void)config;
-    return std::unexpected(
-        axc::core::make_error(axc::core::ErrorCode::not_found, "the io_uring writer lands with A6-3"));
 }
 
 }  // namespace deepmsg::archive::server::io

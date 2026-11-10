@@ -2,7 +2,9 @@ axc_add_library(axc_archive_io
     SOURCES
         module.cpp
         sync_writer.cpp
+        segment_file.cpp
         uring_ring.cpp
+        uring_writer.cpp
         mmap_reader.cpp
         pread_reader.cpp
     DEPS

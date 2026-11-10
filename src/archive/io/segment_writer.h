@@ -40,6 +40,13 @@ struct WriterConfig
     int inflight_max{0};
     /// Copy each block into a private buffer before submitting it (A6-3 option 1).
     bool copy_before_submit{false};
+    /// Largest block `submit` will be handed (the recorder's
+    /// `block_length_limit`); the io_uring backend sizes its copy buffers from
+    /// it.
+    std::int32_t max_block_length{0};
+    /// Recording position the writer starts from (the join position); nothing
+    /// is committed before it.
+    std::int64_t start_position{0};
 };
 
 /// `/home/gavin/trader/analysis/cpp/impl-2026-11-07-cpp-archive.md` §4.1.
