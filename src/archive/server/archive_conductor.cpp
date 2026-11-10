@@ -1,5 +1,6 @@
 #include "archive/server/archive_conductor.h"
 
+#include <sched.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -198,28 +199,33 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     handlers.on_unavailable = &ArchiveConductor::unavailable_image_trampoline;
     handlers.on_unavailable_clientd = this;
 
-    auto subscription = client_.add_subscription(context_.control_channel, context_.control_stream_id, handlers);
-    for (int attempt = 0; attempt < 5000; attempt++)
+    // `Archive.java:692`: a disabled control channel leaves the local
+    // (privileged) one only.
+    if (context_.control_channel_enabled)
     {
-        auto polled = subscription.poll();
-        if (!polled)
+        auto subscription = client_.add_subscription(context_.control_channel, context_.control_stream_id, handlers);
+        for (int attempt = 0; attempt < 5000; attempt++)
         {
-            return std::unexpected(polled.error());
-        }
-        if (polled->has_value())
-        {
-            control_subscription_ = std::move(**polled);
-            break;
-        }
+            auto polled = subscription.poll();
+            if (!polled)
+            {
+                return std::unexpected(polled.error());
+            }
+            if (polled->has_value())
+            {
+                control_subscription_ = std::move(**polled);
+                break;
+            }
 
-        // The driver has to answer the async add, so the conductor has to keep
-        // turning between polls (`铁律 2`: never block inside an add).
-        const int work = client_.do_work();
-        (void)work;
-        ::usleep(1000);
+            // The driver has to answer the async add, so the conductor has to keep
+            // turning between polls (`铁律 2`: never block inside an add).
+            const int work = client_.do_work();
+            (void)work;
+            ::usleep(1000);
+        }
     }
 
-    if (!control_subscription_)
+    if (context_.control_channel_enabled && !control_subscription_)
     {
         return std::unexpected(
             axc::core::make_error(axc::core::ErrorCode::io_error, "control subscription did not complete"));
@@ -251,6 +257,15 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
     }
 
     cached_clock_.update(epoch_clock_.time_ms());
+
+    // `DedicatedModeArchiveConductor.newRecorder`/`newReplayer`: the worker
+    // halves hand sessions over through the two inboxes and take them back
+    // through the close queues.
+    if (is_dedicated())
+    {
+        recorder_.set_queues(&recording_inbox_, &recording_close_queue_);
+        replayer_.set_queues(&replay_inbox_, &replay_close_queue_);
+    }
 
     // `Archive.Context.conclude` (`Archive.java:1570-1700`): the catalog and the
     // four archive-level counters, allocated before the conductor serves.
@@ -375,6 +390,32 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
 
     replayer_.set_counters(&*total_read_bytes_counter_, &*total_read_time_counter_, &*max_read_time_counter_);
 
+    // `Archive.java:1470-1545`: the conductor tracker exists in every mode; the
+    // recorder/replayer ones only in DEDICATED.
+    if (auto allocated = allocate_duty_cycle(conductor_duty_cycle_, "archive-conductor",
+                                             context_.threading.conductor_cycle_threshold_ns);
+        !allocated)
+    {
+        return std::unexpected(allocated.error());
+    }
+    if (is_dedicated())
+    {
+        if (auto allocated = allocate_duty_cycle(recorder_duty_cycle_, "archive-recorder",
+                                                 context_.threading.recorder_cycle_threshold_ns);
+            !allocated)
+        {
+            return std::unexpected(allocated.error());
+        }
+        if (auto allocated = allocate_duty_cycle(replayer_duty_cycle_, "archive-replayer",
+                                                 context_.threading.replayer_cycle_threshold_ns);
+            !allocated)
+        {
+            return std::unexpected(allocated.error());
+        }
+        recorder_.set_duty_cycle_tracker(&recorder_duty_cycle_.tracker);
+        replayer_.set_duty_cycle_tracker(&replayer_duty_cycle_.tracker);
+    }
+
     // `Archive.Context.replayBuffer()` (`Archive.java:3894-3906`): one archive
     // level buffer of `fileIoMaxLength`.
     replay_buffer_.assign(static_cast<std::size_t>(context_.recording.file_io_max_length), 0);
@@ -447,8 +488,23 @@ void ArchiveConductor::close()
     control_subscription_.reset();
 
     // Sessions next: their writers own segment files and their counters.
-    recorder_.close();
-    replayer_.close();
+    if (is_dedicated())
+    {
+        // The runtime has already stopped the recorder/replayer runners
+        // (`DedicatedModeArchiveConductor.closeSessionWorkers`, `:96-116`): hand
+        // their remaining sessions back and close them on this thread.
+        recorder_.close_threaded();
+        replayer_.close_threaded();
+        while (!recording_close_queue_.empty() || !replay_close_queue_.empty())
+        {
+            (void)process_close_queue();
+        }
+    }
+    else
+    {
+        recorder_.close();
+        replayer_.close();
+    }
     replay_publication_sessions_ = SessionWorker<CreateReplayPublicationSession>{};
     replication_sessions_ = SessionWorker<ReplicationSession>{};
     replication_session_by_id_.clear();
@@ -493,6 +549,13 @@ void ArchiveConductor::close()
     total_write_time_counter_.reset();
     total_write_bytes_counter_.reset();
     max_write_time_counter_.reset();
+    // The three duty-cycle tracker pairs (103/104) own counters too.
+    for (DutyCycleTrackers* trackers : {&conductor_duty_cycle_, &recorder_duty_cycle_, &replayer_duty_cycle_})
+    {
+        trackers->max_cycle_time.reset();
+        trackers->threshold_exceeded.reset();
+        trackers->tracker = axc::core::DutyCycleTracker{};
+    }
     client_.close();
 }
 
@@ -502,9 +565,12 @@ int ArchiveConductor::do_work()
     // plane: drive the client conductor, read the control subscription, run the
     // sessions.
     cached_clock_.update(epoch_clock_.time_ms());
+    conductor_duty_cycle_.tracker.measure_and_update(axc::core::NanoClock::now());
 
-    int work_count = client_.do_work();
-    work_count += poll_control_subscription();
+    int work_count = is_dedicated() ? process_close_queue() : 0;
+    work_count += client_.do_work();
+    const int control_work = poll_control_subscription();
+    work_count += control_work;
     work_count += poll_pending_publications();
     work_count += poll_pending_recording_subscriptions();
     work_count += poll_pending_control_counters();
@@ -513,7 +579,10 @@ int ArchiveConductor::do_work()
     work_count += list_recordings_sessions_.do_work([](ListRecordingsSession& session) { session.close(); });
     check_replay_tokens();
     work_count += replay_publication_sessions_.do_work([](CreateReplayPublicationSession&) {});
-    work_count += replayer_.do_work([this](ReplaySession& session) { close_replay_session(session); });
+    if (!is_dedicated())
+    {
+        work_count += replayer_.do_work([this](ReplaySession& session) { close_replay_session(session); });
+    }
     work_count += delete_sessions_.do_work([](DeleteSegmentsSession& session) { session.close(); });
     work_count += replication_sessions_.do_work(
         [this](ReplicationSession& session)
@@ -521,7 +590,10 @@ int ArchiveConductor::do_work()
             replication_session_by_id_.erase(session.session_id());
             session.close();
         });
-    work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
+    if (!is_dedicated())
+    {
+        work_count += recorder_.do_work([this](RecordingSession& session) { close_recording_session(session); });
+    }
     work_count += sessions_.do_work(
         [this](ControlSession& session)
         {
@@ -809,6 +881,42 @@ void ArchiveConductor::decrement_recording_sessions() noexcept
     }
 }
 
+std::expected<void, axc::core::Error> ArchiveConductor::allocate_duty_cycle(DutyCycleTrackers& trackers,
+                                                                            std::string_view role,
+                                                                            std::int64_t threshold_ns)
+{
+    // `Archive.java:1477-1487`: two counters per agent, the labels carry the
+    // role, the threshold and the configured threading mode.
+    const std::string mode{threading_mode_name(context_.threading.mode)};
+    const std::string max_label =
+        ArchiveCounters::make_label(std::string{role} + " max cycle time in ns: " + mode, context_.archive_id);
+    const std::string exceeded_label = ArchiveCounters::make_label(
+        std::string{role} + " work cycle time exceeded count: threshold=" + format_duration_ns(threshold_ns) + " " +
+            mode,
+        context_.archive_id);
+    const auto key = ArchiveCounters::archive_id_key(context_.archive_id);
+
+    auto max_counter = allocate_counter(ArchiveCounters::MAX_CYCLE_TIME_TYPE_ID,
+                                        std::span<const std::uint8_t>{key.data(), key.size()}, max_label);
+    if (!max_counter)
+    {
+        return std::unexpected(max_counter.error());
+    }
+    trackers.max_cycle_time.emplace(std::move(*max_counter));
+
+    auto exceeded = allocate_counter(ArchiveCounters::CYCLE_TIME_THRESHOLD_EXCEEDED_TYPE_ID,
+                                     std::span<const std::uint8_t>{key.data(), key.size()}, exceeded_label);
+    if (!exceeded)
+    {
+        return std::unexpected(exceeded.error());
+    }
+    trackers.threshold_exceeded.emplace(std::move(*exceeded));
+
+    trackers.tracker =
+        axc::core::DutyCycleTracker(&*trackers.max_cycle_time, &*trackers.threshold_exceeded, threshold_ns);
+    return {};
+}
+
 std::int64_t ArchiveConductor::recording_sessions_counter_value() const noexcept
 {
     return recording_sessions_counter_ ? recording_sessions_counter_->value() : -1;
@@ -824,7 +932,7 @@ void ArchiveConductor::on_start_recording(const StartRecordingRequest& request)
     }
 
     const auto max_recordings = static_cast<std::size_t>(context_.recording.max_concurrent_recordings);
-    if (recording_subscriptions_.size() >= max_recordings || recorder_.size() >= max_recordings)
+    if (recording_subscriptions_.size() >= max_recordings || sessions_by_recording_id_.size() >= max_recordings)
     {
         session->send_error_response(
             request.correlation_id, MAX_RECORDINGS,
@@ -975,7 +1083,7 @@ std::expected<std::int64_t, std::string> ArchiveConductor::extend_recording(
     // `poll_pending_recording_subscriptions` once the driver answers
     // (`ArchiveConductor.java:1139`).
     const auto max_recordings = static_cast<std::size_t>(context_.recording.max_concurrent_recordings);
-    if (recording_subscriptions_.size() >= max_recordings || recorder_.size() >= max_recordings)
+    if (recording_subscriptions_.size() >= max_recordings || sessions_by_recording_id_.size() >= max_recordings)
     {
         const std::string msg =
             "max concurrent recordings reached at " + std::to_string(context_.recording.max_concurrent_recordings);
@@ -1108,7 +1216,7 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
         return 0;
     }
 
-    if (recorder_.size() >= static_cast<std::size_t>(context_.recording.max_concurrent_recordings))
+    if (sessions_by_recording_id_.size() >= static_cast<std::size_t>(context_.recording.max_concurrent_recordings))
     {
         if (nullptr != control)
         {
@@ -1224,7 +1332,7 @@ int ArchiveConductor::extend_recording_session(RecordingSubscription& subscripti
 
     sessions_by_image_[image] = session.get();
     sessions_by_recording_id_[recording_id] = session.get();
-    recorder_.add_session(std::move(session));
+    add_recording_session(std::move(session));
     subscription.ref_count++;
     increment_recording_sessions();
 
@@ -1536,7 +1644,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
         return 0;
     }
 
-    if (recorder_.size() >= static_cast<std::size_t>(context_.recording.max_concurrent_recordings))
+    if (sessions_by_recording_id_.size() >= static_cast<std::size_t>(context_.recording.max_concurrent_recordings))
     {
         log_warning("max concurrent recordings reached at " +
                     std::to_string(context_.recording.max_concurrent_recordings));
@@ -1616,7 +1724,7 @@ int ArchiveConductor::start_recording_session(RecordingSubscription& subscriptio
 
     sessions_by_image_[image] = session.get();
     sessions_by_recording_id_[*recording_id] = session.get();
-    recorder_.add_session(std::move(session));
+    add_recording_session(std::move(session));
     subscription.ref_count++;
     increment_recording_sessions();
 
@@ -1674,17 +1782,79 @@ std::optional<ArchiveConductor::RecordingSubscription> ArchiveConductor::remove_
     return removed;
 }
 
+void ArchiveConductor::add_recording_session(std::unique_ptr<RecordingSession> session)
+{
+    // `DedicatedModeRecorder.addSession` (`DedicatedModeArchiveConductor.java:213-218`).
+    if (!is_dedicated())
+    {
+        recorder_.add_session(std::move(session));
+        return;
+    }
+
+    RecordingSession* raw = session.release();
+    while (!recording_inbox_.push(raw))
+    {
+        // Only an allocation failure can refuse; the reference retries too.
+        ::sched_yield();
+    }
+}
+
+void ArchiveConductor::add_replay_session(std::unique_ptr<ReplaySession> session)
+{
+    // `DedicatedModeReplayer.addSession` (`DedicatedModeArchiveConductor.java:330-335`).
+    if (!is_dedicated())
+    {
+        replayer_.add_session(std::move(session));
+        return;
+    }
+
+    ReplaySession* raw = session.release();
+    while (!replay_inbox_.push(raw))
+    {
+        ::sched_yield();
+    }
+}
+
+int ArchiveConductor::process_close_queue()
+{
+    // `DedicatedModeArchiveConductor.processCloseQueue` (`:118-137`): at most
+    // ten reaps per pass, each closed on the conductor thread.
+    constexpr int COMMAND_LIMIT = 10;
+
+    int work_count = 0;
+    for (; work_count < COMMAND_LIMIT; ++work_count)
+    {
+        if (RecordingSession* recording = recording_close_queue_.pop())
+        {
+            std::unique_ptr<RecordingSession> owned(recording);
+            close_recording_session(*owned);
+            continue;
+        }
+        if (ReplaySession* replay = replay_close_queue_.pop())
+        {
+            std::unique_ptr<ReplaySession> owned(replay);
+            close_replay_session(*owned);
+            continue;
+        }
+        break;
+    }
+
+    return work_count;
+}
+
 void ArchiveConductor::abort_sessions_for_subscription(std::int64_t registration_id, std::string_view reason)
 {
-    // `abortRecordingSessionAndCloseSubscription` (`ArchiveConductor.java:1766-1787`).
-    recorder_.for_each_session(
-        [&](RecordingSession& session)
+    // `abortRecordingSessionAndCloseSubscription` (`ArchiveConductor.java:1766-1787`):
+    // the reference walks its own `recordingSessionByIdMap`, not the worker's
+    // array (the worker may be on another thread in DEDICATED mode).
+    for (auto& entry : sessions_by_recording_id_)
+    {
+        RecordingSession& session = *entry.second;
+        if (session.subscription_registration_id() == registration_id)
         {
-            if (session.subscription_registration_id() == registration_id)
-            {
-                session.abort(reason);
-            }
-        });
+            session.abort(reason);
+        }
+    }
 }
 
 void ArchiveConductor::on_stop_recording(const StopRecordingRequest& request)
@@ -2338,7 +2508,7 @@ void ArchiveConductor::new_replay_session(const CreateReplayPublicationSession::
                                                    std::span<std::uint8_t>{replay_buffer_.data(), buffer_length}, this);
 
     replay_session_by_id_[replay_session_id] = session.get();
-    replayer_.add_session(std::move(session));
+    add_replay_session(std::move(session));
 
     // `:993`: the type-112 replay session counter.
     if (replay_session_counter_)
@@ -2831,6 +3001,8 @@ void ArchiveConductor::on_replicate(const ReplicateRequest& request)
     config.dst_start_position = dst_summary.start_position;
     config.dst_stop_position = dst_summary.stop_position;
     config.dst_stream_id = dst_summary.stream_id;
+    config.action_timeout_ms = context_.message_timeout_ms;
+    config.retry_attempts = context_.message_retry_attempts;
     config.clock = &cached_clock_;
 
     // `ArchiveConductor.java:1433-1457`: clone the archive's client context —
@@ -2839,6 +3011,10 @@ void ArchiveConductor::on_replicate(const ReplicateRequest& request)
     // (`Archive.java:1587-1610`), the client name suffixed with the
     // replication id.
     std::string response_channel = request.src_response_channel;
+    if (response_channel.empty())
+    {
+        response_channel = context_.control_response_channel;
+    }
     if (response_channel.empty())
     {
         auto derived = replication_response_channel(context_.control_channel);
@@ -2855,6 +3031,7 @@ void ArchiveConductor::on_replicate(const ReplicateRequest& request)
     client_config.control_request_channel = request.src_control_channel;
     client_config.control_request_stream_id = request.src_control_stream_id;
     client_config.control_response_channel = response_channel;
+    client_config.control_response_stream_id = context_.control_response_stream_id;
     client_config.client_name = "archive archiveId=" + std::to_string(context_.archive_id) +
                                 " replicationSessionId=" + std::to_string(config.replication_id);
     client_config.encoded_credentials = request.encoded_credentials;

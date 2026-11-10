@@ -8,7 +8,9 @@
 #include "archive/server/recording_session.h"
 #include "archive/server/recording_writer.h"
 #include "archive/server/session_worker.h"
+#include "core/collections/many_to_one_queue.h"
 #include "core/counters/counter_target.h"
+#include "core/counters/duty_cycle_tracker.h"
 
 namespace deepmsg::archive::server
 {
@@ -35,6 +37,33 @@ public:
     Recorder& operator=(const Recorder&) = delete;
 
     void add_session(std::unique_ptr<RecordingSession> session);
+
+    /// DEDICATED mode (`DedicatedModeArchiveConductor.java:143-283`): the
+    /// conductor hands sessions over through `inbox`, finished sessions go back
+    /// through `close_queue` for the conductor to close.
+    void set_queues(axc::core::ManyToOneQueue<RecordingSession>* inbox,
+                    axc::core::ManyToOneQueue<RecordingSession>* close_queue) noexcept;
+
+    void set_duty_cycle_tracker(axc::core::DutyCycleTracker* tracker) noexcept
+    {
+        duty_cycle_ = tracker;
+    }
+
+    /// `DedicatedModeRecorder.onStart` (`DedicatedModeArchiveConductor.java:180-186`).
+    void on_start_threaded() noexcept;
+
+    [[nodiscard]] bool threaded() const noexcept
+    {
+        return nullptr != inbox_;
+    }
+
+    /// One recorder-agent pass: drain the inbox, run the sessions, hand the
+    /// finished ones back.
+    int do_work_threaded();
+
+    /// Shutdown: drain the inbox, hand every remaining session back (its close
+    /// belongs to the conductor), and empty the worker.
+    void close_threaded();
 
     /// Close every session (writer + position counter) and empty the worker.
     void close();
@@ -83,8 +112,12 @@ public:
 
 private:
     void publish() noexcept;
+    void hand_back(RecordingSession* session) noexcept;
 
     SessionWorker<RecordingSession> sessions_;
+    axc::core::ManyToOneQueue<RecordingSession>* inbox_{nullptr};
+    axc::core::ManyToOneQueue<RecordingSession>* close_queue_{nullptr};
+    axc::core::DutyCycleTracker* duty_cycle_{nullptr};
     axc::core::CounterTarget* total_write_bytes_counter_{nullptr};
     axc::core::CounterTarget* total_write_time_counter_{nullptr};
     axc::core::CounterTarget* max_write_time_counter_{nullptr};

@@ -97,7 +97,7 @@ int ReplaySession::do_work()
     // `ReplaySession.doWork` (`:209-243`).
     int work_count = 0;
 
-    if (aborted_)
+    if (aborted_.load(std::memory_order_acquire))
     {
         revoke_publication_ = true;
         set_state(State::inactive, "replay aborted");
@@ -139,7 +139,7 @@ void ReplaySession::abort(std::string_view reason) noexcept
 {
     // `ReplaySession.abort` (`:248-252`); the reason is traced in the reference.
     abort_reason_.assign(reason);
-    aborted_ = true;
+    aborted_.store(true, std::memory_order_release);
 }
 
 void ReplaySession::send_pending_error()

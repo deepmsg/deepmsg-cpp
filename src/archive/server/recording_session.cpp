@@ -3,6 +3,8 @@
 #include <string>
 #include <utility>
 
+#include <cstring>
+
 namespace deepmsg::archive::server
 {
 
@@ -81,7 +83,7 @@ int RecordingSession::do_work()
     int work_count = 0;
 
     // `RecordingSession.doWork` (`RecordingSession.java:131-163`).
-    if (aborted_)
+    if (aborted_.load(std::memory_order_acquire))
     {
         set_state(State::inactive, abort_reason_);
     }
@@ -115,9 +117,13 @@ int RecordingSession::do_work()
 
 void RecordingSession::abort(std::string_view reason)
 {
-    // `RecordingSession.abort` (`RecordingSession.java:108-113`).
-    abort_reason_.assign(reason);
-    aborted_ = true;
+    // `RecordingSession.abort` (`RecordingSession.java:108-113`). The conductor
+    // can call this while the recorder thread runs `do_work`, so the reason goes
+    // into a fixed buffer published by the flag (no allocation, no torn read).
+    const std::size_t length = std::min(reason.size(), sizeof(abort_reason_) - 1);
+    std::memcpy(abort_reason_, reason.data(), length);
+    abort_reason_[length] = '\0';
+    aborted_.store(true, std::memory_order_release);
 }
 
 void RecordingSession::close()

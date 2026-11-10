@@ -37,7 +37,7 @@ is_archive=0
 archive_id=""
 for argument in "$@"; do
     case "$argument" in
-        io.aeron.archive.ArchivingMediaDriver)
+        io.aeron.archive.ArchivingMediaDriver | io.aeron.archive.Archive)
             is_archive=1
             ;;
         -Daeron.archive.id=*)

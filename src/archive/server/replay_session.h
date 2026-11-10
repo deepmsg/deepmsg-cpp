@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -259,7 +260,7 @@ private:
     std::int64_t error_code_{0};
     std::string abort_reason_;
     bool revoke_publication_{false};
-    bool aborted_{false};
+    std::atomic<bool> aborted_{false};
     bool closed_{false};
 
     /// Stall tracking for a frame type the reference cannot handle.

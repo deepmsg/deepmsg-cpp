@@ -4,6 +4,7 @@
 #include <expected>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "archive/server/archive_conductor.h"
 #include "archive/server/archive_config.h"
@@ -11,6 +12,8 @@
 #include "archive/server/authenticator.h"
 #include "archive/server/catalog.h"
 #include "archive/server/epoch_clock_source.h"
+#include "archive/server/threading.h"
+#include "core/agent/agent_runner.h"
 #include "core/config/property_source.h"
 #include "core/error/error.h"
 
@@ -28,6 +31,18 @@ struct ArchiveLaunchConfig
     std::string mark_file_dir;
     std::string control_channel{"aeron:udp?endpoint=localhost:8010"};
     std::int32_t control_stream_id{10};
+    /// `aeron.archive.control.channel.enabled` (`Archive.java:692`).
+    bool control_channel_enabled{true};
+    /// `aeron.archive.control.response.channel` / `.stream.id`
+    /// (`AeronArchive.java:2752-2758`): the archive client's response
+    /// channel. Empty ⇒ derived from `control_channel`
+    /// (`Archive.java:1587-1610`).
+    std::string control_response_channel;
+    std::int32_t control_response_stream_id{20};
+    /// `aeron.archive.message.timeout` / `.retry.attempts`
+    /// (`AeronArchive.java:2674-2692`).
+    std::int64_t message_timeout_ms{10'000};
+    std::int32_t message_retry_attempts{3};
     std::string local_control_channel{"aeron:ipc?term-length=64k"};
     std::int32_t local_control_stream_id{10};
     /// `aeron.archive.replication.channel` (`Archive.java:613`, `:1301-1303`):
@@ -46,6 +61,8 @@ struct ArchiveLaunchConfig
     int catalog_file_sync_level{0};
     RecordingSettings recording;
     ReplaySettings replay;
+    /// `aeron.archive.threading.mode` and the three agent settings.
+    ThreadingSettings threading;
     /// `aeron.archive.authenticator.supplier`; empty ⇒ `DefaultAuthenticator`.
     std::string authenticator_supplier;
 };
@@ -70,11 +87,30 @@ public:
     ArchiveServer& operator=(const ArchiveServer&) = delete;
     ~ArchiveServer();
 
+    /// `Archive.launch` (`Archive.java:141-170`): DEDICATED starts the three
+    /// agents on their own threads; SHARED/INVOKER leave the caller in charge
+    /// (`do_work`).
+    [[nodiscard]] std::expected<void, axc::core::Error> start();
+
     /// One duty cycle: the conductor, then the mark-file activity timestamp
-    /// (`ArchiveMarkFile.java:365-376`).
+    /// (`ArchiveMarkFile.java:365-376`). In DEDICATED the agents run on their
+    /// own threads and this returns 0.
     [[nodiscard]] int do_work();
 
     void close();
+
+    [[nodiscard]] ArchiveThreadingMode threading_mode() const noexcept
+    {
+        return config_.threading.mode;
+    }
+
+    /// The idle strategy the caller loop uses in SHARED/INVOKER
+    /// (`Configuration.idleStrategySupplier`, `Archive.java:832-847`). A copy:
+    /// the strategy carries the backoff state of one loop.
+    [[nodiscard]] axc::core::IdleStrategy idle_strategy() const noexcept
+    {
+        return config_.threading.idle;
+    }
 
     [[nodiscard]] ArchiveMarkFile& mark_file() noexcept
     {
@@ -87,6 +123,104 @@ public:
     }
 
 private:
+    /// `DedicatedModeArchiveConductor`'s three agents; the conductor agent
+    /// wraps the whole conductor (its `do_work`), the other two their worker
+    /// halves.
+    class ConductorAgent
+    {
+    public:
+        ConductorAgent(ArchiveConductor& conductor, std::string_view role) : conductor_(conductor), role_(role) {}
+
+        [[nodiscard]] std::expected<void, axc::core::Error> on_start()
+        {
+            return {};
+        }
+
+        [[nodiscard]] int do_work() noexcept
+        {
+            return conductor_.do_work();
+        }
+
+        void on_close() noexcept {}
+
+        [[nodiscard]] std::string_view role_name() noexcept
+        {
+            return role_;
+        }
+
+    private:
+        ArchiveConductor& conductor_;
+        std::string role_;
+    };
+
+    class RecorderAgent
+    {
+    public:
+        RecorderAgent(Recorder& recorder, std::string_view role) : recorder_(recorder), role_(role) {}
+
+        [[nodiscard]] std::expected<void, axc::core::Error> on_start()
+        {
+            recorder_.on_start_threaded();
+            return {};
+        }
+
+        [[nodiscard]] int do_work() noexcept
+        {
+            return recorder_.do_work_threaded();
+        }
+
+        void on_close() noexcept
+        {
+            recorder_.close_threaded();
+        }
+
+        [[nodiscard]] std::string_view role_name() noexcept
+        {
+            return role_;
+        }
+
+    private:
+        Recorder& recorder_;
+        std::string role_;
+    };
+
+    class ReplayerAgent
+    {
+    public:
+        ReplayerAgent(Replayer& replayer, std::string_view role) : replayer_(replayer), role_(role) {}
+
+        [[nodiscard]] std::expected<void, axc::core::Error> on_start()
+        {
+            replayer_.on_start_threaded();
+            return {};
+        }
+
+        [[nodiscard]] int do_work() noexcept
+        {
+            return replayer_.do_work_threaded();
+        }
+
+        void on_close() noexcept
+        {
+            replayer_.close_threaded();
+        }
+
+        [[nodiscard]] std::string_view role_name() noexcept
+        {
+            return role_;
+        }
+
+    private:
+        Replayer& replayer_;
+        std::string role_;
+    };
+
+    class LoggingErrorHandler final : public axc::core::ErrorHandler
+    {
+    public:
+        void on_error(const axc::core::Error& error) noexcept override;
+    };
+
     explicit ArchiveServer(const ArchiveLaunchConfig& config);
 
     [[nodiscard]] std::expected<void, axc::core::Error> init();
@@ -97,7 +231,17 @@ private:
     SampleAuthenticator sample_authenticator_;
     DefaultAuthenticator default_authenticator_;
     std::unique_ptr<ArchiveConductor> conductor_;
+    LoggingErrorHandler error_handler_;
+    std::unique_ptr<ConductorAgent> conductor_agent_;
+    std::unique_ptr<RecorderAgent> recorder_agent_;
+    std::unique_ptr<ReplayerAgent> replayer_agent_;
+    std::unique_ptr<axc::core::AgentRunner<ConductorAgent>> conductor_runner_;
+    std::unique_ptr<axc::core::AgentRunner<RecorderAgent>> recorder_runner_;
+    std::unique_ptr<axc::core::AgentRunner<ReplayerAgent>> replayer_runner_;
+    /// `init()` signalled the mark file ready.
     bool started_{false};
+    /// `start()` created the agent threads.
+    bool runtime_started_{false};
 };
 
 }  // namespace deepmsg::archive::server

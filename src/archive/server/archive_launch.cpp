@@ -176,6 +176,9 @@ std::expected<ArchiveLaunchConfig, axc::core::Error> parse_launch_config(
     config.mark_file_dir = string_or(source, "aeron.archive.mark.file.dir", config.archive_dir);
 
     config.control_channel = string_or(source, "aeron.archive.control.channel", config.control_channel);
+    config.control_channel_enabled = bool_or(source, "aeron.archive.control.channel.enabled", true);
+    config.control_response_channel =
+        string_or(source, "aeron.archive.control.response.channel", config.control_response_channel);
     config.local_control_channel =
         string_or(source, "aeron.archive.local.control.channel", config.local_control_channel);
     config.replication_channel = string_or(source, "aeron.archive.replication.channel", config.replication_channel);
@@ -194,6 +197,29 @@ std::expected<ArchiveLaunchConfig, axc::core::Error> parse_launch_config(
         return std::unexpected(local_control_stream_id.error());
     }
     config.local_control_stream_id = *local_control_stream_id;
+
+    auto control_response_stream_id =
+        int32_or(source, "aeron.archive.control.response.stream.id", config.control_response_stream_id);
+    if (!control_response_stream_id)
+    {
+        return std::unexpected(control_response_stream_id.error());
+    }
+    config.control_response_stream_id = *control_response_stream_id;
+
+    auto message_timeout = duration_ms_or(source, "aeron.archive.message.timeout", config.message_timeout_ms);
+    if (!message_timeout)
+    {
+        return std::unexpected(message_timeout.error());
+    }
+    config.message_timeout_ms = *message_timeout;
+
+    auto message_retry_attempts =
+        int32_or(source, "aeron.archive.message.retry.attempts", config.message_retry_attempts);
+    if (!message_retry_attempts)
+    {
+        return std::unexpected(message_retry_attempts.error());
+    }
+    config.message_retry_attempts = *message_retry_attempts;
 
     auto archive_id = int64_or(source, "aeron.archive.id", config.archive_id);
     if (!archive_id)
@@ -287,6 +313,23 @@ std::expected<ArchiveLaunchConfig, axc::core::Error> parse_launch_config(
         return std::unexpected(axc::core::make_error(
             axc::core::ErrorCode::config_error,
             "unsupported aeron.archive.authenticator.supplier: " + config.authenticator_supplier));
+    }
+
+    auto threading = parse_threading_settings(source);
+    if (!threading)
+    {
+        return std::unexpected(threading.error());
+    }
+    config.threading = *threading;
+
+    // `Archive.java:1587-1615`: a disabled control channel leaves the archive
+    // client without a response channel to derive, so one must be configured.
+    if (!config.control_channel_enabled && config.control_response_channel.empty())
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::config_error,
+                                  "Archive.Context.archiveClientContext.controlResponseChannel must be set if "
+                                  "Archive.Context.controlChannelEnabled is false"));
     }
 
     return config;
@@ -384,6 +427,12 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     conductor_context.control_term_buffer_length = config_.control_term_buffer_length;
     conductor_context.control_mtu_length = config_.control_mtu_length;
     conductor_context.control_term_buffer_sparse = config_.control_term_buffer_sparse;
+    conductor_context.control_channel_enabled = config_.control_channel_enabled;
+    conductor_context.control_response_channel = config_.control_response_channel;
+    conductor_context.control_response_stream_id = config_.control_response_stream_id;
+    conductor_context.message_timeout_ms = config_.message_timeout_ms;
+    conductor_context.message_retry_attempts = config_.message_retry_attempts;
+    conductor_context.threading = config_.threading;
     conductor_context.recording = config_.recording;
     conductor_context.replay = config_.replay;
 
@@ -415,15 +464,91 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     return {};
 }
 
+void ArchiveServer::LoggingErrorHandler::on_error(const axc::core::Error& error) noexcept
+{
+    std::fprintf(stderr, "deepmsg-archive-server: agent error: %s\n", std::string{error.message.view()}.c_str());
+}
+
+std::expected<void, axc::core::Error> ArchiveServer::start()
+{
+    if (runtime_started_)
+    {
+        return std::unexpected(
+            axc::core::make_error(axc::core::ErrorCode::invalid_argument, "archive server already started"));
+    }
+
+    // `Archive.java:148-170`: only DEDICATED starts agent threads; SHARED and
+    // INVOKER leave the caller driving `do_work` (INVOKER in the reference is
+    // exactly "the host invokes the conductor").
+    if (ArchiveThreadingMode::dedicated != config_.threading.mode)
+    {
+        runtime_started_ = true;
+        return {};
+    }
+
+    const ThreadNaming naming = config_.threading.naming;
+    conductor_agent_ = std::make_unique<ConductorAgent>(*conductor_, thread_name(naming, AgentRole::conductor));
+    recorder_agent_ = std::make_unique<RecorderAgent>(conductor_->recorder(), thread_name(naming, AgentRole::recorder));
+    replayer_agent_ = std::make_unique<ReplayerAgent>(conductor_->replayer(), thread_name(naming, AgentRole::replayer));
+
+    conductor_runner_ = std::make_unique<axc::core::AgentRunner<ConductorAgent>>(
+        *conductor_agent_, config_.threading.idle, error_handler_, config_.threading.conductor_affinity);
+    recorder_runner_ = std::make_unique<axc::core::AgentRunner<RecorderAgent>>(
+        *recorder_agent_, config_.threading.recorder_idle, error_handler_, config_.threading.recorder_affinity);
+    replayer_runner_ = std::make_unique<axc::core::AgentRunner<ReplayerAgent>>(
+        *replayer_agent_, config_.threading.replayer_idle, error_handler_, config_.threading.replayer_affinity);
+
+    // `DedicatedModeArchiveConductor.onStart` (`:62-77`): workers first, then
+    // the conductor (whose first pass may hand sessions over).
+    if (auto started = recorder_runner_->start(); !started)
+    {
+        return started;
+    }
+    if (auto started = replayer_runner_->start(); !started)
+    {
+        recorder_runner_->close();
+        return started;
+    }
+    if (auto started = conductor_runner_->start(); !started)
+    {
+        recorder_runner_->close();
+        replayer_runner_->close();
+        return started;
+    }
+
+    runtime_started_ = true;
+    return {};
+}
+
 int ArchiveServer::do_work()
 {
-    int work_count = conductor_->do_work();
+    int work_count = 0;
+    if (!runtime_started_ || ArchiveThreadingMode::dedicated != config_.threading.mode)
+    {
+        work_count = conductor_->do_work();
+    }
     mark_file_.update_activity_timestamp(epoch_clock_.time_ms());
     return work_count;
 }
 
 void ArchiveServer::close()
 {
+    // `DedicatedModeArchiveConductor.closeSessionWorkers` (`:96-116`): stop the
+    // workers (their agents hand the remaining sessions back), then the
+    // conductor, whose `close()` drains the close queues and closes them.
+    if (runtime_started_ && recorder_runner_)
+    {
+        recorder_runner_->close();
+    }
+    if (runtime_started_ && replayer_runner_)
+    {
+        replayer_runner_->close();
+    }
+    if (runtime_started_ && conductor_runner_)
+    {
+        conductor_runner_->close();
+    }
+
     if (conductor_)
     {
         conductor_.reset();

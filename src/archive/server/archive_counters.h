@@ -27,6 +27,10 @@ class ArchiveCounters
 public:
     /// `AeronCounters.java:751-812`.
     static constexpr std::int32_t CONTROL_SESSIONS_TYPE_ID = 102;
+    /// `AeronCounters.ARCHIVE_MAX_CYCLE_TIME_TYPE_ID` / `..._THRESHOLD_EXCEEDED_...`
+    /// (`AeronCounters.java:757,764`): duty-cycle counters 103/104.
+    static constexpr std::int32_t MAX_CYCLE_TIME_TYPE_ID = 103;
+    static constexpr std::int32_t CYCLE_TIME_THRESHOLD_EXCEEDED_TYPE_ID = 104;
     static constexpr std::int32_t MAX_WRITE_TIME_TYPE_ID = 105;
     static constexpr std::int32_t TOTAL_WRITE_BYTES_TYPE_ID = 106;
     static constexpr std::int32_t TOTAL_WRITE_TIME_TYPE_ID = 107;

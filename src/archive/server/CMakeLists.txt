@@ -6,6 +6,8 @@ axc_add_library(axc_archive_server
         archive_config.cpp
         archive_counters.cpp
         archive_launch.cpp
+        config_registry.cpp
+        threading.cpp
         channel_uri.cpp
         recording_pos.cpp
         recording_session.cpp
