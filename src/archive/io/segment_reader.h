@@ -10,6 +10,20 @@
 namespace deepmsg::archive::server::io
 {
 
+/// Kernel read-ahead advice for a segment. `willneed` issues
+/// `POSIX_FADV_WILLNEED` when the segment is opened and `POSIX_FADV_DONTNEED`
+/// before it is dropped; `none` is the reference's behaviour (no advice).
+enum class Fadvise
+{
+    none,
+    willneed
+};
+
+/// `posix_fadvise` hook (`fd`, `length`, `advice`); injectable so the calls are
+/// a unit test. nullptr = the real syscall. The return value is the error code
+/// itself (`posix_fadvise` does not use `errno`).
+using FadviseFn = int (*)(int fd, std::int64_t length, int advice) noexcept;
+
 struct ReaderConfig
 {
     std::string archive_dir;
@@ -17,6 +31,10 @@ struct ReaderConfig
     /// Base position of the segment the reader starts on.
     std::int64_t segment_base_position{0};
     std::int32_t segment_length{0};
+    /// Read-ahead advice; `none` = the reference's bare `FileChannel.read`.
+    Fadvise fadvise{Fadvise::none};
+    /// Advice syscall; nullptr = `posix_fadvise`.
+    FadviseFn fadvise_fn{nullptr};
 };
 
 /// `/home/gavin/trader/analysis/cpp/impl-2026-11-07-cpp-archive.md` §4.2: the

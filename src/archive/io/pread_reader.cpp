@@ -20,6 +20,24 @@ namespace
     return axc::core::make_error(code, message, errno);
 }
 
+/// Best effort: an unsupported advice (`EINVAL`/`ENOSYS`) is not an error, the
+/// read path simply gets no help.
+void advise(const ReaderConfig& config, int fd, int advice) noexcept
+{
+    if (Fadvise::willneed != config.fadvise || fd < 0)
+    {
+        return;
+    }
+    if (nullptr != config.fadvise_fn)
+    {
+        (void)config.fadvise_fn(fd, 0, advice);
+    }
+    else
+    {
+        (void)::posix_fadvise(fd, 0, 0, advice);
+    }
+}
+
 }  // namespace
 
 PreadReader::PreadReader(ReaderConfig config, std::size_t buffer_length) noexcept
@@ -54,6 +72,7 @@ std::expected<void, axc::core::Error> PreadReader::roll_segment(std::int64_t nex
     {
         return std::unexpected(io_error(axc::core::ErrorCode::io_error, "open segment file failed"));
     }
+    advise(config_, fd_, POSIX_FADV_WILLNEED);
     return {};
 }
 
@@ -93,6 +112,7 @@ void PreadReader::close_fd() noexcept
 {
     if (fd_ >= 0)
     {
+        advise(config_, fd_, POSIX_FADV_DONTNEED);
         ::close(fd_);
         fd_ = -1;
     }

@@ -26,6 +26,23 @@ namespace
     return config.archive_dir + "/" + segment_file_name(config.recording_id, segment_base_position);
 }
 
+/// Best effort: an unsupported advice (`EINVAL`/`ENOSYS`) is not an error.
+void advise(const ReaderConfig& config, int fd, int advice) noexcept
+{
+    if (Fadvise::willneed != config.fadvise || fd < 0)
+    {
+        return;
+    }
+    if (nullptr != config.fadvise_fn)
+    {
+        (void)config.fadvise_fn(fd, 0, advice);
+    }
+    else
+    {
+        (void)::posix_fadvise(fd, 0, 0, advice);
+    }
+}
+
 }  // namespace
 
 MmapReader::MmapReader(ReaderConfig config) noexcept : config_(std::move(config)) {}
@@ -53,24 +70,27 @@ std::expected<void, axc::core::Error> MmapReader::roll_segment(std::int64_t next
             "failed to open recording segment file " + segment_file_name(config_.recording_id, next_base_position)));
     }
 
-    const int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0)
+    fd_ = ::open(path.c_str(), O_RDONLY);
+    if (fd_ < 0)
     {
         return std::unexpected(io_error(axc::core::ErrorCode::io_error, "open segment file failed"));
     }
 
     struct stat info{};
-    const std::size_t length = 0 == ::fstat(fd, &info) ? static_cast<std::size_t>(info.st_size)
-                                                       : static_cast<std::size_t>(config_.segment_length);
+    const std::size_t length = 0 == ::fstat(fd_, &info) ? static_cast<std::size_t>(info.st_size)
+                                                        : static_cast<std::size_t>(config_.segment_length);
+
+    advise(config_, fd_, POSIX_FADV_WILLNEED);
 
     // `MAP_PRIVATE`: the replay session rewrites frame headers in place and must
     // not touch the recorded file (impl-archive §4.2).
-    void* mapping = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    void* mapping = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_, 0);
     const int error = errno;
-    ::close(fd);
 
     if (MAP_FAILED == mapping)
     {
+        ::close(fd_);
+        fd_ = -1;
         return std::unexpected(axc::core::make_error(axc::core::ErrorCode::io_error, "mmap segment failed", error));
     }
 
@@ -105,6 +125,12 @@ void MmapReader::unmap() noexcept
         ::munmap(mapping_, length_);
         mapping_ = nullptr;
         length_ = 0;
+    }
+    if (fd_ >= 0)
+    {
+        advise(config_, fd_, POSIX_FADV_DONTNEED);
+        ::close(fd_);
+        fd_ = -1;
     }
 }
 
