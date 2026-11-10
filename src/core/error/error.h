@@ -17,7 +17,8 @@ enum class ErrorCode : std::int32_t
     io_error = 4,
     protocol_error = 5,
     config_error = 6,
-    internal_error = 7
+    internal_error = 7,
+    timed_out = 8
 };
 
 /// Heap-free error value used by hot paths (`std::expected<T, Error>`).

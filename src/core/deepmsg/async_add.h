@@ -5,6 +5,7 @@
 #include <utility>
 
 #include <aeronc.h>
+#include <cerrno>
 
 #include "core/error/error.h"
 
@@ -94,7 +95,7 @@ public:
         {
             failed_ = true;
             async_ = nullptr;
-            error_ = make_error(ErrorCode::internal_error, "async add failed");
+            error_ = make_error(ErrorCode::internal_error, "async add failed", aeron_errcode());
             return std::unexpected(error_);
         }
 

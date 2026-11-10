@@ -72,6 +72,9 @@ public:
     /// Drives the client conductor once. Returns the C API result.
     [[nodiscard]] int do_work() noexcept;
 
+    /// `Aeron.nextCorrelationId()` (`Aeron.java`).
+    [[nodiscard]] std::int64_t next_correlation_id() noexcept;
+
     [[nodiscard]] aeron_counters_reader_t* counters_reader() noexcept;
 
     [[nodiscard]] aeron_t* handle() noexcept

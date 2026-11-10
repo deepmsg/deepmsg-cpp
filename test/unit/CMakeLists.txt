@@ -97,6 +97,19 @@ axc_add_executable(axc_cluster_unit_tests
 target_compile_definitions(axc_cluster_unit_tests PRIVATE
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
+# C3a: the client side needs a media driver (the scripted cluster runs on an
+# embedded one), so it is its own binary.
+axc_add_executable(axc_cluster_client_unit_tests
+    SOURCES
+        cluster/client/client_config_test.cpp
+        cluster/client/egress_poller_test.cpp
+        cluster/client/async_connect_test.cpp
+    DEPS
+        axc_cluster_client
+        aeron_driver_static
+        aeron_static
+        GTest::gtest_main)
+
 include(GoogleTest)
 # PRE_TEST: discover at test time, not build time. Sanitizer binaries (TSan in
 # particular) cannot always be executed by the build step -- on kernels with high
@@ -106,3 +119,4 @@ gtest_discover_tests(axc_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS un
 gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
 gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
 gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
+gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)

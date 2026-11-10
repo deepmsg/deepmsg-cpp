@@ -78,6 +78,11 @@ int DeepmsgClient::do_work() noexcept
     return nullptr == client_ ? -1 : aeron_main_do_work(client_.get());
 }
 
+std::int64_t DeepmsgClient::next_correlation_id() noexcept
+{
+    return nullptr == client_ ? -1 : aeron_next_correlation_id(client_.get());
+}
+
 aeron_counters_reader_t* DeepmsgClient::counters_reader() noexcept
 {
     return nullptr == client_ ? nullptr : aeron_counters_reader(client_.get());

@@ -1,2 +1,7 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
-# aeron_cluster.cpp (offer/try_claim/poll_egress) lands in C3b.
+# cluster_client.cpp (offer/try_claim/poll_egress) lands in C3b.
+#
+# C3a note: egress_poller.cpp is deliberately not registered. The reference's
+# EgressPoller allocates the detail string and the challenge byte array per
+# event (`EgressPoller.java:308-311`); C10 registers the module once the
+# allocation test can tell warm-up from steady state.
