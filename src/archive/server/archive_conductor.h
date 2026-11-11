@@ -410,7 +410,7 @@ private:
     /// P-A9 dispatch (`plan-a6f-multi-recorder.md` §6 Q2): `recording_id % N`.
     [[nodiscard]] std::size_t recorder_index_for(std::int64_t recording_id) const noexcept
     {
-        return static_cast<std::size_t>(recording_id) % recorders_.size();
+        return dispatch_recording_index(recording_id, recorders_.size());
     }
 
     [[nodiscard]] Recorder& recorder_for(std::int64_t recording_id) noexcept

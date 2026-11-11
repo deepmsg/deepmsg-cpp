@@ -16,6 +16,14 @@
 namespace deepmsg::archive::server
 {
 
+/// P-A9 dispatch (`analysis/cpp/plan-a6f-multi-recorder.md` §6 Q2): which of
+/// `count` recorder agents runs the session with `recording_id`. A free
+/// function so the rule has a unit test of its own.
+[[nodiscard]] inline std::size_t dispatch_recording_index(std::int64_t recording_id, std::size_t count) noexcept
+{
+    return static_cast<std::size_t>(recording_id) % count;
+}
+
 /// `ArchiveConductor.Recorder` (`ArchiveConductor.java:2737-2774`): the live
 /// recording sessions plus the three write metrics they feed.
 ///

@@ -268,6 +268,20 @@ TEST_F(RecordingSessionTest, abortStopsTheSessionWithoutTouchingTheImage)
     EXPECT_TRUE(session.is_done());
 }
 
+// A6f: sessions are dealt to the N recorder agents by `recording_id % N`
+// (`plan-a6f-multi-recorder.md` §6 Q2); the mutant that always picks 0 must
+// make this fail.
+TEST_F(RecordingSessionTest, recordingSessionsAreDealtByRecordingIdModuloRecorders)
+{
+    using deepmsg::archive::server::dispatch_recording_index;
+    EXPECT_EQ(0U, dispatch_recording_index(0, 2));
+    EXPECT_EQ(1U, dispatch_recording_index(1, 2));
+    EXPECT_EQ(0U, dispatch_recording_index(2, 2));
+    EXPECT_EQ(1U, dispatch_recording_index(5, 4));
+    EXPECT_EQ(3U, dispatch_recording_index(7, 4));
+    EXPECT_EQ(0U, dispatch_recording_index(9, 1));
+}
+
 // A6f-2: the recorders keep per-thread locals and the conductor is the one
 // writer of the archive-level counters. The reference's condition still holds:
 // only a pass in which some recorder did work publishes.
