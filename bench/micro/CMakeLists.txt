@@ -15,3 +15,10 @@ axc_add_executable(axc_micro_bench
     DEPS
         axc_core
         benchmark::benchmark)
+
+axc_add_executable(axc_catalog_list_for_uri_bench
+    SOURCES
+        catalog_list_for_uri.cpp
+    DEPS
+        axc_archive_server
+        benchmark::benchmark)
