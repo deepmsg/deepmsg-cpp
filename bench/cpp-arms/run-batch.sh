@@ -66,6 +66,7 @@ runs=1
 iterations=60
 streams=1
 recorder_threads=1
+recorder_threads_levels=1
 warmup_iterations=30
 rounds=1
 quick=0
@@ -84,7 +85,7 @@ while [ $# -gt 0 ]; do
         --rate) rate=$2; shift 2 ;;
         --length) length=$2; shift 2 ;;
         --streams) streams=$2; shift 2 ;;
-        --recorder-threads) recorder_threads=$2; shift 2 ;;
+        --recorder-threads) recorder_threads_levels=$2; shift 2 ;;
         --runs) runs=$2; shift 2 ;;
         --iterations) iterations=$2; shift 2 ;;
         --rounds) rounds=$2; shift 2 ;;
@@ -137,10 +138,13 @@ if ! [[ "$streams" =~ ^[0-9]+$ ]] || [ "$streams" -lt 1 ] || [ "$streams" -gt 8 
     echo "--streams must be 1..8 (got $streams)" >&2
     exit 2
 fi
-if ! [[ "$recorder_threads" =~ ^[0-9]+$ ]] || [ "$recorder_threads" -lt 1 ] || [ "$recorder_threads" -gt 32 ]; then
-    echo "--recorder-threads must be 1..32 (got $recorder_threads)" >&2
-    exit 2
-fi
+IFS=',' read -ra recorder_thread_list <<<"$recorder_threads_levels"
+for level in "${recorder_thread_list[@]}"; do
+    if ! [[ "$level" =~ ^[0-9]+$ ]] || [ "$level" -lt 1 ] || [ "$level" -gt 32 ]; then
+        echo "--recorder-threads must be a comma list of 1..32 (got $level)" >&2
+        exit 2
+    fi
+done
 
 # The cell directory carries the A6f axes only when they are not the reference
 # shape, so the A6a tree and `read.py`'s parser stay byte-identical.
@@ -155,7 +159,9 @@ if [ -n "${list:-}" ]; then
     for round in $(seq 1 "$rounds"); do
         for arm in "${arm_list[@]}"; do
             for fsync in "${fsync_list[@]}"; do
-                echo "round-$round ${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}$(_cell_suffix)"
+                for recorder_threads in "${recorder_thread_list[@]}"; do
+                    echo "round-$round ${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}$(_cell_suffix)"
+                done
             done
         done
     done
@@ -173,6 +179,23 @@ bench_checkouts_report | tee "$out/checkouts.txt"
 bench_fingerprint "$out/fingerprint.txt"
 
 # --- the cell's settings -----------------------------------------------------
+
+# Multi-stream cells start N node + N client JVMs and the harness's `run-java`
+# defaults to `-Xms4G -Xmx4G -XX:+AlwaysPreTouch`. Eight of those do not fit on
+# the WSL2 box: measured on the first 4-stream attempt, the kernel OOM-killed a
+# client and every client then timed out in `awaitConnected`. The later `-X`
+# values override the wrapper's, identically on every arm; single-stream cells
+# keep the A6a shape and its heap.
+_heap_opts() {
+    if [ "$streams" -gt 1 ]; then
+        # `-Xlog:disable` is also part of the fix: the wrappers force one
+        # `PROCESS_FILE_NAME`, so every JVM opens the same
+        # `/dev/shm/echo-server-gc.log` and the second one refuses to start.
+        # Disabling logging after the wrapper's `-Xlog` is measured to work; the
+        # gc log is explanation only and is not part of a reading.
+        echo "-Xms128m -Xmx512m -Xlog:disable"
+    fi
+}
 
 _port_base() {
     echo $((20000 + ($$ % 200) * 8))
@@ -345,7 +368,7 @@ _start_node() {
 -Daeron.archive.file.sync.level=$_fsync \
 -Daeron.archive.catalog.file.sync.level=$_catalog_fsync \
 -Dio.aeron.benchmarks.output.directory=$stream_dir \
-$external" \
+$external $(_heap_opts)" \
             "${pin[@]}" "$node" >"$log" 2>&1 &
         _node_pids+=($!)
         disown "${_node_pids[-1]}" 2>/dev/null || true
@@ -410,7 +433,7 @@ $external \
 -Dio.aeron.benchmarks.aeron.use.try.claim=true \
 -Dio.aeron.benchmarks.output.time.unit=MICROSECONDS \
 -Daeron.archive.control.channel=aeron:udp?endpoint=localhost:$control_port \
--Daeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0" \
+-Daeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0 $(_heap_opts)" \
             "${pin[@]}" "$client" >"$stream_dir/client.log" 2>&1 &
         client_pids+=($!)
     done
@@ -502,6 +525,9 @@ _write_run_info() {
             done
         fi
         echo "streams         $streams (per-stream rate $rate; aggregate $streams x $rate)"
+        if [ "$streams" -gt 1 ]; then
+            echo "jvm             $(_heap_opts) (overrides the harness's -Xmx4G)"
+        fi
         echo "recorder        $recorder_threads thread(s) (deepmsg.archive.recorder.threads)"
         echo "record          aeron:ipc"
         echo "fsync           file=$_fsync catalog=$_catalog_fsync"
@@ -641,21 +667,26 @@ for round in $(seq 1 "$rounds"); do
     # (`lib/README.md`; the performance spec's §6.3 says the same).
     round_arms=("${arm_list[@]}")
     round_fsyncs=("${fsync_list[@]}")
+    round_threads=("${recorder_thread_list[@]}")
     if [ 0 -eq $((round % 2)) ]; then
-        reversed_arms=(); reversed_fsyncs=()
+        reversed_arms=(); reversed_fsyncs=(); reversed_threads=()
         for (( i=${#arm_list[@]}-1; i>=0; i-- )); do reversed_arms+=("${arm_list[$i]}"); done
         for (( i=${#fsync_list[@]}-1; i>=0; i-- )); do reversed_fsyncs+=("${fsync_list[$i]}"); done
+        for (( i=${#recorder_thread_list[@]}-1; i>=0; i-- )); do reversed_threads+=("${recorder_thread_list[$i]}"); done
         round_arms=("${reversed_arms[@]}")
         round_fsyncs=("${reversed_fsyncs[@]}")
+        round_threads=("${reversed_threads[@]}")
     fi
     for arm in "${round_arms[@]}"; do
         for fsync in "${round_fsyncs[@]}"; do
-            if _run_cell "$round" "$arm" "$fsync"; then
-                printf 'round-%s %-4s fsync=%s  OK\n' "$round" "$arm" "$fsync"
-            else
-                printf 'round-%s %-4s fsync=%s  FAILED\n' "$round" "$arm" "$fsync"
-                failures=$((failures + 1))
-            fi
+            for threads in "${round_threads[@]}"; do
+                if _run_cell "$round" "$arm" "$fsync" "$threads"; then
+                    printf 'round-%s %-4s fsync=%s threads=%s  OK\n' "$round" "$arm" "$fsync" "$threads"
+                else
+                    printf 'round-%s %-4s fsync=%s threads=%s  FAILED\n' "$round" "$arm" "$fsync" "$threads"
+                    failures=$((failures + 1))
+                fi
+            done
         done
     done
 done
