@@ -258,8 +258,13 @@ protected:
             "-Daeron.archive.threading.mode=SHARED",
             "-Daeron.archive.idle.strategy=yield",
             "-Daeron.archive.dir.delete.on.start=true",
-            "-Daeron.spies.simulate.connection=true",
-            "io.aeron.archive.Archive"};
+            "-Daeron.spies.simulate.connection=true"};
+        // A6c: the parity suite under preallocation (C++ only, docs/compat.md).
+        if (const char* fallocate = std::getenv("AXC_IO_FALLOCATE"); nullptr != fallocate)
+        {
+            arguments.emplace_back(std::string{"-Ddeepmsg.archive.file.io.fallocate="} + fallocate);
+        }
+        arguments.emplace_back("io.aeron.archive.Archive");
         auto spawned = axc::interop::ChildProcess::spawn(AXC_ARCHIVE_SERVER_BIN, arguments);
         ASSERT_TRUE(spawned) << spawned.error().message.view();
         our_archive_ = std::move(*spawned);

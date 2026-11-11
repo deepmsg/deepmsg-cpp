@@ -61,6 +61,7 @@ std::expected<void, axc::core::Error> RecordingWriter::init()
     config.segment_length = segment_length_;
     config.file_sync_level = context_.file_sync_level;
     config.archive_dir_fd = context_.archive_dir_fd;
+    config.fallocate = context_.io_fallocate;
 
     auto writer = io::make_sync_writer(config);
     if (!writer)

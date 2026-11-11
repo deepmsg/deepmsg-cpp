@@ -24,6 +24,10 @@ struct RecordingSettings
     bool recording_events_enabled{false};
     std::string recording_events_channel;
     std::int32_t recording_events_stream_id{30};
+    /// `deepmsg.archive.file.io.fallocate`: best-effort preallocation after the
+    /// `ftruncate` (C++ only; `docs/compat.md`). Default off = the reference's
+    /// bare `setLength`.
+    bool file_io_fallocate{false};
 };
 
 /// Reads the nine names and applies the reference's startup checks

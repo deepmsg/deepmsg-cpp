@@ -24,6 +24,16 @@ commit.
 | timer snapshot order | Agrona `Long2LongHashMap` iteration order | C1c |
 | ingress/log/egress/consensus/S2 frames | `aeron-cluster-codecs.xml` | C4 |
 
+## C++-only switches (A6c, 2026-11-10)
+
+These never join the reference's 48-name table (`archive_config_names()`), whose
+test asserts every entry starts with `aeron.archive.`. The defaults reproduce the
+reference behaviour.
+
+| Name | Default | Meaning | Pinned by |
+|---|---|---|---|
+| `deepmsg.archive.file.io.fallocate` | `false` | Best-effort preallocation after the reference's `ftruncate`/`setLength` (`RecordingWriter.java:219`): `fallocate(FALLOC_FL_KEEP_SIZE)`. A refusal (unsupported filesystem, `ENOSPC`) leaves the segment sparse and defers a full-disk failure to the write, with one warning. | `ArchiveConfigTest`, `SyncWriterTest` |
+
 ## Known gaps (A4b, 2026-11-09)
 
 Deliberately not implemented; none of them is reachable from the reference C

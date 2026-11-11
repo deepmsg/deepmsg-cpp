@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -19,6 +20,13 @@ namespace
 [[nodiscard]] axc::core::Error io_error(axc::core::ErrorCode code, std::string_view message) noexcept
 {
     return axc::core::make_error(code, message, errno);
+}
+
+/// `fallocate(2)` with `FALLOC_FL_KEEP_SIZE`: the size stays the `ftruncate`'s,
+/// only the blocks are reserved.
+int preallocate_segment(int fd, std::int64_t offset, std::int64_t length) noexcept
+{
+    return ::fallocate(fd, FALLOC_FL_KEEP_SIZE, static_cast<off_t>(offset), static_cast<off_t>(length));
 }
 
 }  // namespace
@@ -62,6 +70,25 @@ std::expected<void, axc::core::Error> SyncWriter::open_segment(std::int64_t segm
         const axc::core::Error error = io_error(axc::core::ErrorCode::io_error, "resize segment file failed");
         close_fd();
         return std::unexpected(error);
+    }
+
+    if (config_.fallocate)
+    {
+        const FallocateFn allocate = nullptr != config_.fallocate_fn ? config_.fallocate_fn : &preallocate_segment;
+        if (0 != allocate(fd_, 0, config_.segment_length))
+        {
+            // Best effort: `ftruncate` already made the size right, so a refused
+            // preallocation (unsupported filesystem, `ENOSPC`, ...) only leaves
+            // the segment sparse and defers a full-disk failure to the write —
+            // the reference's failure timing (`RecordingWriter.java:219`).
+            const int error = errno;
+            if (!fallocate_warning_emitted_)
+            {
+                fallocate_warning_emitted_ = true;
+                std::fprintf(stderr, "WARNING: fallocate on %s failed (errno=%d); the segment stays sparse\n",
+                             path.c_str(), error);
+            }
+        }
     }
 
     // `RecordingWriter.java:221`: the directory entry is forced only when the
