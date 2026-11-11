@@ -9,6 +9,9 @@
 
 #include "tool.h"
 
+#include <algorithm>
+#include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -18,17 +21,27 @@
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "archive/server/archive_mark_file.h"
 #include "archive/server/catalog.h"
+#include "archive/server/checksum.h"
+#include "archive/server/frame_layout.h"
+#include "archive/server/segment_files.h"
 #include "io_aeron_archive_codecs/RecordingDescriptor.h"
 #include "io_aeron_archive_codecs/RecordingState.h"
 #include "io_aeron_archive_codecs_mark/MarkFileHeader.h"
 #include "io_aeron_archive_codecs_mark/MessageHeader.h"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace deepmsg::tools
 {
@@ -40,6 +53,7 @@ using deepmsg::archive::server::ArchiveMarkFile;
 using deepmsg::archive::server::Catalog;
 using deepmsg::archive::server::CatalogEntry;
 using deepmsg::archive::server::CatalogOpenOptions;
+using deepmsg::archive::server::Checksum;
 
 namespace archive_codecs = ::io::aeron::archive::codecs;
 namespace archive_mark_codecs = ::io::aeron::archive::codecs::mark;
@@ -354,6 +368,549 @@ int command_describe(const std::filesystem::path& archive_dir, bool all_valid, b
     return 0;
 }
 
+std::int32_t read_int32_le(const std::uint8_t* bytes) noexcept
+{
+    return static_cast<std::int32_t>(
+        static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+        (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24));
+}
+
+std::int16_t read_int16_le(const std::uint8_t* bytes) noexcept
+{
+    return static_cast<std::int16_t>(static_cast<std::uint16_t>(bytes[0]) |
+                                     (static_cast<std::uint16_t>(bytes[1]) << 8));
+}
+
+/// `ArchiveTool.checksumSegmentFile` (`ArchiveTool.java:1603-1672`): every DATA
+/// frame's payload is CRC'd and the result is written into the frame's
+/// session-id field (`SESSION_ID_FIELD_OFFSET`), which is what `verify
+/// -checksum` reads back. PAD frames are skipped.
+void checksum_segment_file(const std::filesystem::path& archive_dir, const Checksum& checksum,
+                           std::int64_t recording_id, const std::string& file_name, std::int64_t start_position,
+                           std::int32_t term_length, std::int32_t mtu_length)
+{
+    const std::filesystem::path file = archive_dir / file_name;
+    const std::string file_text = file.string();
+    const auto fail = [&](const std::string& reason)
+    {
+        std::printf("(recordingId=%lld, file=%s) ERR: %s\n", static_cast<long long>(recording_id), file_text.c_str(),
+                    reason.c_str());
+    };
+
+    const std::int64_t start_term_offset = start_position & (term_length - 1);
+    const std::int64_t start_term_base_position = start_position - start_term_offset;
+    auto segment_base_position = deepmsg::archive::server::parse_segment_file_position(file_name);
+    if (!segment_base_position)
+    {
+        fail("failed to checksum");
+        return;
+    }
+
+    const int fd = ::open(file.c_str(), O_RDWR);
+    if (fd < 0)
+    {
+        fail("failed to checksum");
+        return;
+    }
+
+    struct stat status{};
+    (void)::fstat(fd, &status);
+    const std::int64_t size = status.st_size;
+    std::int64_t file_offset = *segment_base_position == start_term_base_position ? start_term_offset : 0;
+    std::vector<std::uint8_t> buffer(static_cast<std::size_t>(deepmsg::archive::server::frame_align(mtu_length, 64)));
+
+    while (file_offset < size)
+    {
+        std::array<std::uint8_t, deepmsg::archive::server::DATA_HEADER_LENGTH> header{};
+        if (::pread(fd, header.data(), header.size(), file_offset) != static_cast<ssize_t>(header.size()))
+        {
+            fail("failed to read fragment header");
+            (void)::close(fd);
+            return;
+        }
+
+        const std::int32_t frame_length = read_int32_le(header.data());
+        if (0 == frame_length)
+        {
+            break;
+        }
+
+        const std::int32_t aligned_length =
+            deepmsg::archive::server::frame_align(frame_length, deepmsg::archive::server::FRAME_ALIGNMENT);
+        const std::int16_t frame_type = read_int16_le(header.data() + deepmsg::archive::server::FRAME_TYPE_OFFSET);
+        if (deepmsg::archive::server::DATA_FRAME_TYPE == frame_type)
+        {
+            const std::int32_t data_length = aligned_length - deepmsg::archive::server::DATA_HEADER_LENGTH;
+            if (data_length < 0 || static_cast<std::size_t>(data_length) > buffer.size() ||
+                ::pread(fd, buffer.data(), data_length, file_offset + deepmsg::archive::server::DATA_HEADER_LENGTH) !=
+                    data_length)
+            {
+                fail("failed to read " + std::to_string(data_length) + " byte(s) of data at offset " +
+                     std::to_string(file_offset + deepmsg::archive::server::DATA_HEADER_LENGTH));
+                (void)::close(fd);
+                return;
+            }
+
+            const std::int32_t result = checksum.compute(buffer.data(), 0, data_length);
+            const std::uint8_t bytes[4] = {
+                static_cast<std::uint8_t>(result & 0xFF), static_cast<std::uint8_t>((result >> 8) & 0xFF),
+                static_cast<std::uint8_t>((result >> 16) & 0xFF), static_cast<std::uint8_t>((result >> 24) & 0xFF)};
+            if (::pwrite(fd, bytes, sizeof(bytes), file_offset + deepmsg::archive::server::SESSION_ID_OFFSET) !=
+                static_cast<ssize_t>(sizeof(bytes)))
+            {
+                fail("failed to checksum");
+                (void)::close(fd);
+                return;
+            }
+        }
+
+        file_offset += aligned_length;
+    }
+
+    (void)::close(fd);
+}
+
+/// `ArchiveTool.checksum` / `checksumRecording` (`ArchiveTool.java:1545-1705`):
+/// the catalog is opened read-write because `updateChecksum` rewrites each
+/// descriptor's checksum; the segment files are rewritten in place.
+int command_checksum(const std::filesystem::path& archive_dir, bool all_files, const std::string& checksum_name,
+                     std::optional<std::int64_t> recording_id)
+{
+    auto checksum = deepmsg::archive::server::checksum_by_name(checksum_name);
+    if (!checksum)
+    {
+        print_error(checksum.error());
+        return 1;
+    }
+
+    CatalogOpenOptions options;
+    options.archive_dir = archive_dir.string();
+    options.catalog_capacity = Catalog::MIN_CAPACITY;
+    options.writable = true;
+    options.checksum = *checksum;
+    auto catalog = Catalog::open(options);
+    if (!catalog)
+    {
+        print_error(catalog.error());
+        return 1;
+    }
+
+    auto index = deepmsg::archive::server::index_segment_files(archive_dir.string());
+    if (!index)
+    {
+        print_error(index.error());
+        return 1;
+    }
+
+    const auto process = [&](CatalogEntry& entry)
+    {
+        catalog->update_checksum(entry.recording_descriptor_offset);
+        const auto found = index->find(entry.descriptor.recordingId());
+        static const std::vector<std::string> no_files;
+        const std::vector<std::string>& files = found != index->end() ? found->second : no_files;
+        if (all_files)
+        {
+            for (const std::string& file : files)
+            {
+                checksum_segment_file(archive_dir, **checksum, entry.descriptor.recordingId(), file,
+                                      entry.descriptor.startPosition(), entry.descriptor.termBufferLength(),
+                                      entry.descriptor.mtuLength());
+            }
+        }
+        else
+        {
+            auto last = deepmsg::archive::server::find_segment_file_with_highest_position(files);
+            if (!last)
+            {
+                return;
+            }
+            if (!last->empty())
+            {
+                checksum_segment_file(archive_dir, **checksum, entry.descriptor.recordingId(), *last,
+                                      entry.descriptor.startPosition(), entry.descriptor.termBufferLength(),
+                                      entry.descriptor.mtuLength());
+            }
+        }
+    };
+
+    if (recording_id)
+    {
+        if (!catalog->for_entry(*recording_id, process))
+        {
+            std::fprintf(stderr, "io.aeron.exceptions.AeronException: no recording found with recordingId: %lld\n",
+                         static_cast<long long>(*recording_id));
+            return 1;
+        }
+    }
+    else
+    {
+        catalog->for_each(process);
+    }
+
+    (void)catalog->close();
+    return 0;
+}
+
+constexpr std::int64_t NULL_POSITION = -1;
+constexpr std::int32_t FILE_IO_MAX_LENGTH_DEFAULT = 1024 * 1024;
+
+bool is_not_frame_aligned(std::int64_t position) noexcept
+{
+    return 0 != (position & (deepmsg::archive::server::FRAME_ALIGNMENT - 1));
+}
+
+std::int32_t compute_term_id_from_position(std::int64_t position, std::int32_t position_bits_to_shift,
+                                           std::int32_t initial_term_id) noexcept
+{
+    return static_cast<std::int32_t>(position >> position_bits_to_shift) + initial_term_id;
+}
+
+/// `ReplaySession.isInvalidHeader` (`ReplaySession.java:654-661`).
+bool is_invalid_header(const std::uint8_t* header, std::int32_t stream_id, std::int32_t term_id,
+                       std::int32_t term_offset) noexcept
+{
+    return read_int32_le(header + deepmsg::archive::server::TERM_OFFSET_FIELD_OFFSET) != term_offset ||
+           read_int32_le(header + deepmsg::archive::server::TERM_ID_OFFSET) != term_id ||
+           read_int32_le(header + deepmsg::archive::server::STREAM_ID_OFFSET) != stream_id;
+}
+
+std::string yes_no_prompt(const std::string& message)
+{
+    std::printf("\n%s: ", message.c_str());
+    std::fflush(stdout);
+    std::string answer;
+    std::getline(std::cin, answer);
+    return answer;
+}
+
+bool is_affirmative(const std::string& answer)
+{
+    return answer.empty() || answer == "y" || answer == "Y" || answer == "yes" || answer == "YeS" || answer == "yEs" ||
+           answer == "yeS" || answer == "Yes" || answer == "YES";
+}
+
+/// `ArchiveTool.isInvalidSegmentFile` (`ArchiveTool.java:1433-1524`).
+bool is_invalid_segment_file(const std::filesystem::path& archive_dir, std::int64_t recording_id,
+                             const std::string& file_name, std::int64_t start_position, std::int32_t term_length,
+                             std::int32_t segment_length, std::int32_t stream_id, std::int32_t initial_term_id,
+                             bool apply_checksum, const Checksum* checksum)
+{
+    const std::filesystem::path file = archive_dir / file_name;
+    const std::string file_text = file.string();
+    const auto fail = [&](const std::string& reason)
+    {
+        std::printf("(recordingId=%lld, file=%s) ERR: %s\n", static_cast<long long>(recording_id), file_text.c_str(),
+                    reason.c_str());
+    };
+
+    const int fd = ::open(file.c_str(), O_RDONLY);
+    if (fd < 0)
+    {
+        fail("failed to verify file");
+        return true;
+    }
+
+    struct stat status{};
+    (void)::fstat(fd, &status);
+    const std::int64_t offset_limit =
+        std::min(static_cast<std::int64_t>(segment_length), static_cast<std::int64_t>(status.st_size));
+    const std::int32_t position_bits_to_shift = deepmsg::archive::server::position_bits_to_shift(term_length);
+    const std::int64_t start_term_offset = start_position & (term_length - 1);
+    const std::int64_t start_term_base_position = start_position - start_term_offset;
+    auto segment_file_base_position = deepmsg::archive::server::parse_segment_file_position(file_name);
+    if (!segment_file_base_position)
+    {
+        fail("failed to verify file");
+        (void)::close(fd);
+        return true;
+    }
+
+    std::int64_t file_offset = *segment_file_base_position == start_term_base_position ? start_term_offset : 0;
+    std::int64_t position = *segment_file_base_position + file_offset;
+    std::vector<std::uint8_t> buffer(FILE_IO_MAX_LENGTH_DEFAULT);
+
+    do
+    {
+        std::array<std::uint8_t, deepmsg::archive::server::DATA_HEADER_LENGTH> header{};
+        if (::pread(fd, header.data(), header.size(), file_offset) != static_cast<ssize_t>(header.size()))
+        {
+            fail("failed to read fragment header");
+            (void)::close(fd);
+            return true;
+        }
+
+        const std::int32_t frame_length = read_int32_le(header.data());
+        if (0 == frame_length)
+        {
+            break;
+        }
+
+        const std::int32_t term_id = compute_term_id_from_position(position, position_bits_to_shift, initial_term_id);
+        const std::int32_t term_offset = static_cast<std::int32_t>(position & (term_length - 1));
+        if (is_invalid_header(header.data(), stream_id, term_id, term_offset))
+        {
+            std::printf(
+                "(recordingId=%lld, file=%s) ERR: fragment termOffset=%d (expected=%d), termId=%d "
+                "(expected=%d), streamId=%d (expected=%d)\n",
+                static_cast<long long>(recording_id), file_text.c_str(),
+                read_int32_le(header.data() + deepmsg::archive::server::TERM_OFFSET_FIELD_OFFSET), term_offset,
+                read_int32_le(header.data() + deepmsg::archive::server::TERM_ID_OFFSET), term_id,
+                read_int32_le(header.data() + deepmsg::archive::server::STREAM_ID_OFFSET), stream_id);
+            (void)::close(fd);
+            return true;
+        }
+
+        const std::int16_t frame_type = read_int16_le(header.data() + deepmsg::archive::server::FRAME_TYPE_OFFSET);
+        const std::int32_t session_id = read_int32_le(header.data() + deepmsg::archive::server::SESSION_ID_OFFSET);
+        const std::int32_t aligned_frame_length =
+            deepmsg::archive::server::frame_align(frame_length, deepmsg::archive::server::FRAME_ALIGNMENT);
+        const std::int32_t data_length = aligned_frame_length - deepmsg::archive::server::DATA_HEADER_LENGTH;
+        if (data_length < 0 || static_cast<std::size_t>(data_length) > buffer.size() ||
+            ::pread(fd, buffer.data(), data_length, file_offset + deepmsg::archive::server::DATA_HEADER_LENGTH) !=
+                data_length)
+        {
+            fail("failed to read " + std::to_string(data_length) + " byte(s) of data at offset " +
+                 std::to_string(file_offset + deepmsg::archive::server::DATA_HEADER_LENGTH));
+            (void)::close(fd);
+            return true;
+        }
+
+        if (apply_checksum && deepmsg::archive::server::DATA_FRAME_TYPE == frame_type)
+        {
+            const std::int32_t computed = checksum->compute(buffer.data(), 0, data_length);
+            if (computed != session_id)
+            {
+                fail("checksum failed recorded=" + std::to_string(session_id) +
+                     " (expected=" + std::to_string(computed) + ")");
+                (void)::close(fd);
+                return true;
+            }
+        }
+
+        file_offset += aligned_frame_length;
+        position += aligned_frame_length;
+    } while (file_offset < offset_limit);
+
+    (void)::close(fd);
+    return false;
+}
+
+/// `ArchiveTool.verify` / `verifyRecording` (`ArchiveTool.java:645-730`, `:947-996`,
+/// `:1246-1395`): writes the catalog back, as the reference does — INVALID on a
+/// fault, stopPosition/stopTimestamp on a repair, and VALID again when an INVALID
+/// recording's segment files are present and sound.
+int command_verify(const std::filesystem::path& archive_dir, bool all_segment_files, const Checksum* checksum,
+                   bool apply_checksum, std::optional<std::int64_t> recording_id)
+{
+    CatalogOpenOptions options;
+    options.archive_dir = archive_dir.string();
+    options.catalog_capacity = Catalog::MIN_CAPACITY;
+    options.writable = true;
+    options.checksum = checksum;
+    auto catalog = Catalog::open(options);
+    if (!catalog)
+    {
+        print_error(catalog.error());
+        return 1;
+    }
+
+    auto segment_files = deepmsg::archive::server::index_segment_files(archive_dir.string());
+    if (!segment_files)
+    {
+        print_error(segment_files.error());
+        return 1;
+    }
+
+    std::vector<std::uint8_t> buffer(FILE_IO_MAX_LENGTH_DEFAULT);
+    int error_count = 0;
+
+    const Catalog::TruncateOnPageStraddle truncate_on_page_straddle = [](const std::string& path)
+    {
+        return is_affirmative(yes_no_prompt("Last fragment in segment file: " + path +
+                                            " straddles a page boundary,\n"
+                                            "i.e. it is not possible to verify if it was written correctly.\n\n"
+                                            "Please choose the corrective action: (y) to truncate the file or (n) to "
+                                            "do nothing"));
+    };
+
+    const auto process = [&](CatalogEntry& entry)
+    {
+        const std::int64_t recording_id_value = entry.descriptor.recordingId();
+        const archive_codecs::RecordingState::Value state = entry.header.state();
+        if (archive_codecs::RecordingState::VALID != state && archive_codecs::RecordingState::INVALID != state)
+        {
+            std::printf("(recordingId=%lld) skipping: %s\n", static_cast<long long>(recording_id_value),
+                        archive_codecs::RecordingState::c_str(state));
+            return;
+        }
+
+        const std::int64_t start_position = entry.descriptor.startPosition();
+        const std::int64_t stop_position = entry.descriptor.stopPosition();
+        const auto fail = [&]()
+        {
+            ++error_count;
+            entry.header.state(archive_codecs::RecordingState::INVALID);
+        };
+
+        if (start_position < 0)
+        {
+            std::printf("(recordingId=%lld) ERR: Negative startPosition=%lld\n",
+                        static_cast<long long>(recording_id_value), static_cast<long long>(start_position));
+            fail();
+            return;
+        }
+        if (is_not_frame_aligned(start_position))
+        {
+            std::printf("(recordingId=%lld) ERR: Non-aligned startPosition=%lld\n",
+                        static_cast<long long>(recording_id_value), static_cast<long long>(start_position));
+            fail();
+            return;
+        }
+        if (NULL_POSITION != stop_position)
+        {
+            if (stop_position < start_position)
+            {
+                std::printf(
+                    "(recordingId=%lld) ERR: Invariant violation stopPosition=%lld is before "
+                    "startPosition=%lld\n",
+                    static_cast<long long>(recording_id_value), static_cast<long long>(stop_position),
+                    static_cast<long long>(start_position));
+                fail();
+                return;
+            }
+            if (is_not_frame_aligned(stop_position))
+            {
+                std::printf("(recordingId=%lld) ERR: Non-aligned stopPosition=%lld\n",
+                            static_cast<long long>(recording_id_value), static_cast<long long>(stop_position));
+                fail();
+                return;
+            }
+        }
+
+        const std::int32_t segment_length = entry.descriptor.segmentFileLength();
+        const std::int32_t term_length = entry.descriptor.termBufferLength();
+        static const std::vector<std::string> no_files;
+        const auto found = segment_files->find(recording_id_value);
+        const std::vector<std::string>& files = found != segment_files->end() ? found->second : no_files;
+        auto max_segment_file = deepmsg::archive::server::find_segment_file_with_highest_position(files);
+        if (!max_segment_file)
+        {
+            std::printf("(recordingId=%lld) ERR: %.*s\n", static_cast<long long>(recording_id_value),
+                        static_cast<int>(max_segment_file.error().message.view().size()),
+                        max_segment_file.error().message.view().data());
+            fail();
+            return;
+        }
+
+        if (!max_segment_file->empty())
+        {
+            auto max_position = deepmsg::archive::server::parse_segment_file_position(*max_segment_file);
+            if (!max_position)
+            {
+                std::printf("(recordingId=%lld) ERR: %.*s\n", static_cast<long long>(recording_id_value),
+                            static_cast<int>(max_position.error().message.view().size()),
+                            max_position.error().message.view().data());
+                fail();
+                return;
+            }
+            const std::int64_t max_segment_position = *max_position + (segment_length - 1);
+            if (start_position > max_segment_position || stop_position > max_segment_position)
+            {
+                std::printf(
+                    "(recordingId=%lld) ERR: Invariant violation: startPosition=%lld and/or "
+                    "stopPosition=%lld exceed max segment file position=%lld\n",
+                    static_cast<long long>(recording_id_value), static_cast<long long>(start_position),
+                    static_cast<long long>(stop_position), static_cast<long long>(max_segment_position));
+                fail();
+                return;
+            }
+        }
+
+        auto computed_stop_position =
+            Catalog::compute_stop_position(archive_dir.string(), *max_segment_file, start_position, term_length,
+                                           segment_length, checksum, buffer, truncate_on_page_straddle);
+        if (!computed_stop_position)
+        {
+            std::printf("(recordingId=%lld) ERR: %.*s\n", static_cast<long long>(recording_id_value),
+                        static_cast<int>(computed_stop_position.error().message.view().size()),
+                        computed_stop_position.error().message.view().data());
+            fail();
+            return;
+        }
+
+        if (apply_checksum)
+        {
+            const std::int32_t expected = catalog->compute_recording_descriptor_checksum(
+                entry.recording_descriptor_offset, entry.header.length());
+            if (expected != entry.header.checksum())
+            {
+                std::printf("(recordingId=%lld) ERR: invalid Catalog checksum: expected=%d, actual=%d\n",
+                            static_cast<long long>(recording_id_value), expected, entry.header.checksum());
+                fail();
+                return;
+            }
+        }
+
+        if (!max_segment_file->empty())
+        {
+            const std::int32_t stream_id = entry.descriptor.streamId();
+            if (all_segment_files)
+            {
+                for (const std::string& file : files)
+                {
+                    if (is_invalid_segment_file(archive_dir, recording_id_value, file, start_position, term_length,
+                                                segment_length, stream_id, entry.descriptor.initialTermId(),
+                                                apply_checksum, checksum))
+                    {
+                        fail();
+                        return;
+                    }
+                }
+            }
+            else if (is_invalid_segment_file(archive_dir, recording_id_value, *max_segment_file, start_position,
+                                             term_length, segment_length, stream_id, entry.descriptor.initialTermId(),
+                                             apply_checksum, checksum))
+            {
+                fail();
+                return;
+            }
+        }
+
+        if (*computed_stop_position != stop_position)
+        {
+            entry.descriptor.stopPosition(*computed_stop_position);
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+            entry.descriptor.stopTimestamp(now);
+        }
+
+        if (archive_codecs::RecordingState::INVALID == state && !files.empty())
+        {
+            entry.header.state(archive_codecs::RecordingState::VALID);
+        }
+
+        std::printf("(recordingId=%lld) OK\n", static_cast<long long>(recording_id_value));
+    };
+
+    if (recording_id)
+    {
+        if (!catalog->for_entry(*recording_id, process))
+        {
+            std::fprintf(stderr, "io.aeron.exceptions.AeronException: no recording found with recordingId: %lld\n",
+                         static_cast<long long>(*recording_id));
+            return 1;
+        }
+    }
+    else
+    {
+        catalog->for_each(process);
+    }
+
+    (void)catalog->close();
+    return 0 == error_count ? 0 : -1;
+}
+
 }  // namespace
 
 int run_archive_tool_ro(int argc, char* argv[])
@@ -405,7 +962,111 @@ int run_archive_tool_ro(int argc, char* argv[])
         return command_describe(archive_dir, false, true, std::strtol(argv[3], nullptr, 10));
     }
 
-    if (command == "dump" || command == "errors" || command == "verify" || command == "checksum")
+    if (command == "checksum" && arguments >= 2)
+    {
+        const std::string checksum_name = argv[3];
+        if (arguments == 2)
+        {
+            return command_checksum(archive_dir, false, checksum_name, std::nullopt);
+        }
+        if (std::string_view(argv[4]) == "-a")
+        {
+            return command_checksum(archive_dir, true, checksum_name, std::nullopt);
+        }
+        const std::int64_t id = std::strtoll(argv[4], nullptr, 10);
+        const bool all_files = arguments >= 4 && std::string_view(argv[5]) == "-a";
+        return command_checksum(archive_dir, all_files, checksum_name, id);
+    }
+
+    if (command == "verify" && arguments >= 1)
+    {
+        const int option_count = arguments - 1;  // arguments after the command
+        bool all_segments = false;
+        bool apply_checksum = false;
+        const Checksum* checksum = nullptr;
+        std::optional<std::int64_t> recording_id;
+        const auto checksum_option = [&](const char* name)
+        {
+            auto resolved = deepmsg::archive::server::checksum_by_name(name);
+            if (!resolved)
+            {
+                print_error(resolved.error());
+                return false;
+            }
+            checksum = *resolved;
+            apply_checksum = true;
+            return true;
+        };
+
+        if (option_count == 0)
+        {
+            // defaults
+        }
+        else if (option_count == 1)
+        {
+            if (std::string_view(argv[3]) == "-a")
+            {
+                all_segments = true;
+            }
+            else
+            {
+                recording_id = std::strtoll(argv[3], nullptr, 10);
+            }
+        }
+        else if (option_count == 2)
+        {
+            if (std::string_view(argv[3]) == "-checksum")
+            {
+                if (!checksum_option(argv[4]))
+                {
+                    return 1;
+                }
+            }
+            else
+            {
+                recording_id = std::strtoll(argv[3], nullptr, 10);
+                all_segments = std::string_view(argv[4]) == "-a";
+            }
+        }
+        else if (option_count == 3)
+        {
+            if (std::string_view(argv[3]) == "-a")
+            {
+                all_segments = true;
+                if (!checksum_option(argv[5]))
+                {
+                    return 1;
+                }
+            }
+            else
+            {
+                recording_id = std::strtoll(argv[3], nullptr, 10);
+                if (!checksum_option(argv[5]))
+                {
+                    return 1;
+                }
+            }
+        }
+        else if (option_count == 4)
+        {
+            recording_id = std::strtoll(argv[3], nullptr, 10);
+            all_segments = true;
+            if (!checksum_option(argv[6]))
+            {
+                return 1;
+            }
+        }
+        else
+        {
+            std::fprintf(stderr, "ERR: Invalid command\n");
+            print_help();
+            return -1;
+        }
+
+        return command_verify(archive_dir, all_segments, checksum, apply_checksum, recording_id);
+    }
+
+    if (command == "dump" || command == "errors")
     {
         std::fprintf(stderr, "ERR: %.*s is not implemented yet\n", static_cast<int>(command.size()), command.data());
         return 2;
