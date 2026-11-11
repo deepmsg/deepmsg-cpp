@@ -5,13 +5,20 @@
 #
 #   run-batch.sh [--scenario s2] [--arms j,j-c,x-c,x-j] [--fsync 0,2]
 #                [--fsync-catalog 2] [--rate 25K] [--length 32] [--runs 1]
-#                [--iterations 60] [--out DIR] [--list] [--quick] [--no-read]
+#                [--iterations 60] [--streams N] [--recorder-threads N]
+#                [--out DIR] [--list] [--quick] [--no-read]
 #
 # `--fsync` sets the *file* level of each cell and, unless `--fsync-catalog`
 # overrides it, the catalog level too (the archive refuses catalog < file).
 # The cell name keeps `fsync=<file level>`; RUN-INFO.txt carries the pair.
 # `DEEPMSG_IO_FALLOCATE=true` travels to the C++ archive as
 # `deepmsg.archive.file.io.fallocate` (C++ only, docs/compat.md).
+#
+# `--streams N` (A6f) starts N (node, client) pairs against one archive and one
+# driver; the per-stream rate is unchanged, so the aggregate is N × rate.
+# `--recorder-threads N` is the archive-side extension
+# (`deepmsg.archive.recorder.threads`) and is written to `archive.properties`,
+# so only the `x-c`/`x-j` arms act on it.
 #
 # The four arms (perf spec §6.1):
 #
@@ -57,6 +64,8 @@ rate=25K
 length=32
 runs=1
 iterations=60
+streams=1
+recorder_threads=1
 warmup_iterations=30
 rounds=1
 quick=0
@@ -74,6 +83,8 @@ while [ $# -gt 0 ]; do
         --fsync-catalog) catalog_fsync_levels=$2; shift 2 ;;
         --rate) rate=$2; shift 2 ;;
         --length) length=$2; shift 2 ;;
+        --streams) streams=$2; shift 2 ;;
+        --recorder-threads) recorder_threads=$2; shift 2 ;;
         --runs) runs=$2; shift 2 ;;
         --iterations) iterations=$2; shift 2 ;;
         --rounds) rounds=$2; shift 2 ;;
@@ -122,11 +133,29 @@ if [ "$scenario" != s1 ] && [ "$scenario" != s2 ]; then
     exit 2
 fi
 
+if ! [[ "$streams" =~ ^[0-9]+$ ]] || [ "$streams" -lt 1 ] || [ "$streams" -gt 8 ]; then
+    echo "--streams must be 1..8 (got $streams)" >&2
+    exit 2
+fi
+if ! [[ "$recorder_threads" =~ ^[0-9]+$ ]] || [ "$recorder_threads" -lt 1 ] || [ "$recorder_threads" -gt 32 ]; then
+    echo "--recorder-threads must be 1..32 (got $recorder_threads)" >&2
+    exit 2
+fi
+
+# The cell directory carries the A6f axes only when they are not the reference
+# shape, so the A6a tree and `read.py`'s parser stay byte-identical.
+_cell_suffix() {
+    local suffix=""
+    [ "$streams" -ne 1 ] && suffix="${suffix}_streams=${streams}"
+    [ "$recorder_threads" -ne 1 ] && suffix="${suffix}_threads=${recorder_threads}"
+    echo "$suffix"
+}
+
 if [ -n "${list:-}" ]; then
     for round in $(seq 1 "$rounds"); do
         for arm in "${arm_list[@]}"; do
             for fsync in "${fsync_list[@]}"; do
-                echo "round-$round ${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}"
+                echo "round-$round ${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}$(_cell_suffix)"
             done
         done
     done
@@ -153,9 +182,12 @@ _write_cell_files() {
     local dir=$1 fsync=$2 arm=$3 catalog_fsync=$4
     local base
     base=$(_port_base)
+    # Streaming ports (A6f): stream i uses base+10+2i / base+11+2i; the control
+    # port and the archive are shared by every stream.
+    cell_port_base=$base
     control_port=$((base + 1))
-    destination_port=$((base + 2))
-    source_port=$((base + 3))
+    destination_port=$((base + 10))
+    source_port=$((base + 11))
 
     cat >"$dir/archive.properties" <<EOF
 aeron.archive.dir=$archive_dir
@@ -173,6 +205,7 @@ aeron.archive.replayer.idle.strategy=noop
 aeron.archive.conductor.cycle.threshold=1ms
 aeron.archive.recorder.cycle.threshold=1ms
 aeron.archive.replayer.cycle.threshold=1ms
+deepmsg.archive.recorder.threads=$recorder_threads
 EOF
     # The reference refuses `recording.events.enabled=true` with no channel
     # (`Archive.java:1240-1245`), and its own `live-recording-client` names
@@ -281,9 +314,29 @@ _start_node() {
     # the recording. Same two channels, same two properties, different class.
     local node=$BENCHMARKS_ARCHIVE_NODE
     [ "$scenario" = s1 ] && node=$BENCHMARKS_ECHO_NODE
-    JVM_OPTS="-Daeron.dir=$BENCH_AERON_DIR \
--Dio.aeron.benchmarks.aeron.destination.channel=aeron:udp?endpoint=localhost:$destination_port|mtu=1408 \
--Dio.aeron.benchmarks.aeron.source.channel=aeron:udp?endpoint=localhost:$source_port|mtu=1408 \
+    # A6f: one far end per stream. The archive and the driver are shared, so the
+    # control port stays the cell's; only the measured channels move.
+    _node_pids=()
+    local stream
+    for ((stream = 0; stream < streams; stream++)); do
+        local destination=$((cell_port_base + 10 + 2 * stream))
+        local source=$((cell_port_base + 11 + 2 * stream))
+        local stream_dir="$dir"
+        local log="$dir/node.log"
+        if [ "$streams" -gt 1 ]; then
+            stream_dir="$dir/stream-$stream"
+            log="$dir/node-$stream.log"
+            mkdir -p "$stream_dir"
+        fi
+        # One stream keeps the A6a core map; several streams would fight over the
+        # one node core, so multi-stream cells record "unpinned" instead (§Q7).
+        local -a pin=()
+        if [ "$streams" -eq 1 ]; then
+            pin=(taskset -c "$BENCH_NODE_CPU")
+        fi
+        JVM_OPTS="-Daeron.dir=$BENCH_AERON_DIR \
+-Dio.aeron.benchmarks.aeron.destination.channel=aeron:udp?endpoint=localhost:$destination|mtu=1408 \
+-Dio.aeron.benchmarks.aeron.source.channel=aeron:udp?endpoint=localhost:$source|mtu=1408 \
 -Dio.aeron.benchmarks.aeron.record.channel=aeron:ipc \
 -Daeron.archive.control.channel=aeron:udp?endpoint=localhost:$control_port \
 -Daeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0 \
@@ -291,11 +344,12 @@ _start_node() {
 -Daeron.archive.dir=$archive_dir \
 -Daeron.archive.file.sync.level=$_fsync \
 -Daeron.archive.catalog.file.sync.level=$_catalog_fsync \
--Dio.aeron.benchmarks.output.directory=$dir \
+-Dio.aeron.benchmarks.output.directory=$stream_dir \
 $external" \
-        taskset -c "$BENCH_NODE_CPU" "$node" >"$dir/node.log" 2>&1 &
-    _node_pid=$!
-    disown "$_node_pid" 2>/dev/null || true
+            "${pin[@]}" "$node" >"$log" 2>&1 &
+        _node_pids+=($!)
+        disown "${_node_pids[-1]}" 2>/dev/null || true
+    done
     sleep 0.5
 }
 
@@ -321,15 +375,31 @@ _run_client() {
     case "$arm" in
         j-c|x-c|x-j) external="-Dio.aeron.benchmarks.aeron.archive.external=true" ;;
     esac
-    JVM_OPTS="-Daeron.dir=$BENCH_AERON_DIR \
+    # A6f: N clients start together and are waited for together; that is what
+    # makes the cell a multi-stream aggregate rather than N sequential cells.
+    local -a client_pids=()
+    local stream
+    for ((stream = 0; stream < streams; stream++)); do
+        local destination=$((cell_port_base + 10 + 2 * stream))
+        local source=$((cell_port_base + 11 + 2 * stream))
+        local stream_dir="$dir/run-$run"
+        if [ "$streams" -gt 1 ]; then
+            stream_dir="$dir/run-$run/stream-$stream"
+            mkdir -p "$stream_dir"
+        fi
+        local -a pin=()
+        if [ "$streams" -eq 1 ]; then
+            pin=(taskset -c "$BENCH_RIG_CPU")
+        fi
+        JVM_OPTS="-Daeron.dir=$BENCH_AERON_DIR \
 -Dio.aeron.benchmarks.aeron.embedded.media.driver=false \
--Dio.aeron.benchmarks.aeron.destination.channel=aeron:udp?endpoint=localhost:$destination_port|mtu=1408 \
--Dio.aeron.benchmarks.aeron.source.channel=aeron:udp?endpoint=localhost:$source_port|mtu=1408 \
+-Dio.aeron.benchmarks.aeron.destination.channel=aeron:udp?endpoint=localhost:$destination|mtu=1408 \
+-Dio.aeron.benchmarks.aeron.source.channel=aeron:udp?endpoint=localhost:$source|mtu=1408 \
 -Dio.aeron.benchmarks.aeron.record.channel=aeron:ipc \
 -Daeron.archive.dir=$archive_dir \
 -Daeron.archive.replication.channel=aeron:udp?endpoint=localhost:0 \
 $external \
--Dio.aeron.benchmarks.output.directory=$dir/run-$run \
+-Dio.aeron.benchmarks.output.directory=$stream_dir \
 -Dio.aeron.benchmarks.output.file=$scenario \
 -Dio.aeron.benchmarks.message.rate=$rate \
 -Dio.aeron.benchmarks.warmup.message.rate=${rate} \
@@ -341,7 +411,77 @@ $external \
 -Dio.aeron.benchmarks.output.time.unit=MICROSECONDS \
 -Daeron.archive.control.channel=aeron:udp?endpoint=localhost:$control_port \
 -Daeron.archive.control.response.channel=aeron:udp?endpoint=localhost:0" \
-        taskset -c "$BENCH_RIG_CPU" "$client" >"$dir/run-$run/client.log" 2>&1
+            "${pin[@]}" "$client" >"$stream_dir/client.log" 2>&1 &
+        client_pids+=($!)
+    done
+
+    local ok=0
+    local pid
+    for pid in "${client_pids[@]}"; do
+        wait "$pid" || ok=1
+    done
+    return $ok
+}
+
+# A6f: the per-stream form of `lib/cell.sh`'s `cell_validate` (that one is
+# pinned to `<cell>/run-<n>`, and a multi-stream run has one directory per
+# stream). The rules are the same: no `WARNING:`, no `.FAIL`, exactly one
+# histogram, and at least the samples the rate and iterations asked for.
+_validate_stream_dir() {
+    local dir=$1 rate=$2 iterations=$3
+    local log="$dir/client.log"
+    local expected=$(( $(_rate_as_number "$rate") * iterations ))
+
+    if [ ! -f "$log" ]; then
+        echo "no client log at $log" >&2
+        return 1
+    fi
+    if grep -q 'WARNING:' "$log"; then
+        echo "the client printed WARNING: $(grep -m1 'WARNING:' "$log")" >&2
+        return 1
+    fi
+
+    local hdrs failed
+    hdrs=$(find "$dir" -maxdepth 1 -name '*.hdr' 2>/dev/null | wc -l)
+    failed=$(find "$dir" -maxdepth 1 -name '*.FAIL' 2>/dev/null | wc -l)
+    if [ "$failed" -gt 0 ]; then
+        echo "$failed histogram(s) were written with the .FAIL suffix" >&2
+        return 1
+    fi
+    if [ "$hdrs" -ne 1 ]; then
+        echo "expected one histogram in $dir, found $hdrs" >&2
+        return 1
+    fi
+
+    local hdr count
+    hdr=$(find "$dir" -maxdepth 1 -name '*.hdr')
+    count=$("$BENCH_DIR/tools/quantiles.sh" "$hdr" 2>/dev/null | awk 'NR == 2 { print $2 }')
+    if [ -z "$count" ]; then
+        echo "no count could be read out of $(basename "$hdr")" >&2
+        return 1
+    fi
+    if [ "$count" -lt "$expected" ]; then
+        echo "$(basename "$hdr") holds $count samples, fewer than the $expected asked for" >&2
+        return 1
+    fi
+    return 0
+}
+
+_validate_run() {
+    local cell=$1 run=$2 rate=$3 iterations=$4
+    local ok=0
+    local stream
+    for ((stream = 0; stream < streams; stream++)); do
+        local stream_dir="$cell/run-$run"
+        if [ "$streams" -gt 1 ]; then
+            stream_dir="$cell/run-$run/stream-$stream"
+        fi
+        if ! _validate_stream_dir "$stream_dir" "$rate" "$iterations"; then
+            echo "  stream $stream did not count" >&2
+            ok=1
+        fi
+    done
+    return $ok
 }
 
 _write_run_info() {
@@ -352,8 +492,17 @@ _write_run_info() {
         echo "driver          $([ "$arm" = j ] || [ "$arm" = x-j ] && echo 'java MediaDriver' || echo "aeronmd ($BENCH_AERONMD)")"
         echo "archive         $([ "$arm" = j ] || [ "$arm" = j-c ] && echo "java io.aeron.archive.Archive ($BENCH_JAVA_ARCHIVE_JAR)" || echo "deepmsg-archive-server ($BENCH_ARCHIVE_SERVER)")"
         echo "control         aeron:udp?endpoint=localhost:$control_port"
-        echo "destination     aeron:udp?endpoint=localhost:$destination_port|mtu=1408"
-        echo "source          aeron:udp?endpoint=localhost:$source_port|mtu=1408"
+        if [ "$streams" -eq 1 ]; then
+            echo "destination     aeron:udp?endpoint=localhost:$destination_port|mtu=1408"
+            echo "source          aeron:udp?endpoint=localhost:$source_port|mtu=1408"
+        else
+            local stream
+            for ((stream = 0; stream < streams; stream++)); do
+                echo "stream $stream       destination=aeron:udp?endpoint=localhost:$((cell_port_base + 10 + 2 * stream))|mtu=1408 source=aeron:udp?endpoint=localhost:$((cell_port_base + 11 + 2 * stream))|mtu=1408"
+            done
+        fi
+        echo "streams         $streams (per-stream rate $rate; aggregate $streams x $rate)"
+        echo "recorder        $recorder_threads thread(s) (deepmsg.archive.recorder.threads)"
         echo "record          aeron:ipc"
         echo "fsync           file=$_fsync catalog=$_catalog_fsync"
         if [ "$arm" = x-c ] || [ "$arm" = x-j ]; then
@@ -362,7 +511,11 @@ _write_run_info() {
         fi
         echo "archive idle    conductor=spin recorder=noop replayer=noop, threading=DEDICATED"
         echo "events          $([ "$scenario" = s1 ] && echo 'true (s1, aeron:ipc)' || echo 'false (s2)')"
-        echo "cores           driver indices $BENCH_DRIVER_CPU_INDICES, node $BENCH_NODE_CPU, rig $BENCH_RIG_CPU"
+        if [ "$streams" -eq 1 ]; then
+            echo "cores           driver indices $BENCH_DRIVER_CPU_INDICES, node $BENCH_NODE_CPU, rig $BENCH_RIG_CPU"
+        else
+            echo "cores           driver indices $BENCH_DRIVER_CPU_INDICES; node and rig unpinned (multi-stream)"
+        fi
         echo "rate/length     $rate msg/s, $length bytes, $iterations iterations ($warmup_iterations warmup)"
         for f in "$dir/archive.properties" "$dir/driver-override.properties"; do
             echo "settings        $(sha256sum "$f" | cut -d' ' -f1) $(basename "$f")"
@@ -420,7 +573,8 @@ _sample_rss() {
 _run_cell() {
     local round=$1 arm=$2 fsync=$3
     local catalog_fsync=${catalog_fsync_levels:-$fsync}
-    cell_dir="$out/round-$round/${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}"
+    local recorder_threads=${4:-1}
+    cell_dir="$out/round-$round/${scenario}_${arm}_fsync=${fsync}_length=${length}_rate=${rate}$(_cell_suffix)"
     archive_dir="$cell_dir/archive"
     # A cell that is re-run must not be read beside its own leftovers: an old
     # `run-1/` histogram or an old `logs/` dump from the failed run would sit in
@@ -445,8 +599,8 @@ _run_cell() {
         if ! _run_client "$arm" "$cell_dir" "$run"; then
             echo "  run $run: the client failed" >&2
             ok=0
-        elif ! cell_validate "$cell_dir" "$run" "$rate" "$iterations"; then
-            echo "  run $run: the cell did not count (see $cell_dir/run-$run/client.log)" >&2
+        elif ! _validate_run "$cell_dir" "$run" "$rate" "$iterations"; then
+            echo "  run $run: the cell did not count (see $cell_dir/run-$run)" >&2
             ok=0
         fi
         _report_run "$cell_dir" "$run"
@@ -455,15 +609,23 @@ _run_cell() {
 
     _sample_rss "$cell_dir"
 
-    [ -n "${_node_pid:-}" ] && kill -9 "$_node_pid" 2>/dev/null || true
+    _kill_nodes
     [ -n "${_archive_pid:-}" ] && kill -9 "$_archive_pid" 2>/dev/null || true
     driver_kill
 
     return $((1 - ok))
 }
 
+_kill_nodes() {
+    local pid
+    for pid in ${_node_pids[@]+"${_node_pids[@]}"}; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    _node_pids=()
+}
+
 _batch_cleanup() {
-    [ -n "${_node_pid:-}" ] && kill -9 "$_node_pid" 2>/dev/null || true
+    _kill_nodes
     [ -n "${_archive_pid:-}" ] && kill -9 "$_archive_pid" 2>/dev/null || true
     driver_kill
 }
@@ -506,5 +668,9 @@ fi
 if [ 1 -eq "$no_read" ]; then
     echo "readings skipped (--no-read)"
 else
-    "$here/read.py" "$out" || true
+    if [ "$streams" -gt 1 ] || [ "$recorder_threads" -ne 1 ]; then
+        "$here/read-streams.py" "$out" || true
+    else
+        "$here/read.py" "$out" || true
+    fi
 fi
