@@ -59,12 +59,21 @@ std::expected<ProcessResult, Error> run_process(std::string_view executable, con
     {
         return std::unexpected(make_error(ErrorCode::io_error, "pipe failed", errno));
     }
+    int input_fds[2] = {-1, -1};
+    if (0 != ::pipe(input_fds))
+    {
+        ::close(pipe_fds[0]);
+        ::close(pipe_fds[1]);
+        return std::unexpected(make_error(ErrorCode::io_error, "stdin pipe failed", errno));
+    }
 
     const pid_t pid = ::fork();
     if (pid < 0)
     {
         ::close(pipe_fds[0]);
         ::close(pipe_fds[1]);
+        ::close(input_fds[0]);
+        ::close(input_fds[1]);
         return std::unexpected(make_error(ErrorCode::io_error, "fork failed", errno));
     }
 
@@ -74,12 +83,30 @@ std::expected<ProcessResult, Error> run_process(std::string_view executable, con
         ::dup2(pipe_fds[1], STDOUT_FILENO);
         ::dup2(pipe_fds[1], STDERR_FILENO);
         ::close(pipe_fds[1]);
+        ::close(input_fds[1]);
+        ::dup2(input_fds[0], STDIN_FILENO);
+        ::close(input_fds[0]);
         apply_environment(options.environment);
         ::execvp(executable_name.c_str(), argv.data());
         ::_exit(127);
     }
 
     ::close(pipe_fds[1]);
+    ::close(input_fds[0]);
+    if (!options.input.empty())
+    {
+        std::size_t written = 0;
+        while (written < options.input.size())
+        {
+            const ssize_t count = ::write(input_fds[1], options.input.data() + written, options.input.size() - written);
+            if (count <= 0)
+            {
+                break;
+            }
+            written += static_cast<std::size_t>(count);
+        }
+    }
+    ::close(input_fds[1]);
 
     ProcessResult result;
     const auto deadline = std::chrono::steady_clock::now() + options.timeout;

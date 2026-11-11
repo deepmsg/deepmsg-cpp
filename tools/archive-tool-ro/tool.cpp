@@ -21,8 +21,8 @@
 #include <expected>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -33,7 +33,9 @@
 #include "archive/server/catalog.h"
 #include "archive/server/checksum.h"
 #include "archive/server/frame_layout.h"
+#include "archive/server/recording_reader.h"
 #include "archive/server/segment_files.h"
+#include "core/io/mapped_file.h"
 #include "io_aeron_archive_codecs/RecordingDescriptor.h"
 #include "io_aeron_archive_codecs/RecordingState.h"
 #include "io_aeron_archive_codecs_mark/MarkFileHeader.h"
@@ -54,6 +56,8 @@ using deepmsg::archive::server::Catalog;
 using deepmsg::archive::server::CatalogEntry;
 using deepmsg::archive::server::CatalogOpenOptions;
 using deepmsg::archive::server::Checksum;
+using deepmsg::archive::server::FragmentHandler;
+using deepmsg::archive::server::RecordingReader;
 
 namespace archive_codecs = ::io::aeron::archive::codecs;
 namespace archive_mark_codecs = ::io::aeron::archive::codecs::mark;
@@ -183,6 +187,7 @@ std::expected<Catalog, Error> open_catalog_read_only(const std::filesystem::path
 /// acting/current version and block-length forms are the output contract.
 std::string descriptor_to_string(archive_codecs::RecordingDescriptor& descriptor)
 {
+    descriptor.sbeRewind();
     std::string out = "[RecordingDescriptor](sbeTemplateId=22|sbeSchemaId=101|sbeSchemaVersion=";
     if (descriptor.actingVersion() != archive_codecs::RecordingDescriptor::SBE_SCHEMA_VERSION)
     {
@@ -223,6 +228,7 @@ std::string mark_header_to_string(ArchiveMarkFile& mark_file)
     header.wrapForDecode(buffer, static_cast<std::uint64_t>(mark_file.header_offset()),
                          archive_mark_codecs::MarkFileHeader::SBE_BLOCK_LENGTH, message_header.version(), bytes.size());
 
+    header.sbeRewind();
     std::string out = "[MarkFileHeader](sbeTemplateId=200|sbeSchemaId=100|sbeSchemaVersion=";
     if (header.actingVersion() != archive_mark_codecs::MarkFileHeader::SBE_SCHEMA_VERSION)
     {
@@ -578,9 +584,15 @@ std::string yes_no_prompt(const std::string& message)
 {
     std::printf("\n%s: ", message.c_str());
     std::fflush(stdout);
-    std::string answer;
-    std::getline(std::cin, answer);
-    return answer;
+
+    // `readContinueAnswer`: one line from stdin, empty means "yes". `fgets`
+    // rather than <iostream>: the gate forbids iostream in product code.
+    char buffer[256];
+    if (nullptr == std::fgets(buffer, sizeof(buffer), stdin))
+    {
+        return {};
+    }
+    return trim(std::string{buffer});
 }
 
 bool is_affirmative(const std::string& answer)
@@ -911,6 +923,343 @@ int command_verify(const std::filesystem::path& archive_dir, bool all_segment_fi
     return 0 == error_count ? 0 : -1;
 }
 
+/// `RecordingDescriptorHeaderDecoder.appendTo` (the SBE-generated `toString`).
+std::string descriptor_header_to_string(archive_codecs::RecordingDescriptorHeader& header)
+{
+    header.sbeRewind();
+    std::string out = "[RecordingDescriptorHeader](sbeTemplateId=21|sbeSchemaId=101|sbeSchemaVersion=";
+    if (header.actingVersion() != archive_codecs::RecordingDescriptorHeader::SBE_SCHEMA_VERSION)
+    {
+        out += std::to_string(header.actingVersion());
+        out += '/';
+    }
+    out += "14|sbeBlockLength=32):";
+    out += "length=" + std::to_string(header.length());
+    out += "|state=";
+    out += archive_codecs::RecordingState::c_str(header.state());
+    out += "|checksum=" + std::to_string(header.checksum());
+    out += "|reserved=" + std::to_string(header.reserved());
+    return out;
+}
+
+/// `org.agrona.PrintBufferUtil.prettyHexDump` (the format `dump` prints for a
+/// DATA frame): a 16-byte row, offset and ASCII columns, and a trailing footer
+/// with **no** newline (the caller's `println` supplies it).
+std::string pretty_hex_dump(const std::uint8_t* data, std::int32_t length)
+{
+    if (length <= 0)
+    {
+        return {};
+    }
+
+    static constexpr const char* HEADER =
+        "         +-------------------------------------------------+\n"
+        "         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |\n"
+        "+--------+-------------------------------------------------+----------------+\n";
+    static constexpr const char* FOOTER =
+        "+--------+-------------------------------------------------+----------------+";
+
+    std::string out = HEADER;
+    for (std::int32_t base = 0; base < length; base += 16)
+    {
+        char prefix[16];
+        std::snprintf(prefix, sizeof(prefix), "|%08x|", static_cast<unsigned>(base));
+        out += prefix;
+
+        int i = 0;
+        for (; i < 16 && base + i < length; ++i)
+        {
+            char byte_text[8];
+            std::snprintf(byte_text, sizeof(byte_text), " %02x", data[base + i]);
+            out += byte_text;
+        }
+        for (; i < 16; ++i)
+        {
+            out += "   ";
+        }
+        out += " |";
+        for (i = 0; i < 16; ++i)
+        {
+            if (base + i < length)
+            {
+                const std::uint8_t value = data[base + i];
+                out += value >= 0x20 && value <= 0x7E ? static_cast<char>(value) : '.';
+            }
+            else
+            {
+                out += ' ';
+            }
+        }
+        out += "|\n";
+    }
+    out += FOOTER;
+    return out;
+}
+
+bool continue_on_frame_limit(std::int64_t frame_limit)
+{
+    return is_affirmative(
+        yes_no_prompt("Specified frame limit " + std::to_string(frame_limit) + " reached. Continue? (y/n)"));
+}
+
+/// `ArchiveTool.dump`'s `SimpleFragmentHandler`
+/// (`ArchiveTool.java:548-566`).
+class DumpHandler final : public FragmentHandler
+{
+public:
+    void on_fragment(const std::uint8_t* buffer, std::int32_t offset, std::int32_t length, std::int32_t frame_type,
+                     std::uint8_t flags, std::int64_t /*reserved_value*/) override
+    {
+        std::printf("data at offset [%d] with length = %d\n", offset, length);
+        if (deepmsg::archive::server::PADDING_FRAME_TYPE == frame_type)
+        {
+            std::printf("PADDING FRAME\n");
+        }
+        else if (deepmsg::archive::server::DATA_FRAME_TYPE == frame_type)
+        {
+            constexpr std::uint8_t begins_fragment = 0x80;
+            constexpr std::uint8_t ends_fragment = 0x40;
+            if ((flags & (begins_fragment | ends_fragment)) != (begins_fragment | ends_fragment))
+            {
+                std::string suffix;
+                if ((flags & begins_fragment) == begins_fragment)
+                {
+                    suffix = "BEGIN_FRAGMENT";
+                }
+                if ((flags & ends_fragment) == ends_fragment)
+                {
+                    suffix += "END_FRAGMENT";
+                }
+                std::printf("Fragmented frame. %s\n", suffix.c_str());
+            }
+            const std::string hex = pretty_hex_dump(buffer + offset, length);
+            std::fwrite(hex.data(), 1, hex.size(), stdout);
+            std::printf("\n");
+        }
+        else
+        {
+            std::printf("Unexpected frame type %d\n", frame_type);
+        }
+    }
+};
+
+/// `ArchiveTool.dump` (`ArchiveTool.java:535-589`, `:1176-1235`).
+int command_dump(const std::filesystem::path& archive_dir, std::int64_t fragment_count_limit)
+{
+    if (fragment_count_limit <= 0)
+    {
+        std::fprintf(stderr, "ERR: Invalid fragmentCountLimit=%lld\n", static_cast<long long>(fragment_count_limit));
+        return 1;
+    }
+
+    auto catalog = open_catalog_read_only(archive_dir);
+    if (!catalog)
+    {
+        print_error(catalog.error());
+        return 1;
+    }
+
+    std::string error;
+    auto mark_file = open_mark_file(archive_dir, error, true);
+    if (!mark_file)
+    {
+        print_error(mark_file.error());
+        return 1;
+    }
+
+    std::string out;
+    print_mark_information(*mark_file, out);
+    out += "Catalog capacity in bytes: " + std::to_string(catalog->capacity()) + "\n\n";
+    out += "Dumping up to " + std::to_string(fragment_count_limit) + " fragments per recording\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+
+    DumpHandler handler;
+    catalog->for_each(
+        [&](CatalogEntry& entry)
+        {
+            const std::int64_t recording_id = entry.descriptor.recordingId();
+            const std::int64_t start_position = entry.descriptor.startPosition();
+            const std::int64_t stop_position = entry.descriptor.stopPosition();
+            const std::int64_t stream_length = stop_position - start_position;
+
+            std::string text;
+            text += "\n\nRecording " + std::to_string(recording_id) + "\n";
+            text += "  channel: " + entry.descriptor.getStrippedChannelAsString() + "\n";
+            text += "  streamId: " + std::to_string(entry.descriptor.streamId()) + "\n";
+            text += "  stream length: " +
+                    (NULL_POSITION == stop_position ? std::to_string(NULL_POSITION) : std::to_string(stream_length)) +
+                    "\n";
+            text += descriptor_header_to_string(entry.header) + "\n";
+            text += descriptor_to_string(entry.descriptor) + "\n";
+            std::fwrite(text.data(), 1, text.size(), stdout);
+
+            if (0 == stream_length)
+            {
+                std::printf("Recording is empty\n");
+                return;
+            }
+
+            auto reader = RecordingReader::create(catalog->recording_summary(recording_id), archive_dir.string(),
+                                                  start_position, RecordingReader::NULL_POSITION);
+            if (!reader)
+            {
+                print_error(reader.error());
+                return;
+            }
+
+            bool active = true;
+            std::int64_t fragment_count = fragment_count_limit;
+            do
+            {
+                std::printf("\nFrame at position [%lld] ", static_cast<long long>(reader->replay_position()));
+                auto polled = reader->poll(handler, 1);
+                if (!polled)
+                {
+                    print_error(polled.error());
+                    return;
+                }
+                if (*polled > 0 && --fragment_count == 0)
+                {
+                    fragment_count = fragment_count_limit;
+                    if (NULL_POSITION != stop_position)
+                    {
+                        std::printf("%lld bytes of (from %lld) remaining in recording id %lld\n",
+                                    static_cast<long long>(stream_length - reader->replay_position()),
+                                    static_cast<long long>(stream_length), static_cast<long long>(recording_id));
+                    }
+                    active = continue_on_frame_limit(fragment_count_limit);
+                }
+            } while (active && !reader->is_done());
+        });
+    return 0;
+}
+
+std::int64_t read_int64_le(const std::uint8_t* bytes) noexcept
+{
+    std::uint64_t value = 0;
+    for (int i = 7; i >= 0; --i)
+    {
+        value = (value << 8) | bytes[i];
+    }
+    return static_cast<std::int64_t>(value);
+}
+
+/// `CommonContext.DATE_TIME_FORMATTER` (`CommonContext.java:572`):
+/// `uuuu-MM-dd HH:mm:ss.SSSSSSZ`, i.e. microseconds and a numeric offset.
+std::string format_error_time(std::int64_t epoch_millis)
+{
+    const std::time_t seconds = static_cast<std::time_t>(epoch_millis / 1000);
+    std::tm local{};
+    localtime_r(&seconds, &local);
+    char date[64];
+    std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &local);
+
+    const std::int64_t micros = ((epoch_millis % 1000) + 1000) % 1000 * 1000;
+    const long offset_seconds = local.tm_gmtoff;
+    const char sign = offset_seconds < 0 ? '-' : '+';
+    const long offset = offset_seconds < 0 ? -offset_seconds : offset_seconds;
+
+    char buffer[96];
+    std::snprintf(buffer, sizeof(buffer), "%s.%06lld%c%02ld%02ld", date, static_cast<long long>(micros), sign,
+                  offset / 3600, (offset % 3600) / 60);
+    return buffer;
+}
+
+/// `CommonContext.printErrorLog` (`CommonContext.java:1274-1297`) over an
+/// Aeron distinct-error-log region (`aeron_distinct_error_log.h:27-40`): a
+/// 24-byte header per entry (length, observation count, last/first timestamps)
+/// followed by the description, entries 8-byte aligned, the length stored last.
+int print_error_log(const std::uint8_t* buffer, std::size_t size)
+{
+    if (size < 24 || 0 == read_int32_le(buffer))
+    {
+        // `CommonContext.printErrorLog`'s else branch (`:1297-1301`): no
+        // errors still prints the summary, without the trailing period.
+        std::printf("\n0 distinct errors observed\n");
+        return 0;
+    }
+
+    int distinct_error_count = 0;
+    std::size_t offset = 0;
+    while (offset + 24 <= size)
+    {
+        const std::int32_t length = read_int32_le(buffer + offset);
+        if (0 == length)
+        {
+            break;
+        }
+        if (length < 24 || offset + static_cast<std::size_t>(length) > size)
+        {
+            break;
+        }
+
+        const std::int32_t observations = read_int32_le(buffer + offset + 4);
+        const std::int64_t last_timestamp = read_int64_le(buffer + offset + 8);
+        const std::int64_t first_timestamp = read_int64_le(buffer + offset + 16);
+        const auto payload = static_cast<std::size_t>(length - 24);
+        std::printf("\n%d observations from %s to %s for:\n", observations, format_error_time(first_timestamp).c_str(),
+                    format_error_time(last_timestamp).c_str());
+        std::fwrite(buffer + offset + 24, 1, payload, stdout);
+        std::printf("\n");
+
+        ++distinct_error_count;
+        offset += (static_cast<std::size_t>(length) + 7) & ~static_cast<std::size_t>(7);
+    }
+
+    std::printf("\n%d distinct errors observed.\n", distinct_error_count);
+    return distinct_error_count;
+}
+
+/// `ArchiveTool.printErrors` (`ArchiveTool.java:1526-1543`): the archive's own
+/// error log, then the media driver's from `<aeronDirectory>/cnc.dat`.
+int command_errors(const std::filesystem::path& archive_dir)
+{
+    std::string error;
+    auto mark_file = open_mark_file(archive_dir, error, false);
+    if (!mark_file)
+    {
+        print_error(mark_file.error());
+        return 1;
+    }
+
+    std::printf("Archive error log:\n");
+    const std::span<std::uint8_t> archive_errors = mark_file->error_buffer();
+    (void)print_error_log(archive_errors.data(), archive_errors.size());
+
+    const std::string aeron_directory = mark_file->aeron_directory();
+    std::printf("\nAeron driver error log (directory: %s):\n", aeron_directory.c_str());
+
+    const std::filesystem::path cnc_path = std::filesystem::path(aeron_directory) / "cnc.dat";
+    auto cnc = axc::core::MappedFile::open(cnc_path.string(), false);
+    if (!cnc)
+    {
+        print_error(cnc.error());
+        return 1;
+    }
+
+    const std::span<const std::uint8_t> bytes = cnc->mapping();
+    if (bytes.size() < 128)
+    {
+        std::fprintf(stderr, "ERR: cnc file too short: %s\n", cnc_path.string().c_str());
+        return 1;
+    }
+    const std::int64_t to_driver = read_int32_le(bytes.data() + 4);
+    const std::int64_t to_clients = read_int32_le(bytes.data() + 8);
+    const std::int64_t counters_metadata = read_int32_le(bytes.data() + 12);
+    const std::int64_t counters_values = read_int32_le(bytes.data() + 16);
+    const std::int64_t error_log_length = read_int32_le(bytes.data() + 20);
+    const std::int64_t error_log_start = 128 + to_driver + to_clients + counters_metadata + counters_values;
+    if (error_log_length <= 0 || error_log_start < 0 ||
+        static_cast<std::uint64_t>(error_log_start + error_log_length) > bytes.size())
+    {
+        std::fprintf(stderr, "ERR: cnc error log region out of range: %s\n", cnc_path.string().c_str());
+        return 1;
+    }
+
+    (void)print_error_log(bytes.data() + error_log_start, static_cast<std::size_t>(error_log_length));
+    return 0;
+}
+
 }  // namespace
 
 int run_archive_tool_ro(int argc, char* argv[])
@@ -1064,6 +1413,18 @@ int run_archive_tool_ro(int argc, char* argv[])
         }
 
         return command_verify(archive_dir, all_segments, checksum, apply_checksum, recording_id);
+    }
+
+    if (command == "dump" && arguments >= 1 && arguments <= 2)
+    {
+        const std::int64_t limit =
+            arguments == 2 ? std::strtoll(argv[3], nullptr, 10) : std::numeric_limits<std::int64_t>::max();
+        return command_dump(archive_dir, limit);
+    }
+
+    if (command == "errors" && arguments == 1)
+    {
+        return command_errors(archive_dir);
     }
 
     if (command == "dump" || command == "errors")

@@ -25,6 +25,7 @@ axc_add_executable(axc_archive_interop_tests
         archive/threading_interop_test.cpp
         archive/reference_java_client_test.cpp
         archive/content_parity_test.cpp
+        archive/archive_tool_ro_interop_test.cpp
         fixture/c_driver.cpp
         fixture/java_process.cpp
         fixture/process.cpp
@@ -46,6 +47,7 @@ set(AXC_AERON_ALL_JAR
 
 target_compile_definitions(axc_archive_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
+    "AXC_ARCHIVE_TOOL_RO_BIN=\"${PROJECT_BINARY_DIR}/tools/archive-tool-ro/archive-tool-ro\""
     "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\"")
 
 # C1a: the reference `ClusterTool recording-log` as the oracle for a
@@ -65,6 +67,9 @@ target_include_directories(axc_cluster_interop_tests PRIVATE "${CMAKE_CURRENT_SO
 target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
+
+# The tool under test is an executable of its own; build it with the suite.
+add_dependencies(axc_archive_interop_tests archive-tool-ro)
 
 include(GoogleTest)
 gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
