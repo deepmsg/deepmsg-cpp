@@ -1,9 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <expected>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 extern "C"
 {
@@ -13,14 +17,22 @@ extern "C"
 #include <client/aeron_archive.h>
 
 #include "cluster/common/cluster_mark_file.h"
+#include "cluster/common/cluster_member.h"
 #include "cluster/common/node_state_file.h"
 #include "cluster/common/recording_log.h"
+#include "cluster/common/timer/timer_service.h"
+#include "cluster/common/timer/timer_supplier.h"
 #include "cluster/consensus/authenticator.h"
+#include "cluster/consensus/consensus_module_adapter.h"
 #include "cluster/consensus/consensus_module_context.h"
 #include "cluster/consensus/egress_publisher.h"
 #include "cluster/consensus/ingress_adapter.h"
 #include "cluster/consensus/log_publisher.h"
+#include "cluster/consensus/pending_service_message_tracker.h"
+#include "cluster/consensus/service_ack.h"
+#include "cluster/consensus/service_proxy.h"
 #include "cluster/consensus/session_manager.h"
+#include "core/collections/long2long_hash_map.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error_handler.h"
 
@@ -51,7 +63,10 @@ inline constexpr std::int64_t LIVENESS_TIMEOUT_MS = 10'000;
 ///   * `consensus_work()` returns 0;
 ///   * no log publication is created, so the archive connection is the only
 ///     criterion that the archive can observe.
-class ConsensusModuleAgent final : public axc::core::ErrorHandler, public IngressHandler
+class ConsensusModuleAgent final : public axc::core::ErrorHandler,
+                                   public IngressHandler,
+                                   public ServiceControlHandler,
+                                   public common::timer::TimerHandler
 {
 public:
     explicit ConsensusModuleAgent(ConsensusModuleConfig config);
@@ -88,6 +103,66 @@ public:
                           std::int32_t request_type, std::span<const std::uint8_t> payload) override;
     void on_extension_message(std::int32_t schema_id, std::int32_t template_id,
                               std::span<const std::uint8_t> message) override;
+
+    // `ServiceControlHandler`: the S2 container -> consensus module direction.
+    // The two unknown-service-id guards are 1.54.0's `8554648566`: report and
+    // drop, never index outside the per-service arrays.
+    [[nodiscard]] std::expected<void, Error> on_service_message(std::int64_t cluster_session_id,
+                                                                std::span<const std::uint8_t> message) override;
+    [[nodiscard]] std::expected<void, Error> on_service_close_session(std::int64_t cluster_session_id) override;
+    void on_schedule_timer(std::int64_t correlation_id, std::int64_t deadline) override;
+    void on_cancel_timer(std::int64_t correlation_id) override;
+    [[nodiscard]] std::expected<void, Error> on_service_ack(std::int64_t log_position, std::int64_t timestamp,
+                                                            std::int64_t ack_id, std::int64_t relevant_id,
+                                                            std::int32_t service_id) override;
+    [[nodiscard]] std::expected<void, Error> on_cluster_members_query(std::int64_t correlation_id,
+                                                                      bool is_extended_request) override;
+
+    // `TimerService.TimerHandler`: an expired timer becomes a `TimerEvent` in
+    // the log (`ConsensusModuleAgent.onTimerEvent`, `:889-900`).
+    [[nodiscard]] bool on_timer_event(std::int64_t correlation_id) override;
+
+    /// `ConsensusModuleAgent.joinLogAsLeader` (`:1704-1715`), for the shape
+    /// C4c can support: no archive recording yet, so the log publication's
+    /// position is the append position and C4d replaces `tryCreateAppendPosition`.
+    /// Nothing calls this in product code until the Election lands in C4d; the
+    /// interop test drives it, as the reference's own tests drive `role()`.
+    [[nodiscard]] std::expected<void, Error> join_log_as_leader(std::int64_t leadership_term_id,
+                                                                std::int64_t log_position, std::int32_t log_session_id,
+                                                                bool is_startup);
+
+    /// `awaitServicesReady`'s completion check (`:1817-1838`) without the
+    /// blocking: when every service has acked `expectedAckPosition`, consumes
+    /// the queue heads and advances `serviceAckId`.
+    [[nodiscard]] std::expected<bool, Error> service_acks_reached();
+
+    /// The reference's package-private `role(Cluster.Role)`; the Election is
+    /// its only caller in C4d.
+    void role(ClusterRole new_role) noexcept;
+
+    /// `leadershipTermId(long)` (`:2150-2156`): the counter and every tracker.
+    void leadership_term_id(std::int64_t leadership_term_id);
+
+    [[nodiscard]] std::int64_t leadership_term_id() const noexcept
+    {
+        return leadership_term_id_;
+    }
+
+    [[nodiscard]] std::int64_t append_position() const noexcept;
+    [[nodiscard]] std::int64_t service_ack_id() const noexcept
+    {
+        return service_ack_id_;
+    }
+
+    [[nodiscard]] common::timer::TimerService* timer_service() noexcept
+    {
+        return timer_service_.get();
+    }
+
+    [[nodiscard]] const std::vector<PendingServiceMessageTracker>& pending_service_message_trackers() const noexcept
+    {
+        return pending_service_message_trackers_;
+    }
 
     [[nodiscard]] SessionManager* session_manager() noexcept
     {
@@ -136,13 +211,18 @@ private:
     [[nodiscard]] std::expected<void, Error> allocate_counters();
     [[nodiscard]] std::expected<void, Error> connect_archive();
     [[nodiscard]] std::expected<void, Error> open_session_layer();
+    [[nodiscard]] std::expected<void, Error> open_service_control_layer();
     [[nodiscard]] int slow_tick_work(std::int64_t now_ns) noexcept;
     [[nodiscard]] int consensus_work(std::int64_t timestamp, std::int64_t now_ns) noexcept;
     [[nodiscard]] int poll_archive_error_response() noexcept;
 
+    [[nodiscard]] int update_leader_position(std::int64_t now_ns) noexcept;
+    void sweep_uncommitted_entries_to(std::int64_t commit_position) noexcept;
+    [[nodiscard]] std::expected<void, Error> capture_service_ack(std::int64_t log_position, std::int64_t ack_id,
+                                                                 std::int64_t relevant_id, std::int32_t service_id);
+
     void report(const Error& error) noexcept;
     void state(ConsensusModuleState new_state, const char* reason) noexcept;
-    void role(ClusterRole new_role) noexcept;
     void measure_duty_cycle(std::int64_t now_ns) noexcept;
     void close_resources() noexcept;
 
@@ -167,6 +247,7 @@ private:
     axc::core::CounterPtr module_state_counter_{};
     axc::core::CounterPtr role_counter_{};
     axc::core::CounterPtr commit_position_counter_{};
+    axc::core::CounterPtr recovery_state_counter_{};
     axc::core::CounterPtr control_toggle_counter_{};
     axc::core::CounterPtr node_control_toggle_counter_{};
     axc::core::CounterPtr election_state_counter_{};
@@ -192,6 +273,30 @@ private:
     axc::core::SubPtr ipc_ingress_subscription_{};
     std::int64_t leadership_term_id_{NULL_VALUE};
     std::string ingress_endpoints_{};
+
+    // C4c: the S2 seam, timers and commit advance. `ServiceProxy` refers to
+    // `service_send_`, which refers to `control_publication_`, so it is
+    // declared between them (members are destroyed in reverse order).
+    common::ClusterMembers active_members_{};
+    common::ClusterMember this_member_{};
+    std::size_t this_member_index_{0};
+    common::ClusterMember leader_member_{};
+    std::vector<std::int64_t> ranked_positions_{};
+    axc::core::PubPtr control_publication_{};
+    std::unique_ptr<PublicationSend> service_send_{};
+    std::unique_ptr<ServiceProxy> service_proxy_{};
+    std::unique_ptr<ConsensusModuleAdapter> control_adapter_{};
+    std::unique_ptr<common::timer::TimerService> timer_service_{};
+    std::vector<PendingServiceMessageTracker> pending_service_message_trackers_{};
+    ServiceAckQueues service_ack_queues_{};
+    std::vector<std::int64_t> service_client_ids_{};
+    std::int64_t service_ack_id_{0};
+    std::int64_t expected_ack_position_{0};
+    axc::core::Long2LongHashMap expired_timer_count_by_correlation_id_{
+        axc::core::Long2LongHashMap::MIN_CAPACITY, axc::core::Long2LongHashMap::DEFAULT_LOAD_FACTOR, 0};
+    std::deque<std::pair<std::int64_t, std::int64_t>> uncommitted_timers_{};
+    std::int64_t time_of_last_log_update_ns_{0};
+    std::int64_t last_quorum_backtrack_commit_position_{NULL_POSITION};
 
     ConsensusModuleState state_{ConsensusModuleState::init};
     ClusterRole role_{ClusterRole::follower};

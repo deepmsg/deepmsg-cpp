@@ -91,6 +91,11 @@ public:
     void on_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
                                std::span<const std::uint8_t> encoded_credentials);
 
+    /// `onServiceCloseSession` (`:454-476`): the service asked for the session
+    /// to close. The uncommitted-closed-session tracking is C4d.
+    void on_service_close_session(std::int64_t cluster_session_id, bool is_active_leader,
+                                  std::int64_t leadership_term_id);
+
     /// `processAllPendingSessions` (`:550-570`).
     int process_all_pending_sessions(std::int64_t now_ns, std::int32_t leader_member_id,
                                      std::int64_t leadership_term_id);

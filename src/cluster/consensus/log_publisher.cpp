@@ -7,6 +7,7 @@
 #include "io_aeron_cluster_codecs/SessionCloseEvent.h"
 #include "io_aeron_cluster_codecs/SessionMessageHeader.h"
 #include "io_aeron_cluster_codecs/SessionOpenEvent.h"
+#include "io_aeron_cluster_codecs/TimerEvent.h"
 
 namespace deepmsg::cluster::consensus
 {
@@ -158,6 +159,39 @@ bool LogPublisher::append_session_close(ClusterSession& session, std::int64_t le
     } while (--attempts > 0);
 
     return false;
+}
+
+long LogPublisher::append_timer(std::int64_t correlation_id, std::int64_t leadership_term_id, std::int64_t timestamp)
+{
+    if (nullptr == publication_)
+    {
+        return AERON_PUBLICATION_NOT_CONNECTED;
+    }
+
+    const std::size_t length = codecs::MessageHeader::encodedLength() + codecs::TimerEvent::sbeBlockLength();
+
+    long position = 0;
+    int attempts = SEND_ATTEMPTS;
+    do
+    {
+        aeron_buffer_claim_t claim{};
+        position = static_cast<long>(aeron_exclusive_publication_try_claim(publication_.get(), length, &claim));
+        if (position > 0)
+        {
+            codecs::TimerEvent encoder;
+            encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+            encoder.leadershipTermId(leadership_term_id).correlationId(correlation_id).timestamp(timestamp);
+            aeron_buffer_claim_commit(&claim);
+            break;
+        }
+
+        if (is_fatal(position))
+        {
+            break;
+        }
+    } while (--attempts > 0);
+
+    return position;
 }
 
 }  // namespace deepmsg::cluster::consensus

@@ -26,6 +26,7 @@
 #include "io_aeron_cluster_codecs/SessionCloseEvent.h"
 #include "io_aeron_cluster_codecs/SessionMessageHeader.h"
 #include "io_aeron_cluster_codecs/SessionOpenEvent.h"
+#include "io_aeron_cluster_codecs/TimerEvent.h"
 
 namespace
 {
@@ -253,6 +254,21 @@ TEST_F(LogPublisherTest, aSessionCloseEventCarriesTheReason)
     EXPECT_EQ(LEADERSHIP_TERM_ID, decoder.leadershipTermId());
     EXPECT_EQ(CLUSTER_SESSION_ID, decoder.clusterSessionId());
     EXPECT_EQ(codecs::CloseReason::CLIENT_ACTION, decoder.closeReason());
+}
+
+TEST_F(LogPublisherTest, anExpiredTimerIsATimerEventRecord)
+{
+    ASSERT_GT(publisher_.append_timer(4242, LEADERSHIP_TERM_ID, TIMESTAMP), 0);
+
+    const std::vector<std::uint8_t> message = next_message();
+    ASSERT_FALSE(message.empty());
+    auto header = deepmsg::cluster::common::message_header(message);
+    ASSERT_TRUE(header);
+    EXPECT_EQ(codecs::TimerEvent::SBE_TEMPLATE_ID, header->templateId());
+    auto decoder = deepmsg::cluster::common::wrap_body<codecs::TimerEvent>(message, *header);
+    EXPECT_EQ(LEADERSHIP_TERM_ID, decoder.leadershipTermId());
+    EXPECT_EQ(4242, decoder.correlationId());
+    EXPECT_EQ(TIMESTAMP, decoder.timestamp());
 }
 
 }  // namespace

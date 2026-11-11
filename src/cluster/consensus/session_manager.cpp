@@ -430,6 +430,31 @@ void SessionManager::close_session(ClusterSession& session)
     sessions_.erase(id);
 }
 
+void SessionManager::on_service_close_session(std::int64_t cluster_session_id, bool is_active_leader,
+                                              std::int64_t leadership_term_id)
+{
+    ClusterSession* session = find_by_session_id(cluster_session_id);
+    if (nullptr == session)
+    {
+        return;
+    }
+
+    session->closing(codecs::CloseReason::SERVICE_ACTION);
+
+    if (is_active_leader)
+    {
+        const std::int64_t timestamp = now_ms();
+        if (log_publisher_.append_session_close(*session, leadership_term_id, timestamp))
+        {
+            egress_publisher_.send_event(*session, leadership_term_id, config_.member_id, codecs::EventCode::CLOSED,
+                                         "SERVICE_ACTION");
+            session->closed_log_position(log_publisher_.position());
+            // `uncommittedClosedSessions` and the commit sweep are C4d.
+            close_session(*session);
+        }
+    }
+}
+
 void SessionManager::close_sessions()
 {
     for (auto& [id, session] : sessions_)

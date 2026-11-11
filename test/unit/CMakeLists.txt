@@ -3,6 +3,7 @@ axc_add_executable(axc_unit_tests
         core/version_test.cpp
         core/fixed_string_test.cpp
         core/long2long_hash_map_test.cpp
+        core/expandable_ring_buffer_test.cpp
         core/clock_test.cpp
         core/idle_strategy_test.cpp
         core/cpu_affinity_test.cpp
@@ -130,6 +131,10 @@ axc_add_executable(axc_cluster_consensus_unit_tests
         cluster/consensus/session_manager_test.cpp
         cluster/consensus/log_publisher_test.cpp
         cluster/consensus/ingress_adapter_test.cpp
+        cluster/consensus/service_ack_test.cpp
+        cluster/consensus/service_proxy_test.cpp
+        cluster/consensus/pending_service_message_tracker_test.cpp
+        cluster/consensus/consensus_module_adapter_test.cpp
     DEPS
         axc_cluster_consensus
         axc_core
@@ -149,10 +154,10 @@ include(GoogleTest)
 # particular) cannot always be executed by the build step -- on kernels with high
 # ASLR entropy TSan aborts with "unexpected memory mapping" unless run under
 # `setarch -R`.
-gtest_discover_tests(axc_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
-gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
-gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
-gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
-gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
-gtest_discover_tests(axc_cluster_election_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
-gtest_discover_tests(axc_cluster_consensus_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit)
+gtest_discover_tests(axc_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_election_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_consensus_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)

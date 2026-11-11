@@ -60,7 +60,7 @@ public:
 ///
 /// C4b transcribes all six session templates. `AdminRequest` and foreign
 /// schemas are handed to the handler; the agent reports them as not
-/// transcribed yet (C4c) instead of silently dropping them.
+/// transcribed yet (C4e) instead of silently dropping them.
 class IngressAdapter
 {
 public:

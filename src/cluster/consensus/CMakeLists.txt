@@ -9,6 +9,10 @@ axc_add_library(axc_cluster_consensus
         ingress_adapter.cpp
         log_publisher.cpp
         egress_publisher.cpp
+        service_ack.cpp
+        service_proxy.cpp
+        pending_service_message_tracker.cpp
+        consensus_module_adapter.cpp
         module.cpp
     DEPS
         axc_cluster_common

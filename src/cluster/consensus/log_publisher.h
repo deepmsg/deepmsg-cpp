@@ -88,6 +88,12 @@ public:
     [[nodiscard]] bool append_session_close(ClusterSession& session, std::int64_t leadership_term_id,
                                             std::int64_t timestamp) override;
 
+    /// `LogPublisher.appendTimer` (`:242-267`): the `TimerEvent` record an
+    /// expired timer appends. Returns the log position, or the negative
+    /// publication result.
+    [[nodiscard]] long append_timer(std::int64_t correlation_id, std::int64_t leadership_term_id,
+                                    std::int64_t timestamp);
+
     /// The C4b criterion: the ingress payload's bytes that went through an
     /// intermediate copy. `append_message` is `offerv`, so this stays 0.
     [[nodiscard]] std::size_t payload_bytes_copied() const noexcept

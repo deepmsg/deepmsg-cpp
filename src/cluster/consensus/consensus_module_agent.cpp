@@ -1,9 +1,12 @@
 #include "cluster/consensus/consensus_module_agent.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -282,6 +285,14 @@ std::expected<void, Error> ConsensusModuleAgent::on_start()
         return std::unexpected(session_layer.error());
     }
 
+    auto service_control = open_service_control_layer();
+    if (!service_control)
+    {
+        report(service_control.error());
+        (void)mark_file_.signal_failed_start();
+        return std::unexpected(service_control.error());
+    }
+
     state(ConsensusModuleState::active, "started");
     role(ClusterRole::follower);
     time_of_last_update_ns_ = now_ns();
@@ -297,7 +308,27 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
     {
         return std::unexpected(members.error());
     }
-    ingress_endpoints_ = common::ingress_endpoints(*members);
+    active_members_ = std::move(*members);
+    ingress_endpoints_ = common::ingress_endpoints(active_members_);
+
+    auto this_member = common::determine_member(active_members_, config_.member_id, config_.member_endpoints);
+    if (!this_member)
+    {
+        return std::unexpected(this_member.error());
+    }
+    this_member_ = *this_member;
+    leader_member_ = this_member_;
+    // The reference's `thisMember` is the array element itself (so updating it
+    // updates the quorum input); C++ keeps a copy, so remember where it lives.
+    for (std::size_t i = 0; i < active_members_.size(); i++)
+    {
+        if (active_members_[i].id == this_member_.id)
+        {
+            this_member_index_ = i;
+            break;
+        }
+    }
+    ranked_positions_.assign(common::quorum_threshold(static_cast<std::int32_t>(active_members_.size())), 0);
 
     log_publisher_ = std::make_unique<LogPublisher>(config_.log_channel);
     auto log_publication_add = client_.add_exclusive_publication(config_.log_channel, config_.log_stream_id);
@@ -342,6 +373,57 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
         session_config, client_, *log_publisher_, *egress_publisher_, authenticator_, authorisation_service_,
         [this]() { return now_ns(); }, [this]() { return now_ms(); },
         [this]() { counter_increment(timed_out_client_counter_); }, [this](const Error& error) { report(error); });
+    return {};
+}
+
+std::expected<void, Error> ConsensusModuleAgent::open_service_control_layer()
+{
+    // `ConsensusModuleAgent` constructor (`:263-275`): the control-channel
+    // publication (service stream) and subscription (consensus-module stream),
+    // then one tracker per service.
+    auto publication_add = client_.add_publication(config_.control_channel, config_.service_stream_id);
+    auto publication = await_handle(client_, publication_add, ASYNC_ADD_TIMEOUT_NS);
+    if (!publication)
+    {
+        return std::unexpected(publication.error());
+    }
+    control_publication_ = std::move(*publication);
+    service_send_ = std::make_unique<PublicationSend>(control_publication_.get());
+    service_proxy_ = std::make_unique<ServiceProxy>(*service_send_, *this);
+
+    auto subscription_add = client_.add_subscription(config_.control_channel, config_.consensus_module_stream_id);
+    auto subscription = await_handle(client_, subscription_add, ASYNC_ADD_TIMEOUT_NS);
+    if (!subscription)
+    {
+        return std::unexpected(subscription.error());
+    }
+    control_adapter_ = std::make_unique<ConsensusModuleAdapter>(*this, FRAGMENT_LIMIT);
+    control_adapter_->connect(std::move(*subscription));
+
+    const auto service_count = static_cast<std::size_t>(config_.service_count);
+    service_ack_queues_ = new_array_of_queues(service_count);
+    service_client_ids_.assign(service_count, NULL_VALUE);
+
+    pending_service_message_trackers_.clear();
+    pending_service_message_trackers_.reserve(service_count);
+    for (std::size_t service_id = 0; service_id < service_count; service_id++)
+    {
+        pending_service_message_trackers_.emplace_back(static_cast<std::int32_t>(service_id), *log_publisher_,
+                                                       [this]() { return now_ms(); });
+    }
+
+    // `ConsensusModule.Context.getTimerServiceSupplierFromSystemProperty`
+    // (`ConsensusModule.java:4653-4673`): the default wheel starts at 0 and
+    // rounds the nanosecond resolution up to a power of two in cluster units.
+    auto kind = common::timer::timer_service_kind(config_.timer_service_supplier);
+    if (!kind)
+    {
+        return std::unexpected(kind.error());
+    }
+    timer_service_ = common::timer::make_timer_service(
+        *kind, common::timer::ClusterTimeUnit::millis, 0,
+        common::timer::wheel_tick_resolution(config_.wheel_tick_resolution_ns, common::timer::ClusterTimeUnit::millis),
+        config_.ticks_per_wheel);
     return {};
 }
 
@@ -476,6 +558,40 @@ std::expected<void, Error> ConsensusModuleAgent::allocate_counters()
     }
     cycle_threshold_exceeded_counter_ = std::move(*exceeded);
 
+    // `RecoveryState.allocate` (`service/RecoveryState.java`): the container's
+    // second handshake. A first start has no snapshot, so the key is the term,
+    // a zero log position and timestamp, the cluster id and zero snapshot
+    // recording ids (28 bytes). C4d rewrites it from the recovery plan.
+    {
+        std::array<std::uint8_t, 28> key{};
+        const auto put_i64 = [&key](std::size_t offset, std::int64_t value)
+        {
+            const auto bits = static_cast<std::uint64_t>(value);
+            for (std::size_t i = 0; i < sizeof(std::uint64_t); i++)
+            {
+                key[offset + i] = static_cast<std::uint8_t>(bits >> (8 * i));
+            }
+        };
+        put_i64(0, NULL_VALUE);
+        put_i64(8, 0);
+        put_i64(16, 0);
+        const auto cluster_bits = static_cast<std::uint32_t>(config_.cluster_id);
+        key[24] = static_cast<std::uint8_t>(cluster_bits);
+        key[25] = static_cast<std::uint8_t>(cluster_bits >> 8);
+        key[26] = static_cast<std::uint8_t>(cluster_bits >> 16);
+        key[27] = static_cast<std::uint8_t>(cluster_bits >> 24);
+
+        auto add = client_.add_counter(common::CLUSTER_RECOVERY_STATE_TYPE_ID, key,
+                                       "Cluster recovery: leadershipTermId=" + std::to_string(NULL_VALUE) +
+                                           " logPosition=0 clusterId=" + std::to_string(config_.cluster_id));
+        auto recovery_state = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
+        if (!recovery_state)
+        {
+            return std::unexpected(recovery_state.error());
+        }
+        recovery_state_counter_ = std::move(*recovery_state);
+    }
+
     // The state counter starts at INIT (0), as `AtomicCounter` allocation does.
     counter_set(module_state_counter_, state_code(ConsensusModuleState::init));
     counter_set(role_counter_, role_code(ClusterRole::follower));
@@ -600,23 +716,117 @@ int ConsensusModuleAgent::poll_archive_error_response() noexcept
     return 0;
 }
 
-int ConsensusModuleAgent::consensus_work(std::int64_t /*timestamp*/, std::int64_t /*now_ns*/) noexcept
+int ConsensusModuleAgent::consensus_work(std::int64_t timestamp, std::int64_t now_ns) noexcept
 {
     // `ConsensusModuleAgent.consensusWork:2499-2540`: the leader's active
-    // branch polls ingress. `updateLeaderPosition`, commit/service acks and the
-    // follower branch are C4c/C4d.
-    if (nullptr == session_manager_ || ClusterRole::leader != role_ || state_ != ConsensusModuleState::active)
+    // branch polls timers, the pending service messages and ingress, then
+    // advances the commit position; the service-control stream is polled on
+    // every round (`:2553`). The follower log branch is C4d.
+    int work_count = 0;
+
+    if (ClusterRole::leader == role_)
+    {
+        if (state_ == ConsensusModuleState::active)
+        {
+            if (nullptr != timer_service_)
+            {
+                work_count += timer_service_->poll(timestamp, *this);
+            }
+            for (PendingServiceMessageTracker& tracker : pending_service_message_trackers_)
+            {
+                work_count += tracker.poll();
+            }
+            if (nullptr != ingress_adapter_)
+            {
+                auto polled = ingress_adapter_->poll();
+                if (!polled)
+                {
+                    report(polled.error());
+                }
+                else
+                {
+                    work_count += *polled;
+                }
+            }
+        }
+
+        work_count += update_leader_position(now_ns);
+    }
+
+    if (nullptr != control_adapter_)
+    {
+        auto polled = control_adapter_->poll();
+        if (!polled)
+        {
+            report(polled.error());
+        }
+        else
+        {
+            work_count += *polled;
+        }
+    }
+
+    return work_count;
+}
+
+int ConsensusModuleAgent::update_leader_position(std::int64_t now_ns) noexcept
+{
+    // `ConsensusModuleAgent.quorumPositionBoundedByLeaderLog:2915-2928` and
+    // `updateLeaderPosition:2903-2940`. C4c has no archive recording of the
+    // log, so the publication's position is the leader's append position;
+    // C4d replaces it with the `RecordingPos` counter.
+    if (nullptr == log_publisher_ || active_members_.empty())
     {
         return 0;
     }
 
-    auto polled = ingress_adapter_->poll();
-    if (!polled)
+    const std::int64_t leader_append_position = log_publisher_->position();
+    this_member_.log_position = leader_append_position;
+    this_member_.time_of_last_append_position_ns = now_ns;
+    if (this_member_index_ < active_members_.size())
     {
-        report(polled.error());
-        return 0;
+        active_members_[this_member_index_].log_position = leader_append_position;
+        active_members_[this_member_index_].time_of_last_append_position_ns = now_ns;
     }
-    return *polled;
+
+    const std::int64_t quorum_position =
+        common::quorum_position(active_members_, ranked_positions_, now_ns, config_.leader_heartbeat_timeout_ns);
+    const std::int64_t commit = std::min(quorum_position, leader_append_position);
+
+    const std::int64_t leader_commit_position = commit_position();
+    if (commit > leader_commit_position ||
+        now_ns >= (time_of_last_log_update_ns_ + config_.leader_heartbeat_interval_ns))
+    {
+        if (commit < leader_commit_position && leader_commit_position > last_quorum_backtrack_commit_position_)
+        {
+            last_quorum_backtrack_commit_position_ = leader_commit_position;
+            report(make_error(ErrorCode::internal_error, "quorum position went backwards: leaderCommitPosition=" +
+                                                             std::to_string(leader_commit_position) +
+                                                             " quorumPosition=" + std::to_string(commit)));
+        }
+
+        counter_propose_max(commit_position_counter_, commit);
+        time_of_last_log_update_ns_ = now_ns;
+        sweep_uncommitted_entries_to(commit);
+        return 1;
+    }
+
+    return 0;
+}
+
+void ConsensusModuleAgent::sweep_uncommitted_entries_to(std::int64_t commit_position) noexcept
+{
+    // `ConsensusModuleAgent.sweepUncommittedEntriesTo:3016-3028`. The session
+    // half (`SessionManager.sweepUncommittedSessions`) is C4d.
+    for (PendingServiceMessageTracker& tracker : pending_service_message_trackers_)
+    {
+        tracker.sweep_leader_messages(commit_position);
+    }
+
+    while (!uncommitted_timers_.empty() && uncommitted_timers_.front().first <= commit_position)
+    {
+        uncommitted_timers_.pop_front();
+    }
 }
 
 void ConsensusModuleAgent::measure_duty_cycle(std::int64_t now_ns) noexcept
@@ -730,7 +940,7 @@ void ConsensusModuleAgent::on_admin_request(std::int64_t leadership_term_id, std
     (void)cluster_session_id;
     (void)correlation_id;
     report(make_error(ErrorCode::internal_error,
-                      "admin request type=" + std::to_string(request_type) + " is not transcribed yet (C4c)"));
+                      "admin request type=" + std::to_string(request_type) + " is not transcribed yet (C4e)"));
 }
 
 void ConsensusModuleAgent::on_extension_message(std::int32_t schema_id, std::int32_t template_id,
@@ -741,6 +951,232 @@ void ConsensusModuleAgent::on_extension_message(std::int32_t schema_id, std::int
                                                      " (templateId=" + std::to_string(template_id) + ")"));
 }
 
+void ConsensusModuleAgent::leadership_term_id(std::int64_t leadership_term_id)
+{
+    leadership_term_id_ = leadership_term_id;
+    counter_set(leadership_term_counter_, leadership_term_id);
+    for (PendingServiceMessageTracker& tracker : pending_service_message_trackers_)
+    {
+        tracker.leadership_term_id(leadership_term_id);
+    }
+}
+
+std::int64_t ConsensusModuleAgent::append_position() const noexcept
+{
+    return nullptr == log_publisher_ ? 0 : log_publisher_->position();
+}
+
+std::expected<void, Error> ConsensusModuleAgent::join_log_as_leader(std::int64_t term, std::int64_t log_position,
+                                                                    std::int32_t log_session_id, bool is_startup)
+{
+    if (nullptr == service_proxy_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "the service control layer is not open"));
+    }
+
+    leadership_term_id(term);
+
+    // `ConsensusModuleAgent.electionComplete:1921-1931`, leader branch: the
+    // timer wheel starts at the cluster's current time and the commit keepalive
+    // is due immediately. C4d moves this into the Election.
+    if (nullptr != timer_service_)
+    {
+        timer_service_->current_time(now_ms());
+    }
+    time_of_last_log_update_ns_ = now_ns() - config_.leader_heartbeat_interval_ns;
+
+    // The reference records the log through the archive and waits for the
+    // `RecordingPos` counter (`startLogRecording` / `tryCreateAppendPosition`,
+    // C4d); the configured channel and the publication's own position carry
+    // C4c.
+    auto joined = service_proxy_->join_log(log_position, std::numeric_limits<std::int64_t>::max(), config_.member_id,
+                                           log_session_id, config_.log_stream_id, is_startup, ClusterRole::leader,
+                                           config_.log_channel, false);
+    if (!joined)
+    {
+        return joined;
+    }
+
+    expected_ack_position_ = log_position;
+    return {};
+}
+
+std::expected<bool, Error> ConsensusModuleAgent::service_acks_reached()
+{
+    auto reached = has_reached(expected_ack_position_, service_ack_id_, service_ack_queues_);
+    if (!reached)
+    {
+        return reached;
+    }
+    if (*reached)
+    {
+        remove_head(service_ack_queues_);
+        ++service_ack_id_;
+    }
+    return reached;
+}
+
+std::expected<void, Error> ConsensusModuleAgent::capture_service_ack(std::int64_t log_position, std::int64_t ack_id,
+                                                                     std::int64_t relevant_id, std::int32_t service_id)
+{
+    if (0 == ack_id && NULL_VALUE != service_client_ids_[static_cast<std::size_t>(service_id)])
+    {
+        return std::unexpected(make_error(
+            ErrorCode::protocol_error,
+            "initial ack already received from service: possible duplicate serviceId=" + std::to_string(service_id)));
+    }
+
+    service_ack_queues_[static_cast<std::size_t>(service_id)].push_back(ServiceAck{ack_id, log_position, relevant_id});
+    return {};
+}
+
+std::expected<void, Error> ConsensusModuleAgent::on_service_message(std::int64_t cluster_session_id,
+                                                                    std::span<const std::uint8_t> message)
+{
+    // 1.54.0 `8554648566` (`ConsensusModuleAgent.java:1443-1456`): an unknown
+    // service id is reported and dropped, never indexed.
+    const std::int32_t service_id = PendingServiceMessageTracker::service_id_from_service_message(cluster_session_id);
+    if (service_id < 0 || service_id >= static_cast<std::int32_t>(pending_service_message_trackers_.size()))
+    {
+        report(make_error(ErrorCode::protocol_error,
+                          "service message dropped, unknown serviceId=" + std::to_string(service_id) +
+                              " clusterSessionId=" + std::to_string(cluster_session_id) +
+                              " serviceCount=" + std::to_string(pending_service_message_trackers_.size())));
+        return {};
+    }
+
+    return pending_service_message_trackers_[static_cast<std::size_t>(service_id)].enqueue_message(message);
+}
+
+std::expected<void, Error> ConsensusModuleAgent::on_service_close_session(std::int64_t cluster_session_id)
+{
+    if (nullptr != session_manager_)
+    {
+        session_manager_->on_service_close_session(
+            cluster_session_id, ClusterRole::leader == role_ && ConsensusModuleState::active == state_,
+            leadership_term_id_);
+    }
+    return {};
+}
+
+void ConsensusModuleAgent::on_schedule_timer(std::int64_t correlation_id, std::int64_t deadline)
+{
+    // `ConsensusModuleAgent.onScheduleTimer:1457-1468`: a timer that already
+    // expired during replay is counted down instead of scheduled again.
+    const std::int64_t expired = expired_timer_count_by_correlation_id_.get(correlation_id, 0);
+    if (0 == expired)
+    {
+        if (nullptr != timer_service_)
+        {
+            timer_service_->schedule_timer_for_correlation_id(correlation_id, deadline);
+        }
+        return;
+    }
+
+    if (1 == expired)
+    {
+        (void)expired_timer_count_by_correlation_id_.remove(correlation_id);
+    }
+    else
+    {
+        (void)expired_timer_count_by_correlation_id_.put(correlation_id, expired - 1);
+    }
+}
+
+void ConsensusModuleAgent::on_cancel_timer(std::int64_t correlation_id)
+{
+    if (nullptr != timer_service_)
+    {
+        (void)timer_service_->cancel_timer_by_correlation_id(correlation_id);
+    }
+}
+
+std::expected<void, Error> ConsensusModuleAgent::on_service_ack(std::int64_t log_position, std::int64_t /*timestamp*/,
+                                                                std::int64_t ack_id, std::int64_t relevant_id,
+                                                                std::int32_t service_id)
+{
+    // 1.54.0 `8554648566` (`ConsensusModuleAgent.java:1474-1485`).
+    if (service_id < 0 || service_id >= static_cast<std::int32_t>(service_ack_queues_.size()))
+    {
+        report(make_error(ErrorCode::protocol_error,
+                          "service ack dropped, unknown serviceId=" + std::to_string(service_id) + " ackId=" +
+                              std::to_string(ack_id) + " serviceCount=" + std::to_string(service_ack_queues_.size())));
+        return {};
+    }
+
+    auto captured = capture_service_ack(log_position, ack_id, relevant_id, service_id);
+    if (!captured)
+    {
+        return captured;
+    }
+
+    auto reached = has_reached(log_position, service_ack_id_, service_ack_queues_);
+    if (!reached)
+    {
+        return std::unexpected(reached.error());
+    }
+
+    if (!*reached)
+    {
+        return {};
+    }
+
+    switch (state_)
+    {
+        case ConsensusModuleState::snapshot:
+        case ConsensusModuleState::quitting:
+        case ConsensusModuleState::terminating:
+            // `snapshotOnServiceAck` / `closeAndTerminate` /
+            // `terminateOnServiceAck` are C4d/C4e; a state that needs them
+            // must not be silent here.
+            report(make_error(ErrorCode::internal_error, std::string{"service ack in state "} +
+                                                             std::string{state_name(state_)} +
+                                                             " is not transcribed yet (C4d/C4e)"));
+            break;
+        default:
+            break;
+    }
+
+    return {};
+}
+
+std::expected<void, Error> ConsensusModuleAgent::on_cluster_members_query(std::int64_t correlation_id,
+                                                                          bool is_extended_request)
+{
+    if (nullptr == service_proxy_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "the service control layer is not open"));
+    }
+
+    if (is_extended_request)
+    {
+        service_proxy_->cluster_members_extended_response(correlation_id, now_ms(), leader_member_.id,
+                                                          config_.member_id, active_members_);
+    }
+    else
+    {
+        service_proxy_->cluster_members_response(correlation_id, leader_member_.id,
+                                                 common::encode_cluster_members(active_members_));
+    }
+    return {};
+}
+
+bool ConsensusModuleAgent::on_timer_event(std::int64_t correlation_id)
+{
+    // `ConsensusModuleAgent.onTimerEvent:889-900`: a `TimerEvent` record in
+    // the log, remembered until the commit position passes it.
+    const long append_position = nullptr == log_publisher_
+                                     ? AERON_PUBLICATION_NOT_CONNECTED
+                                     : log_publisher_->append_timer(correlation_id, leadership_term_id_, now_ms());
+    if (append_position > 0)
+    {
+        uncommitted_timers_.emplace_back(append_position, correlation_id);
+        return true;
+    }
+
+    return false;
+}
+
 void ConsensusModuleAgent::on_close() noexcept
 {
     if (!started_ || closed_)
@@ -749,6 +1185,12 @@ void ConsensusModuleAgent::on_close() noexcept
     }
 
     closed_ = true;
+    // `ConsensusModuleAgent.onClose:286-292`: services are told the final
+    // commit position before the resources go away.
+    if (config_.service_count > 0 && nullptr != service_proxy_)
+    {
+        service_proxy_->termination_position(commit_position(), false);
+    }
     if (nullptr != session_manager_)
     {
         // `SessionManager.closeSessions` (`SessionManager.java:1063-1068`).
@@ -770,6 +1212,16 @@ void ConsensusModuleAgent::close_resources() noexcept
     session_manager_.reset();
     ingress_adapter_.reset();
     egress_publisher_.reset();
+
+    // C4c: the control adapter owns the subscription; the proxy refers to
+    // `service_send_`, which refers to the publication.
+    timer_service_.reset();
+    pending_service_message_trackers_.clear();
+    control_adapter_.reset();
+    service_proxy_.reset();
+    service_send_.reset();
+    control_publication_.reset();
+
     log_publisher_.reset();
 
     if (nullptr != archive_)
@@ -787,6 +1239,26 @@ void ConsensusModuleAgent::close_resources() noexcept
         aeron_distinct_error_log_close(&error_log_);
         error_log_initialised_ = false;
     }
+
+    // Every handle closes through the client's conductor, so all of them must
+    // be released while the client is still open. `on_close` calls this before
+    // `client_.close()`; without this block the counter destructors ran after
+    // the client was gone and `aeron_counter_close` dereferenced a stale
+    // conductor (one crash in ~40 starts of the CM interop test).
+    recovery_state_counter_.reset();
+    cycle_threshold_exceeded_counter_.reset();
+    max_cycle_time_counter_.reset();
+    timed_out_client_counter_.reset();
+    snapshot_counter_.reset();
+    leadership_term_counter_.reset();
+    election_count_counter_.reset();
+    election_state_counter_.reset();
+    node_control_toggle_counter_.reset();
+    control_toggle_counter_.reset();
+    commit_position_counter_.reset();
+    role_counter_.reset();
+    module_state_counter_.reset();
+    error_counter_.reset();
 }
 
 }  // namespace deepmsg::cluster::consensus

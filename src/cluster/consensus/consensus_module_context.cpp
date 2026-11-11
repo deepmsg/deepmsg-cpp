@@ -344,7 +344,7 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
     config.ingress_ipc_allowed = parse_bool(properties, INGRESS_IPC_ALLOWED_PROP_NAME, config.ingress_ipc_allowed);
 
     // Names owned by later cards: `aeron.cluster.clock` and the supplier names
-    // are C4b/C4f, `cpu.affinity` and the control toggles are C4c/C4f,
+    // are C4b/C4f, `cpu.affinity` and the control toggles are C4e/C4f,
     // `replication.progress.*` and the standby notification delay are C4d.
     // `common::cluster_name_table()` carries their disposition, so they are
     // never silent even though this struct does not read them yet.
