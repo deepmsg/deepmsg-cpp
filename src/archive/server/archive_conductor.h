@@ -245,10 +245,16 @@ public:
         return sessions_.size();
     }
 
-    /// Live recording sessions (`ctx.numActiveRecordings`).
+    /// Live recording sessions (`ctx.numActiveRecordings`), across every
+    /// recorder agent (one in the reference shape).
     [[nodiscard]] std::size_t recording_session_count() const noexcept
     {
-        return recorder_.size();
+        std::size_t count = 0;
+        for (const auto& recorder : recorders_)
+        {
+            count += recorder->size();
+        }
+        return count;
     }
 
     /// Live replay sessions (`ctx.numActiveReplays`).
@@ -264,11 +270,20 @@ public:
         return ArchiveThreadingMode::dedicated == context_.threading.mode;
     }
 
-    /// The two worker agents (`DedicatedModeArchiveConductor.newRecorder` /
+    /// The worker agents (`DedicatedModeArchiveConductor.newRecorder` /
     /// `newReplayer`); the runtime starts them on their own threads.
+    ///
+    /// `recorder()` is the first one (the only one in the reference shape);
+    /// `recorders()` is the C++ extension's N agents
+    /// (`deepmsg.archive.recorder.threads`, P-A9).
     [[nodiscard]] Recorder& recorder() noexcept
     {
-        return recorder_;
+        return *recorders_.front();
+    }
+
+    [[nodiscard]] std::vector<std::unique_ptr<Recorder>>& recorders() noexcept
+    {
+        return recorders_;
     }
 
     [[nodiscard]] Replayer& replayer() noexcept
@@ -387,6 +402,22 @@ private:
                                                                             std::string_view role,
                                                                             std::int64_t threshold_ns);
 
+    /// A6f-2: the single writer of the type 105/106/107 counters. Sums the
+    /// per-recorder locals and publishes only if some recorder did work this
+    /// pass (the reference's `Recorder.doWork` condition).
+    void publish_recording_metrics() noexcept;
+
+    /// P-A9 dispatch (`plan-a6f-multi-recorder.md` §6 Q2): `recording_id % N`.
+    [[nodiscard]] std::size_t recorder_index_for(std::int64_t recording_id) const noexcept
+    {
+        return dispatch_recording_index(recording_id, recorders_.size());
+    }
+
+    [[nodiscard]] Recorder& recorder_for(std::int64_t recording_id) noexcept
+    {
+        return *recorders_[recorder_index_for(recording_id)];
+    }
+
     /// `ArchiveConductor.extendRecording` (`ArchiveConductor.java:1067-1151`):
     /// validation, the recording-subscription add and the OK/ERROR, shared by
     /// the wire handler and a replication session (which passes its
@@ -456,12 +487,17 @@ private:
 
     // Recording (A2b).
     Catalog catalog_;
-    /// `ArchiveConductor.java:224-225`: one events publication for every
-    /// recording session (null when `aeron.archive.recording.events.enabled`
-    /// is false).
-    std::unique_ptr<DeepmsgExclusivePublication> events_publication_;
-    std::optional<RecordingEvents> events_;
-    Recorder recorder_;
+    /// `ArchiveConductor.java:224-225`: one events publication shared by every
+    /// recording session (empty when `aeron.archive.recording.events.enabled`
+    /// is false). A6f-3: one per recorder, because a publication has one writer.
+    std::vector<std::unique_ptr<DeepmsgExclusivePublication>> events_publications_;
+    std::vector<std::unique_ptr<RecordingEvents>> events_;
+    /// `ctx.numRecorderThreads()`: one `Recorder` in the reference shape, N with
+    /// `deepmsg.archive.recorder.threads` (C++ extension, P-A9).
+    std::vector<std::unique_ptr<Recorder>> recorders_;
+    /// The same recorders as raw pointers, built once in `init()` so the
+    /// per-pass sum does not allocate.
+    std::vector<Recorder*> recorder_handles_;
     std::optional<axc::core::PositionWriterTarget> max_write_time_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_bytes_counter_;
     std::optional<axc::core::PositionWriterTarget> total_write_time_counter_;
@@ -536,12 +572,14 @@ private:
     SystemReplayClock replay_clock_{cached_clock_};
 
     // DEDICATED handoff (A5a).
-    axc::core::ManyToOneQueue<RecordingSession> recording_inbox_;
+    /// One inbox per recorder (a `ManyToOneQueue` has exactly one consumer); the
+    /// close queue stays single because its consumer is the conductor.
+    std::vector<std::unique_ptr<axc::core::ManyToOneQueue<RecordingSession>>> recording_inboxes_;
     axc::core::ManyToOneQueue<ReplaySession> replay_inbox_;
     axc::core::ManyToOneQueue<RecordingSession> recording_close_queue_;
     axc::core::ManyToOneQueue<ReplaySession> replay_close_queue_;
     DutyCycleTrackers conductor_duty_cycle_;
-    DutyCycleTrackers recorder_duty_cycle_;
+    std::vector<std::unique_ptr<DutyCycleTrackers>> recorder_duty_cycles_;
     DutyCycleTrackers replayer_duty_cycle_;
 
     // Replication (A4b).

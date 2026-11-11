@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "archive/server/archive_conductor.h"
 #include "archive/server/archive_config.h"
@@ -233,10 +234,12 @@ private:
     std::unique_ptr<ArchiveConductor> conductor_;
     LoggingErrorHandler error_handler_;
     std::unique_ptr<ConductorAgent> conductor_agent_;
-    std::unique_ptr<RecorderAgent> recorder_agent_;
+    /// `deepmsg.archive.recorder.threads` recorder agents (one in the reference
+    /// shape; P-A9).
+    std::vector<std::unique_ptr<RecorderAgent>> recorder_agents_;
     std::unique_ptr<ReplayerAgent> replayer_agent_;
     std::unique_ptr<axc::core::AgentRunner<ConductorAgent>> conductor_runner_;
-    std::unique_ptr<axc::core::AgentRunner<RecorderAgent>> recorder_runner_;
+    std::vector<std::unique_ptr<axc::core::AgentRunner<RecorderAgent>>> recorder_runners_;
     std::unique_ptr<axc::core::AgentRunner<ReplayerAgent>> replayer_runner_;
     /// `init()` signalled the mark file ready.
     bool started_{false};

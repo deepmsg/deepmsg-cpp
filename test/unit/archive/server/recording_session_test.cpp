@@ -268,26 +268,58 @@ TEST_F(RecordingSessionTest, abortStopsTheSessionWithoutTouchingTheImage)
     EXPECT_TRUE(session.is_done());
 }
 
-TEST_F(RecordingSessionTest, theRecorderPublishesOnlyOnAPassThatDidWork)
+// A6f: sessions are dealt to the N recorder agents by `recording_id % N`
+// (`plan-a6f-multi-recorder.md` §6 Q2); the mutant that always picks 0 must
+// make this fail.
+TEST_F(RecordingSessionTest, recordingSessionsAreDealtByRecordingIdModuloRecorders)
+{
+    using deepmsg::archive::server::dispatch_recording_index;
+    EXPECT_EQ(0U, dispatch_recording_index(0, 2));
+    EXPECT_EQ(1U, dispatch_recording_index(1, 2));
+    EXPECT_EQ(0U, dispatch_recording_index(2, 2));
+    EXPECT_EQ(1U, dispatch_recording_index(5, 4));
+    EXPECT_EQ(3U, dispatch_recording_index(7, 4));
+    EXPECT_EQ(0U, dispatch_recording_index(9, 1));
+}
+
+// A6f-2: the recorders keep per-thread locals and the conductor is the one
+// writer of the archive-level counters. The reference's condition still holds:
+// only a pass in which some recorder did work publishes.
+TEST_F(RecordingSessionTest, theConductorPublishesOnlyOnAPassThatDidWork)
 {
     FakeCounter bytes;
     FakeCounter total_time;
     FakeCounter max_time;
-    Recorder recorder;
-    recorder.set_counters(&bytes, &total_time, &max_time);
+    Recorder first;
+    Recorder second;
+    Recorder* recorders[] = {&first, &second};
 
-    EXPECT_EQ(0, recorder.do_work([](RecordingSession&) {}));
+    const auto publish = [&]()
+    {
+        const auto summary = Recorder::summarise(recorders, 2);
+        if (summary.worked)
+        {
+            bytes.set_value(summary.bytes);
+            total_time.set_value(summary.time_ns);
+            max_time.set_value(summary.max_ns);
+        }
+    };
+
+    publish();
     EXPECT_EQ(0, bytes.value());
 
-    recorder.bytes_written(128);
-    recorder.write_time_ns(50);
+    first.bytes_written(128);
+    first.write_time_ns(50);
+    second.bytes_written(64);
+    second.write_time_ns(70);
 
-    // No session, no work: the metrics stay unpublished (`AeronStat` does not
-    // see them move on an idle pass).
-    EXPECT_EQ(0, recorder.do_work([](RecordingSession&) {}));
+    // Bytes without a work pass stay unpublished (`AeronStat` does not see them
+    // move on an idle pass).
+    publish();
     EXPECT_EQ(0, bytes.value());
 
-    // A session's first pass (INIT -> RECORDING) counts as work.
+    // A session's first pass (INIT -> RECORDING) on the second recorder counts
+    // as work and publishes the sum of both locals.
     auto image_owner = std::make_unique<FakeImage>(7, 1);
     RecordingWriterContext context;
     context.archive_dir = archive_dir_.string();
@@ -298,13 +330,20 @@ TEST_F(RecordingSessionTest, theRecorderPublishesOnlyOnAPassThatDidWork)
     config.term_length = 1024;
     config.block_length_limit = 1024;
 
-    recorder.add_session(std::make_unique<RecordingSession>(std::move(config), std::move(writer),
-                                                            std::make_unique<FakeCounter>(), std::move(image_owner)));
+    second.add_session(std::make_unique<RecordingSession>(std::move(config), std::move(writer),
+                                                          std::make_unique<FakeCounter>(), std::move(image_owner)));
 
-    EXPECT_EQ(1, recorder.do_work([](RecordingSession&) {}));
-    EXPECT_EQ(128, bytes.value());
-    EXPECT_EQ(50, total_time.value());
-    EXPECT_EQ(50, max_time.value());
+    EXPECT_EQ(1, second.do_work([](RecordingSession&) {}));
+    publish();
+    EXPECT_EQ(192, bytes.value());
+    EXPECT_EQ(120, total_time.value());
+    EXPECT_EQ(70, max_time.value());
+
+    // The work flag was consumed by the summarise; a later pass with bytes but
+    // no work does not publish.
+    second.bytes_written(1);
+    publish();
+    EXPECT_EQ(192, bytes.value());
 }
 
 TEST_F(RecordingSessionTest, emitsStartedProgressAndStoppedEvents)

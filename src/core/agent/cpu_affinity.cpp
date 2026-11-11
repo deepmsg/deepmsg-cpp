@@ -137,6 +137,45 @@ std::size_t CpuAffinity::count() const noexcept
     return total;
 }
 
+CpuAffinity CpuAffinity::nth(std::size_t n) const noexcept
+{
+    if (mode_ == Mode::none)
+    {
+        return none();
+    }
+
+    if (mode_ == Mode::index)
+    {
+        // `n` behind the configured index; the allowed-cpuset bounds are
+        // checked when the affinity is applied.
+        CpuAffinity affinity;
+        affinity.mode_ = Mode::index;
+        affinity.index_ = index_ + static_cast<int>(n);
+        return affinity;
+    }
+
+    std::size_t seen = 0;
+    for (std::size_t word = 0; word < bits_.size(); ++word)
+    {
+        std::uint64_t remaining = bits_[word];
+        while (0 != remaining)
+        {
+            const int bit = static_cast<int>(__builtin_ctzll(remaining));
+            if (seen == n)
+            {
+                CpuAffinity affinity;
+                affinity.mode_ = Mode::set;
+                affinity.bits_[word] = static_cast<std::uint64_t>(1) << bit;
+                return affinity;
+            }
+            ++seen;
+            remaining &= remaining - 1;
+        }
+    }
+
+    return none();
+}
+
 bool CpuAffinity::apply_to_current_thread() const noexcept
 {
     if (mode_ == Mode::none)

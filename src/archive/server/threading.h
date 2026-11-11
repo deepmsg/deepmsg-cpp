@@ -49,12 +49,21 @@ enum class AgentRole
 /// `ArchiveThreadingMode.name()`: the duty-cycle labels carry it.
 [[nodiscard]] std::string_view threading_mode_name(ArchiveThreadingMode mode) noexcept;
 
+/// Upper bound for the C++ extension `deepmsg.archive.recorder.threads`.
+constexpr std::int32_t MAX_RECORDER_THREADS = 32;
+
 /// The three idle strategies, three affinities and three cycle thresholds
 /// (`Archive.java:404-449`, `:571-601`, `:1489-1545`).
 struct ThreadingSettings
 {
     ArchiveThreadingMode mode{ArchiveThreadingMode::dedicated};
     ThreadNaming naming{ThreadNaming::classic};
+
+    /// `deepmsg.archive.recorder.threads` (C++ extension, P-A9): how many
+    /// recorder agents DEDICATED mode starts. 1 is the reference's shape; the
+    /// recording sessions are dealt to them by `recording_id % N`
+    /// (`analysis/cpp/plan-a6f-multi-recorder.md` §6 Q2).
+    std::int32_t recorder_threads{1};
 
     axc::core::IdleStrategy idle;
     /// Unset ⇒ falls back to `idle` (`Archive.java:1489-1507`).

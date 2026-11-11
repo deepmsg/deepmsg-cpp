@@ -102,6 +102,60 @@ TEST(ThreadingTest, thresholdsAndAffinitiesAreParsed)
     EXPECT_FALSE(settings->replayer_affinity.any());
 }
 
+// A6f: `deepmsg.archive.recorder.threads` is the C++ extension P-A9 asks for;
+// one recorder is the reference shape and the default.
+TEST(ThreadingTest, recorderThreadsDefaultToOneAndParse)
+{
+    axc::core::PropertySource source;
+    auto settings = parse_threading_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+    EXPECT_EQ(1, settings->recorder_threads);
+
+    source.set("deepmsg.archive.recorder.threads", "4");
+    settings = parse_threading_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+    EXPECT_EQ(4, settings->recorder_threads);
+
+    source.set("deepmsg.archive.recorder.threads", "32");
+    settings = parse_threading_settings(source);
+    ASSERT_TRUE(settings.has_value()) << settings.error().message.view();
+    EXPECT_EQ(32, settings->recorder_threads);
+}
+
+TEST(ThreadingTest, recorderThreadsOutsideTheRangeAreRefused)
+{
+    for (const auto* value : {"0", "33", "-1", "two", "", "2x"})
+    {
+        axc::core::PropertySource source;
+        source.set("deepmsg.archive.recorder.threads", value);
+
+        const auto settings = parse_threading_settings(source);
+        ASSERT_FALSE(settings.has_value()) << value;
+        EXPECT_NE(std::string::npos,
+                  std::string{settings.error().message.view()}.find("deepmsg.archive.recorder.threads"));
+    }
+}
+
+// A second recorder only means something when there are worker threads to
+// multiply: SHARED/INVOKER are driven by the caller (`Archive.java:148-170`).
+TEST(ThreadingTest, moreThanOneRecorderRequiresDedicated)
+{
+    axc::core::PropertySource source;
+    source.set("aeron.archive.threading.mode", "SHARED");
+    source.set("deepmsg.archive.recorder.threads", "2");
+
+    const auto settings = parse_threading_settings(source);
+    ASSERT_FALSE(settings.has_value());
+    EXPECT_NE(std::string::npos, std::string{settings.error().message.view()}.find("deepmsg.archive.recorder.threads"));
+
+    source.set("deepmsg.archive.recorder.threads", "1");
+    EXPECT_TRUE(parse_threading_settings(source).has_value());
+
+    source.set("aeron.archive.threading.mode", "DEDICATED");
+    source.set("deepmsg.archive.recorder.threads", "2");
+    EXPECT_TRUE(parse_threading_settings(source).has_value());
+}
+
 TEST(ThreadingTest, badValuesCarryThePropertyName)
 {
     axc::core::PropertySource source;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -15,6 +16,14 @@
 namespace deepmsg::archive::server
 {
 
+/// P-A9 dispatch (`analysis/cpp/plan-a6f-multi-recorder.md` §6 Q2): which of
+/// `count` recorder agents runs the session with `recording_id`. A free
+/// function so the rule has a unit test of its own.
+[[nodiscard]] inline std::size_t dispatch_recording_index(std::int64_t recording_id, std::size_t count) noexcept
+{
+    return static_cast<std::size_t>(recording_id) % count;
+}
+
 /// `ArchiveConductor.Recorder` (`ArchiveConductor.java:2737-2774`): the live
 /// recording sessions plus the three write metrics they feed.
 ///
@@ -23,15 +32,19 @@ namespace deepmsg::archive::server
 class Recorder final : public RecordingMetrics
 {
 public:
+    /// The archive-level totals one publish pass writes, and whether any
+    /// recorder did work since the previous pass (A6f-2: the conductor sums the
+    /// per-recorder locals so the three type 105/106/107 counters keep a single
+    /// writer).
+    struct MetricsSummary
+    {
+        std::int64_t bytes{0};
+        std::int64_t time_ns{0};
+        std::int64_t max_ns{0};
+        bool worked{false};
+    };
+
     Recorder() = default;
-
-    Recorder(axc::core::CounterTarget* total_write_bytes, axc::core::CounterTarget* total_write_time_ns,
-             axc::core::CounterTarget* max_write_time_ns) noexcept;
-
-    /// The counters are allocated lazily during conductor startup, after this
-    /// object exists.
-    void set_counters(axc::core::CounterTarget* total_write_bytes, axc::core::CounterTarget* total_write_time_ns,
-                      axc::core::CounterTarget* max_write_time_ns) noexcept;
 
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
@@ -75,7 +88,7 @@ public:
         const int work_count = sessions_.do_work(on_close);
         if (work_count > 0)
         {
-            publish();
+            worked_.store(true, std::memory_order_relaxed);
         }
         return work_count;
     }
@@ -86,18 +99,23 @@ public:
 
     [[nodiscard]] std::int64_t total_write_bytes() const noexcept
     {
-        return total_write_bytes_;
+        return total_write_bytes_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] std::int64_t total_write_time_ns() const noexcept
     {
-        return total_write_time_ns_;
+        return total_write_time_ns_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] std::int64_t max_write_time_ns() const noexcept
     {
-        return max_write_time_ns_;
+        return max_write_time_ns_.load(std::memory_order_relaxed);
     }
+
+    /// Sums the per-recorder locals and consumes each recorder's "did work"
+    /// flag, so the conductor can publish exactly the passes the reference
+    /// would have published (`ArchiveConductor.Recorder.doWork`).
+    [[nodiscard]] static MetricsSummary summarise(Recorder* const* recorders, std::size_t count) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept
     {
@@ -111,20 +129,20 @@ public:
     }
 
 private:
-    void publish() noexcept;
     void hand_back(RecordingSession* session) noexcept;
 
     SessionWorker<RecordingSession> sessions_;
     axc::core::ManyToOneQueue<RecordingSession>* inbox_{nullptr};
     axc::core::ManyToOneQueue<RecordingSession>* close_queue_{nullptr};
     axc::core::DutyCycleTracker* duty_cycle_{nullptr};
-    axc::core::CounterTarget* total_write_bytes_counter_{nullptr};
-    axc::core::CounterTarget* total_write_time_counter_{nullptr};
-    axc::core::CounterTarget* max_write_time_counter_{nullptr};
 
-    std::int64_t total_write_bytes_{0};
-    std::int64_t total_write_time_ns_{0};
-    std::int64_t max_write_time_ns_{0};
+    /// Written by the thread that runs this recorder; the conductor reads them
+    /// in `summarise` (`bytesWritten`/`writeTimeNs`, `ArchiveConductor.java:2775-2787`).
+    std::atomic<std::int64_t> total_write_bytes_{0};
+    std::atomic<std::int64_t> total_write_time_ns_{0};
+    std::atomic<std::int64_t> max_write_time_ns_{0};
+    /// Set by a pass with `workCount > 0`; taken by `summarise`.
+    std::atomic<bool> worked_{false};
 };
 
 }  // namespace deepmsg::archive::server
