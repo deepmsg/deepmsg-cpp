@@ -32,6 +32,9 @@ struct ProcessOptions
     std::vector<std::string> environment;  // KEY=VALUE applied in the child
     std::chrono::milliseconds timeout{std::chrono::seconds(30)};
     std::size_t output_limit{1U << 20};
+    /// Written to the child's stdin and then closed. Empty ⇒ the child sees
+    /// EOF immediately (the archive tool's confirmation prompts use this).
+    std::string input;
 };
 
 /// Runs a process to completion with a timeout, capturing stdout+stderr.
