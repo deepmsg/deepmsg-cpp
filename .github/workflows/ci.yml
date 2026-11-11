@@ -1,12 +1,23 @@
 name: ci
 
 on:
+  # A branch push and its pull request are the same tree; running both doubles
+  # the load and, when one runner hangs (measured: a `push` run of A6c sat in
+  # `Gate` for over an hour while the identical `pull_request` run finished in
+  # 14 minutes), the duplicate hides the result. `main` still runs on push so a
+  # merge is gated after the fact.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
   gate:
     runs-on: ubuntu-24.04
+    # The normal gate (debug + release + debug-clang) is ~14 minutes. A hung
+    # interop case (a reference archive that never accepts a client waits 60 s
+    # per case) used to keep a run alive for hours; 30 minutes leaves room for
+    # a slow runner and fails a hang instead of letting it sit.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
