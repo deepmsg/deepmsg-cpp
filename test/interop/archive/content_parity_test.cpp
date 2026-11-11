@@ -77,6 +77,12 @@ constexpr std::int32_t RESPONSE_STREAM_ID = 11;
 constexpr std::int32_t MESSAGE_LENGTHS[] = {32, 64, 100, 1344, 5000};
 constexpr std::size_t MESSAGE_LENGTH_COUNT = sizeof(MESSAGE_LENGTHS) / sizeof(MESSAGE_LENGTHS[0]);
 constexpr auto DEADLINE = std::chrono::seconds(120);
+/// How long an archive gets to answer its first control request. The reference
+/// archive is a JVM and on a loaded WSL2 box its start occasionally ran past
+/// the 10 s this used to be (measured: `acrossDriversSingleSegment` failed the
+/// `reference_` assertion about once in five runs and then segfaulted in the
+/// next fixture step, leaving orphaned JVMs that held ctest's pipe open).
+constexpr auto ARCHIVE_CONNECT_DEADLINE = std::chrono::seconds(30);
 
 [[nodiscard]] std::string aeron_jar()
 {
@@ -186,14 +192,30 @@ protected:
             // Reference Java driver under the reference archive; reference C driver
             // under ours.
             start_java_driver(aeron_dir_);
+            if (HasFatalFailure())
+            {
+                return;
+            }
             start_c_driver(aeron_dir_b_);
+            if (HasFatalFailure())
+            {
+                return;
+            }
         }
         else
         {
             start_java_driver(aeron_dir_);
+            if (HasFatalFailure())
+            {
+                return;
+            }
             aeron_dir_b_ = aeron_dir_;
         }
         start_our_archive(aeron_dir_b_);
+        if (HasFatalFailure())
+        {
+            return;
+        }
         start_reference_archive(aeron_dir_);
     }
 
@@ -315,7 +337,14 @@ protected:
 
     void wait_for_control(const std::string& control, const std::string& response, const std::string& aeron_dir)
     {
-        const auto deadline = std::chrono::steady_clock::now() + DEADLINE;
+        // The same window as `connect_archives`: an archive that has not
+        // answered by then is not coming up, and waiting the full case DEADLINE
+        // (two minutes per archive) just delays the cleanup that terminates the
+        // children. Measured: with a 120 s wait, an archive that failed to bind
+        // its port kept the test alive past a 120 s external timeout, which
+        // killed the fixture before it could terminate its children and left
+        // JVMs holding the port for the next run.
+        const auto deadline = std::chrono::steady_clock::now() + ARCHIVE_CONNECT_DEADLINE;
         aeron_archive_t* archive = nullptr;
         while (std::chrono::steady_clock::now() < deadline && nullptr == archive)
         {
@@ -464,9 +493,21 @@ protected:
     {
         // A connect can land while the driver is moving a receive endpoint to
         // CLOSING (the reference's own hint is "please retry"), so retry briefly
-        // instead of failing the fixture on the first transient.
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (nullptr == ours_ && std::chrono::steady_clock::now() < deadline)
+        // instead of failing the fixture on the first transient. Each archive
+        // gets its own window: sharing one deadline let a slow first connect eat
+        // the second archive's whole budget.
+        //
+        // A fatal failure returns here, and every caller checks `HasFatalFailure`
+        // before touching a context that was never created — a failed assert in a
+        // helper only returns from that helper.
+        // A failed `aeron_archive_connect` leaves its context unusable ("client
+        // illegal state" on every later attempt), so each retry discards the
+        // context and builds a new one — the same shape `wait_for_control` uses.
+        // Measured: reusing it turned a transient first-connect failure (the
+        // reference archive answering while its driver was still settling) into
+        // a full 30 s window of -1005 errors.
+        const auto ours_deadline = std::chrono::steady_clock::now() + ARCHIVE_CONNECT_DEADLINE;
+        while (nullptr == ours_ && std::chrono::steady_clock::now() < ours_deadline)
         {
             if (nullptr == ours_context_)
             {
@@ -476,11 +517,21 @@ protected:
             {
                 break;
             }
+            if (nullptr != ours_context_)
+            {
+                (void)aeron_archive_context_close(ours_context_);
+                ours_context_ = nullptr;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         ASSERT_NE(nullptr, ours_) << "our archive never accepted a client: " << aeron_errmsg();
+        if (HasFatalFailure())
+        {
+            return;
+        }
 
-        while (nullptr == reference_ && std::chrono::steady_clock::now() < deadline)
+        const auto reference_deadline = std::chrono::steady_clock::now() + ARCHIVE_CONNECT_DEADLINE;
+        while (nullptr == reference_ && std::chrono::steady_clock::now() < reference_deadline)
         {
             if (nullptr == reference_context_)
             {
@@ -490,9 +541,18 @@ protected:
             {
                 break;
             }
+            if (nullptr != reference_context_)
+            {
+                (void)aeron_archive_context_close(reference_context_);
+                reference_context_ = nullptr;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         ASSERT_NE(nullptr, reference_) << "the reference archive never accepted a client: " << aeron_errmsg();
+        if (HasFatalFailure())
+        {
+            return;
+        }
 
         ASSERT_EQ(0, aeron_context_init(&aeron_context_));
         aeron_context_set_dir(aeron_context_, aeron_dir_.c_str());
@@ -556,6 +616,23 @@ protected:
         if (nullptr == publication)
         {
             ADD_FAILURE() << "publication not created on " << channel << ": " << aeron_errmsg();
+            return {};
+        }
+
+        // `startRecording` answering means the archive's subscription exists,
+        // but the image behind it links asynchronously and Aeron drops what is
+        // published before a subscriber is linked. Waiting for the publication
+        // to be connected (not just created) is what keeps the archive's first
+        // messages: measured on CI, the reference replay started 74 messages
+        // into the stream, so the segment count and the first payload differed.
+        for (int iteration = 0; iteration < 10'000 && !aeron_publication_is_connected(publication); ++iteration)
+        {
+            (void)aeron_main_do_work(client);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!aeron_publication_is_connected(publication))
+        {
+            ADD_FAILURE() << "publication never connected on " << channel;
             return {};
         }
 
@@ -1038,7 +1115,15 @@ protected:
     void run_content_case(const ContentCase& content_case, bool cross_driver)
     {
         prepare(content_case, cross_driver);
+        if (HasFatalFailure())
+        {
+            return;
+        }
         connect_archives();
+        if (HasFatalFailure())
+        {
+            return;
+        }
 
         for (std::int32_t stream_index = 0; stream_index < content_case.stream_count; ++stream_index)
         {
