@@ -1,6 +1,6 @@
-#include "apps/skeleton_main.h"
+#include "tool.h"
 
-int main()
+int main(int argc, char* argv[])
 {
-    return skeleton_main("archive-tool-ro");
+    return deepmsg::tools::run_archive_tool_ro(argc, argv);
 }
