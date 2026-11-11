@@ -4,6 +4,7 @@
 #include <expected>
 #include <string>
 
+#include "archive/io/segment_reader.h"
 #include "core/config/property_source.h"
 #include "core/error/error.h"
 
@@ -44,9 +45,15 @@ struct ReplaySettings
     std::int64_t replay_linger_timeout_ns{5'000'000'000};
     /// `aeron.archive.replay.checksum`; empty ⇒ checksums are not verified.
     std::string replay_checksum_name;
+    /// `deepmsg.archive.replay.io.backend`: `pread` (the reference's copied
+    /// read) or `mmap` (C++ only; `docs/compat.md`). Default `pread`.
+    io::Backend io_backend{io::Backend::pread};
+    /// `deepmsg.archive.replay.io.fadvise`: `none` or `willneed` (C++ only).
+    /// Default `none` = the reference's bare `FileChannel.read`.
+    io::Fadvise io_fadvise{io::Fadvise::none};
 };
 
-/// Reads the three replay names.
+/// Reads the three replay names and the two C++-only read-backend switches.
 [[nodiscard]] std::expected<ReplaySettings, axc::core::Error> parse_replay_settings(
     const axc::core::PropertySource& source) noexcept;
 

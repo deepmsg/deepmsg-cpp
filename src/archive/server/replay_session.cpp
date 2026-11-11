@@ -1,12 +1,12 @@
 #include "archive/server/replay_session.h"
 
-#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <cerrno>
 #include <cstring>
 
+#include "archive/io/mmap_reader.h"
+#include "archive/io/pread_reader.h"
 #include "archive/server/segment_files.h"
 #include "core/time/clock.h"
 
@@ -43,7 +43,7 @@ std::int64_t SystemReplayClock::nano_time() const noexcept
 ReplaySession::ReplaySession(Config config, std::unique_ptr<ReplayPublication> publication,
                              ReplayControlResponses& control, ReplayMetrics& metrics, ReplayClock& clock,
                              const Checksum* checksum, std::unique_ptr<ReplayLimitSource> limit,
-                             std::span<std::uint8_t> buffer, ReplayWarningSink* warnings) noexcept
+                             std::int32_t buffer_length, ReplayWarningSink* warnings) noexcept
     : config_(std::move(config)),
       publication_(std::move(publication)),
       control_(control),
@@ -52,7 +52,7 @@ ReplaySession::ReplaySession(Config config, std::unique_ptr<ReplayPublication> p
       checksum_(checksum),
       limit_(std::move(limit)),
       warnings_(warnings),
-      buffer_(buffer)
+      buffer_length_(buffer_length)
 {
     // `ReplaySession` constructor (`ReplaySession.java:162-168`).
     segment_file_base_position_ = ::deepmsg::archive::server::segment_file_base_position(
@@ -154,7 +154,7 @@ void ReplaySession::send_pending_error()
 int ReplaySession::init()
 {
     // `ReplaySession.init` (`:303-356`).
-    if (fd_ < 0)
+    if (nullptr == reader_)
     {
         const std::string path =
             config_.archive_dir + "/" + segment_file_name(config_.recording_id, segment_file_base_position_);
@@ -264,7 +264,7 @@ int ReplaySession::replay()
 
             while (batch_offset < bytes_read && batch_offset < remaining)
             {
-                const std::int32_t frame_length = read_int32(buffer_.data() + batch_offset);
+                const std::int32_t frame_length = read_int32(window_.data() + batch_offset);
                 if (frame_length <= 0)
                 {
                     raise_error("unexpected end of recording at position=" + frame_position(batch_offset),
@@ -272,7 +272,7 @@ int ReplaySession::replay()
                     return 0;
                 }
 
-                const std::int32_t frame_type = read_uint16(buffer_.data() + batch_offset + FRAME_TYPE_OFFSET);
+                const std::int32_t frame_type = read_uint16(window_.data() + batch_offset + FRAME_TYPE_OFFSET);
                 const std::int32_t aligned_length = frame_align(frame_length, FRAME_ALIGNMENT);
 
                 if (DATA_FRAME_TYPE == frame_type)
@@ -294,8 +294,8 @@ int ReplaySession::replay()
                     // ★ Rewrite the frame header **after** the checksum check
                     // (`:409-423`): the recorded checksum lives in the session id
                     // field.
-                    std::memcpy(buffer_.data() + batch_offset + SESSION_ID_OFFSET, &session_id, sizeof(session_id));
-                    std::memcpy(buffer_.data() + batch_offset + STREAM_ID_OFFSET, &stream_id, sizeof(stream_id));
+                    std::memcpy(window_.data() + batch_offset + SESSION_ID_OFFSET, &session_id, sizeof(session_id));
+                    std::memcpy(window_.data() + batch_offset + STREAM_ID_OFFSET, &stream_id, sizeof(stream_id));
                     batch_offset += aligned_length;
                 }
                 else if (PADDING_FRAME_TYPE == frame_type)
@@ -329,13 +329,13 @@ int ReplaySession::replay()
                     stuck_deadline_ns_ = now_ns + UNEXPECTED_FRAME_TIMEOUT_NS;
                     if (nullptr != warnings_)
                     {
-                        warnings_->unexpected_frame(read_uint16(buffer_.data() + FRAME_TYPE_OFFSET), position);
+                        warnings_->unexpected_frame(read_uint16(window_.data() + FRAME_TYPE_OFFSET), position);
                     }
                 }
                 else if (now_ns >= stuck_deadline_ns_)
                 {
                     raise_error("unexpected frame type " +
-                                    std::to_string(read_uint16(buffer_.data() + FRAME_TYPE_OFFSET)) +
+                                    std::to_string(read_uint16(window_.data() + FRAME_TYPE_OFFSET)) +
                                     " at position=" + frame_position(0) + " (no progress for " +
                                     std::to_string(UNEXPECTED_FRAME_TIMEOUT_NS) + " ns)",
                                 ERROR_GENERIC);
@@ -345,7 +345,7 @@ int ReplaySession::replay()
             if (batch_offset > 0)
             {
                 const std::int64_t position =
-                    publication_->offer_block({buffer_.data(), static_cast<std::size_t>(batch_offset)});
+                    publication_->offer_block({window_.data(), static_cast<std::size_t>(batch_offset)});
                 if (AERON_PUBLICATION_ERROR == position)
                 {
                     raise_error(std::string{"failed to offer replay block: "} + aeron_errmsg(), ERROR_GENERIC);
@@ -423,8 +423,8 @@ void ReplaySession::verify_checksum(std::int32_t frame_offset, std::int32_t alig
 {
     // `ReplaySession.verifyChecksum` (`:496-508`).
     const std::int32_t computed =
-        checksum_->compute(buffer_.data(), frame_offset + DATA_HEADER_LENGTH, aligned_length - DATA_HEADER_LENGTH);
-    const std::int32_t recorded = read_int32(buffer_.data() + frame_offset + SESSION_ID_OFFSET);
+        checksum_->compute(window_.data(), frame_offset + DATA_HEADER_LENGTH, aligned_length - DATA_HEADER_LENGTH);
+    const std::int32_t recorded = read_int32(window_.data() + frame_offset + SESSION_ID_OFFSET);
 
     if (computed != recorded)
     {
@@ -437,35 +437,51 @@ void ReplaySession::verify_checksum(std::int32_t frame_offset, std::int32_t alig
 int ReplaySession::read_recording(std::int64_t available_replay)
 {
     // `ReplaySession.readRecording` (`:510-530`).
-    const std::int64_t limit = std::min({available_replay, static_cast<std::int64_t>(buffer_.size()),
+    const std::int64_t limit = std::min({available_replay, static_cast<std::int64_t>(buffer_length_),
                                          static_cast<std::int64_t>(config_.term_buffer_length - term_offset_)});
     if (limit <= 0)
     {
         return 0;
     }
 
-    if (fd_ < 0)
+    if (nullptr == reader_)
     {
         raise_error("recording segment is not open", ERROR_GENERIC);
         return 0;
     }
 
     const std::int64_t position = static_cast<std::int64_t>(term_base_segment_offset_) + term_offset_;
-    int total = 0;
-    while (total < static_cast<int>(limit))
+    auto read = reader_->read(position, static_cast<std::int32_t>(limit));
+    if (!read)
     {
-        const ssize_t bytes_read =
-            ::pread(fd_, buffer_.data() + total, static_cast<std::size_t>(static_cast<int>(limit) - total),
-                    static_cast<off_t>(position + total));
-        if (bytes_read <= 0)
-        {
-            break;
-        }
-        total += static_cast<int>(bytes_read);
+        raise_error(std::string{"failed to read recording segment: "} + std::string{read.error().message.view()},
+                    ERROR_GENERIC);
+        return 0;
     }
 
-    // The reference returns the limit even after a short read; the frame loop
-    // turns the stale bytes into a `frameLength <= 0` error (`:510-530`).
+    if (read->size() >= static_cast<std::size_t>(limit))
+    {
+        // The normal path: the frame loop walks the reader's own view (the mmap
+        // alone for the mmap backend), and the id rewrite hits MAP_PRIVATE
+        // pages that never reach the file.
+        window_ = *read;
+    }
+    else
+    {
+        // The reference returns the limit even after a short read; the frame
+        // loop turns the stale bytes into a `frameLength <= 0` error
+        // (`ReplaySession.java:510-530`). The reader clips at the file end, so
+        // the missing tail comes from this session-owned buffer (zeroed on its
+        // first growth, like the reference's fresh `replayBuffer`).
+        const auto length = static_cast<std::size_t>(limit);
+        if (short_read_buffer_.size() < length)
+        {
+            short_read_buffer_.resize(length, 0);
+        }
+        std::copy(read->begin(), read->end(), short_read_buffer_.begin());
+        window_ = std::span<std::uint8_t>{short_read_buffer_.data(), length};
+    }
+
     return static_cast<int>(limit);
 }
 
@@ -527,10 +543,10 @@ void ReplaySession::next_term()
 void ReplaySession::close_recording_segment() noexcept
 {
     // `ReplaySession.closeRecordingSegment` (`:594-599`).
-    if (fd_ >= 0)
+    if (nullptr != reader_)
     {
-        (void)::close(fd_);
-        fd_ = -1;
+        (void)reader_->close();
+        reader_.reset();
     }
 }
 
@@ -546,13 +562,34 @@ bool ReplaySession::open_recording_segment()
         return false;
     }
 
-    fd_ = ::open(path.c_str(), O_RDONLY);
-    if (fd_ < 0)
+    io::ReaderConfig reader_config;
+    reader_config.archive_dir = config_.archive_dir;
+    reader_config.recording_id = config_.recording_id;
+    reader_config.segment_base_position = segment_file_base_position_;
+    reader_config.segment_length = config_.segment_file_length;
+    reader_config.fadvise = config_.fadvise;
+    reader_config.fadvise_fn = config_.fadvise_fn;
+
+    // ★ A replay that follows a live recording (`limit_` non-null: the
+    // conductor resolved the recording's position counter,
+    // `ArchiveConductor.java:763-929`) must not read through `MAP_PRIVATE`: the
+    // first header rewrite copy-on-writes its 4 KiB page, and every frame the
+    // recorder appends into that page afterwards is invisible to the frozen
+    // private copy (`frameLength <= 0` at the live edge). `pread` re-reads the
+    // page cache each pass, so a live replay stays on it even when the mmap
+    // backend is configured; a finalized recording keeps the mapping.
+    const bool live = nullptr != limit_;
+    auto opened = io::Backend::mmap == config_.backend && !live
+                      ? io::make_mmap_reader(reader_config)
+                      : io::make_pread_reader(reader_config, static_cast<std::size_t>(buffer_length_));
+    if (!opened)
     {
-        raise_error(std::string{"failed to open recording segment: "} + std::strerror(errno), ERROR_GENERIC);
+        raise_error(std::string{"failed to open recording segment: "} + std::string{opened.error().message.view()},
+                    ERROR_GENERIC);
         return false;
     }
 
+    reader_ = std::move(*opened);
     return true;
 }
 
@@ -561,7 +598,10 @@ bool ReplaySession::not_header_aligned(std::int32_t segment_offset, std::int32_t
     // `ReplaySession.notHeaderAligned` + `isInvalidHeader` (`:618-661`). The
     // header comparison itself is shared with the archive's segment operations
     // (`segment_files.h`), so both read the frame header the same way.
-    switch (check_first_frame(fd_, segment_offset, term_offset, term_id, config_.stream_id))
+    auto header = reader_->read(segment_offset, DATA_HEADER_LENGTH);
+    const FrameHeaderCheck check =
+        header ? check_first_frame(*header, term_offset, term_id, config_.stream_id) : FrameHeaderCheck::read_error;
+    switch (check)
     {
         case FrameHeaderCheck::read_error:
             raise_error("failed to read fragment header", ERROR_GENERIC);

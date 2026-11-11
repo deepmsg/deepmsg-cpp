@@ -26,6 +26,12 @@
 # it. One machine only: WSL2's virtual path is milliseconds per round trip
 # (`analysis/bench/handoff-to-wsl2.md` §0).
 #
+# `DEEPMSG_REPLAY_IO_BACKEND=pread|mmap` and `DEEPMSG_REPLAY_IO_FADVISE=none|willneed`
+# travel to the C++ archive as `deepmsg.archive.replay.io.*` (C++ only,
+# docs/compat.md); each cell also writes `rss.txt` from the archive's
+# `smaps_rollup` (`Rss`/`Pss`/`Pss_File`/`Pss_Anon`/clean+dirty pages) so the
+# mmap backend's page footprint is visible.
+#
 # The tree a batch writes is the reference harness's, plus RUN-INFO.txt per cell
 # and fingerprint.txt per batch (perf spec §6.5):
 #
@@ -100,6 +106,17 @@ if [ -n "$catalog_fsync_levels" ]; then
     done
 fi
 
+replay_io_backend=${DEEPMSG_REPLAY_IO_BACKEND:-pread}
+replay_io_fadvise=${DEEPMSG_REPLAY_IO_FADVISE:-none}
+case "$replay_io_backend" in
+    pread|mmap) ;;
+    *) echo "DEEPMSG_REPLAY_IO_BACKEND must be pread or mmap, not $replay_io_backend" >&2; exit 2 ;;
+esac
+case "$replay_io_fadvise" in
+    none|willneed) ;;
+    *) echo "DEEPMSG_REPLAY_IO_FADVISE must be none or willneed, not $replay_io_fadvise" >&2; exit 2 ;;
+esac
+
 if [ "$scenario" != s1 ] && [ "$scenario" != s2 ]; then
     echo "unknown scenario $scenario (s1, s2)" >&2
     exit 2
@@ -168,6 +185,8 @@ EOF
     # C++-only switches (docs/compat.md); the Java arms never read them.
     if [ "$arm" = x-c ] || [ "$arm" = x-j ]; then
         echo "deepmsg.archive.file.io.fallocate=${DEEPMSG_IO_FALLOCATE:-false}" >>"$dir/archive.properties"
+        echo "deepmsg.archive.replay.io.backend=$replay_io_backend" >>"$dir/archive.properties"
+        echo "deepmsg.archive.replay.io.fadvise=$replay_io_fadvise" >>"$dir/archive.properties"
     fi
 
     cat >"$dir/driver-override.properties" <<EOF
@@ -339,6 +358,7 @@ _write_run_info() {
         echo "fsync           file=$_fsync catalog=$_catalog_fsync"
         if [ "$arm" = x-c ] || [ "$arm" = x-j ]; then
             echo "fallocate       ${DEEPMSG_IO_FALLOCATE:-false}"
+            echo "replay io       backend=$replay_io_backend fadvise=$replay_io_fadvise"
         fi
         echo "archive idle    conductor=spin recorder=noop replayer=noop, threading=DEDICATED"
         echo "events          $([ "$scenario" = s1 ] && echo 'true (s1, aeron:ipc)' || echo 'false (s2)')"
@@ -381,6 +401,22 @@ _report_filefrag() {
     } >"$dir/filefrag.txt"
 }
 
+# Q5 (`analysis/cpp/plan-a6d-read-backend.md` §2.4): the cell's page-cache
+# footprint. The mmap backend counts the mapped segment pages in the archive's
+# RSS; the pread backend only holds its per-session copy window. `smaps_rollup`
+# has no plain `Mapped` line, so the file-backed share is read from `Pss_File`
+# (and `Shared_Clean`/`Private_Clean`), while the pread copy window lands in
+# `Pss_Anon`/`Private_Dirty`. One sample per cell, after the runs and while the
+# archive is still alive. Arms whose archive is launched by the node (`j`) have
+# no pid here and get no file.
+_sample_rss() {
+    local dir=$1
+    [ -n "${_archive_pid:-}" ] || return 0
+    [ -r "/proc/$_archive_pid/smaps_rollup" ] || return 0
+    grep -E '^(Rss|Pss|Pss_Anon|Pss_File|Shared_Clean|Shared_Dirty|Private_Clean|Private_Dirty):' \
+        "/proc/$_archive_pid/smaps_rollup" >"$dir/rss.txt" 2>/dev/null || true
+}
+
 _run_cell() {
     local round=$1 arm=$2 fsync=$3
     local catalog_fsync=${catalog_fsync_levels:-$fsync}
@@ -416,6 +452,8 @@ _run_cell() {
         _report_run "$cell_dir" "$run"
     done
     _report_filefrag "$cell_dir"
+
+    _sample_rss "$cell_dir"
 
     [ -n "${_node_pid:-}" ] && kill -9 "$_node_pid" 2>/dev/null || true
     [ -n "${_archive_pid:-}" ] && kill -9 "$_archive_pid" 2>/dev/null || true

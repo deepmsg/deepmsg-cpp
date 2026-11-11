@@ -38,6 +38,9 @@ private:
     ReaderConfig config_;
     std::uint8_t* mapping_{nullptr};
     std::size_t length_{0};
+    /// Kept open for the mapping's lifetime so `DONTNEED` can be advised at
+    /// unmap time (`posix_fadvise` needs a descriptor).
+    int fd_{-1};
 };
 
 [[nodiscard]] std::expected<std::unique_ptr<SegmentReader>, axc::core::Error> make_mmap_reader(

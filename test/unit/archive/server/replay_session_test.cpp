@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -40,6 +42,7 @@ using deepmsg::archive::server::SESSION_ID_OFFSET;
 using deepmsg::archive::server::STREAM_ID_OFFSET;
 using deepmsg::archive::server::TERM_ID_OFFSET;
 using deepmsg::archive::server::TERM_OFFSET_FIELD_OFFSET;
+using deepmsg::archive::server::io::Backend;
 
 constexpr std::int32_t TERM_LENGTH = 64 * 1024;
 constexpr std::int32_t SEGMENT_LENGTH = 2 * TERM_LENGTH;
@@ -50,6 +53,8 @@ constexpr std::int32_t REPLAY_SESSION_ID_SESSION = 777;
 constexpr std::int64_t RECORDING_ID = 42;
 constexpr std::int32_t FRAME_PAYLOAD = 992;
 constexpr std::int32_t FRAME_LENGTH = DATA_HEADER_LENGTH + FRAME_PAYLOAD;
+/// `min(request.fileIoMaxLength, ctx.replayBuffer)` for every fixture.
+constexpr std::int32_t BUFFER_LENGTH = 1024 * 1024;
 
 void write_int32(std::uint8_t* address, std::int32_t value)
 {
@@ -170,6 +175,32 @@ Recording build_unaligned_recording()
     recording.data_frame_count = 1;
     recording.stop_position = TERM_LENGTH;
     return recording;
+}
+
+/// One term with a single data frame written; the rest stays zero until the
+/// recorder appends it (the live-replay shape).
+Recording build_live_recording()
+{
+    Recording recording;
+    recording.bytes.assign(static_cast<std::size_t>(TERM_LENGTH), 0);
+    write_data_frame(recording.bytes.data(), FRAME_LENGTH, 0, INITIAL_TERM_ID, RECORDING_SESSION_ID,
+                     RECORDING_STREAM_ID, 1);
+    recording.data_frame_count = 1;
+    recording.stop_position = TERM_LENGTH;
+    return recording;
+}
+
+/// `pwrite` one frame into an existing segment file, the way the recorder
+/// appends while a live replay is reading.
+void append_frame_to_segment(const std::string& archive_dir, std::int64_t segment_base_position, std::size_t offset,
+                             const std::vector<std::uint8_t>& frame)
+{
+    const std::string path =
+        archive_dir + "/" + std::to_string(RECORDING_ID) + "-" + std::to_string(segment_base_position) + ".rec";
+    const int fd = ::open(path.c_str(), O_RDWR);
+    ASSERT_GE(fd, 0) << path;
+    ASSERT_EQ(static_cast<ssize_t>(frame.size()), ::pwrite(fd, frame.data(), frame.size(), static_cast<off_t>(offset)));
+    ::close(fd);
 }
 
 class TempArchiveDir
@@ -480,7 +511,6 @@ struct Fixture
 
         publication = std::make_unique<FakePublication>();
         publication_raw = publication.get();
-        buffer.assign(1024 * 1024, 0);
     }
 
     [[nodiscard]] std::unique_ptr<ReplaySession> make(std::unique_ptr<ReplayLimitSource> limit = nullptr,
@@ -488,8 +518,7 @@ struct Fixture
                                                       ReplayWarningSink* warnings = nullptr)
     {
         return std::make_unique<ReplaySession>(config, std::move(publication), control, metrics, clock, checksum,
-                                               std::move(limit), std::span<std::uint8_t>{buffer.data(), buffer.size()},
-                                               warnings);
+                                               std::move(limit), BUFFER_LENGTH, warnings);
     }
 
     TempArchiveDir dir;
@@ -499,7 +528,6 @@ struct Fixture
     FakeClock clock;
     std::unique_ptr<FakePublication> publication;
     FakePublication* publication_raw{nullptr};
-    std::vector<std::uint8_t> buffer;
 };
 
 int run_to_done(ReplaySession& session, int max_passes = 10000)
@@ -839,20 +867,137 @@ TEST(ReplaySessionTest, aProtocolErrorFromOfferEndsTheReplay)
     EXPECT_TRUE(fixture.publication_raw->revoked);
 }
 
+TEST(ReplaySessionTest, bothReadBackendsPublishTheSameBytes)
+{
+    const Recording recording = build_recording(3);
+
+    for (const Backend backend : {Backend::pread, Backend::mmap})
+    {
+        Fixture fixture(recording);
+        fixture.config.backend = backend;
+
+        auto session = fixture.make();
+        ASSERT_LT(run_to_done(*session), 10000) << "backend " << static_cast<int>(backend);
+        session->close();
+
+        EXPECT_TRUE(fixture.control.errors.empty());
+        EXPECT_EQ(expected_published_data(recording, REPLAY_SESSION_ID_SESSION, RECORDING_STREAM_ID),
+                  fixture.publication_raw->offered);
+
+        // ★ Every segment still reads byte for byte: `MAP_PRIVATE` means the
+        // rewritten headers never reach the recorded files (A6d-2).
+        std::size_t offset = 0;
+        for (std::int64_t base = 0; offset < recording.bytes.size(); base += SEGMENT_LENGTH)
+        {
+            const std::string path =
+                fixture.dir.path() + "/" + std::to_string(RECORDING_ID) + "-" + std::to_string(base) + ".rec";
+            std::ifstream file(path, std::ios::binary);
+            const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>{file},
+                                                  std::istreambuf_iterator<char>{}};
+            const std::size_t length =
+                std::min(static_cast<std::size_t>(SEGMENT_LENGTH), recording.bytes.size() - offset);
+            ASSERT_EQ(length, bytes.size()) << path;
+            EXPECT_TRUE(
+                std::equal(bytes.begin(), bytes.end(), recording.bytes.begin() + static_cast<std::ptrdiff_t>(offset)))
+                << path;
+            offset += length;
+        }
+    }
+}
+
+TEST(ReplaySessionTest, aShortReadStillReturnsTheFullLimitSoTheFrameLoopFails)
+{
+    // A truncated file is the reference's short-read path: `readRecording`
+    // returns the limit anyway and the frame loop trips over the stale tail
+    // (`ReplaySession.java:510-530`). Returning only the bytes actually read
+    // would leave the session spinning on a complete prefix with no progress.
+    const Recording recording = build_recording(1);
+
+    for (const Backend backend : {Backend::pread, Backend::mmap})
+    {
+        Fixture fixture(recording);
+        fixture.config.backend = backend;
+        const std::string path = fixture.dir.path() + "/" + std::to_string(RECORDING_ID) + "-0.rec";
+        ASSERT_EQ(0, ::truncate(path.c_str(), 100));
+
+        auto session = fixture.make();
+        EXPECT_LT(run_to_done(*session), 10000) << "backend " << static_cast<int>(backend);
+
+        session->send_pending_error();
+        ASSERT_EQ(1U, fixture.control.errors.size());
+        EXPECT_NE(std::string::npos, fixture.control.errors[0].message.find("unexpected end of recording"));
+        session->close();
+    }
+}
+
+TEST(ReplaySessionTest, aLiveReplayKeepsReadingTheGrowingPage)
+{
+    // ★ A6d-4 finding: the first frame-header rewrite copy-on-writes the
+    // mapping's 4 KiB page; a frame the recorder appends into the same page
+    // afterwards must still be seen. A `MAP_PRIVATE` view would freeze the page
+    // as zeros and the frame loop would end the replay with `unexpected end of
+    // recording`, so a live replay (limit counter present) reads through
+    // `pread` even when the mmap backend is configured.
+    const Recording recording = build_live_recording();
+    Fixture fixture(recording, 0, recording.stop_position, 0, FRAME_LENGTH);
+    fixture.config.backend = Backend::mmap;
+
+    auto limit = std::make_unique<FakeLimit>();
+    limit->current = FRAME_LENGTH;
+    FakeLimit* limit_raw = limit.get();
+
+    auto session = fixture.make(std::move(limit));
+    session->do_work();
+    ASSERT_TRUE(session->error_message().empty()) << session->error_message();
+    ASSERT_EQ(static_cast<std::size_t>(FRAME_LENGTH), fixture.publication_raw->offered.size());
+
+    // The recorder appends the next frame into the same page and advances the
+    // live limit the way the position counter does.
+    std::vector<std::uint8_t> frame(static_cast<std::size_t>(FRAME_LENGTH), 0);
+    write_data_frame(frame.data(), FRAME_LENGTH, FRAME_LENGTH, INITIAL_TERM_ID, RECORDING_SESSION_ID,
+                     RECORDING_STREAM_ID, 2);
+    append_frame_to_segment(fixture.dir.path(), 0, static_cast<std::size_t>(FRAME_LENGTH), frame);
+    limit_raw->current = 2 * FRAME_LENGTH;
+
+    session->do_work();
+    ASSERT_TRUE(session->error_message().empty()) << session->error_message();
+    ASSERT_EQ(static_cast<std::size_t>(2 * FRAME_LENGTH), fixture.publication_raw->offered.size());
+
+    std::int32_t published_session_id = 0;
+    std::memcpy(&published_session_id, fixture.publication_raw->offered.data() + FRAME_LENGTH + SESSION_ID_OFFSET,
+                sizeof(published_session_id));
+    EXPECT_EQ(REPLAY_SESSION_ID_SESSION, published_session_id);
+    EXPECT_EQ(2, fixture.publication_raw->offered.back());
+
+    limit_raw->closed = true;
+    limit_raw->current = 2 * FRAME_LENGTH;
+    for (int pass = 0; !session->is_done() && pass < 10; pass++)
+    {
+        session->do_work();
+    }
+    EXPECT_TRUE(session->is_done());
+    session->close();
+}
+
 TEST(ReplaySessionTest, anUnalignedReplayPositionIsRejected)
 {
     const Recording recording = build_recording(1);
-    Fixture fixture(recording, 32);
 
-    auto session = fixture.make();
-    session->do_work();
-    session->send_pending_error();
+    for (const Backend backend : {Backend::pread, Backend::mmap})
+    {
+        Fixture fixture(recording, 32);
+        fixture.config.backend = backend;
 
-    ASSERT_EQ(1U, fixture.control.errors.size());
-    EXPECT_EQ(16, fixture.control.errors[0].relevant_id);
-    EXPECT_NE(std::string::npos, fixture.control.errors[0].message.find("does not point to a valid frame"));
-    session->close();
-    EXPECT_TRUE(fixture.publication_raw->revoked);
+        auto session = fixture.make();
+        session->do_work();
+        session->send_pending_error();
+
+        ASSERT_EQ(1U, fixture.control.errors.size());
+        EXPECT_EQ(16, fixture.control.errors[0].relevant_id);
+        EXPECT_NE(std::string::npos, fixture.control.errors[0].message.find("does not point to a valid frame"));
+        session->close();
+        EXPECT_TRUE(fixture.publication_raw->revoked);
+    }
 }
 
 TEST(ReplaySessionTest, verifiesTheChecksumBeforeRewritingTheHeader)

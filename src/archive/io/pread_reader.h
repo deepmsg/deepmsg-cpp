@@ -40,7 +40,10 @@ private:
     int fd_{-1};
 };
 
+/// `buffer_length` is the caller's read window: `ReplaySession` passes the
+/// per-session slice of `ctx.replayBuffer` so the copy buffer is no larger than
+/// what the frame loop may ask for.
 [[nodiscard]] std::expected<std::unique_ptr<SegmentReader>, axc::core::Error> make_pread_reader(
-    const ReaderConfig& config);
+    const ReaderConfig& config, std::size_t buffer_length = 1024 * 1024);
 
 }  // namespace deepmsg::archive::server::io

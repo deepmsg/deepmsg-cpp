@@ -423,10 +423,6 @@ std::expected<void, axc::core::Error> ArchiveConductor::init()
         replayer_.set_duty_cycle_tracker(&replayer_duty_cycle_.tracker);
     }
 
-    // `Archive.Context.replayBuffer()` (`Archive.java:3894-3906`): one archive
-    // level buffer of `fileIoMaxLength`.
-    replay_buffer_.assign(static_cast<std::size_t>(context_.recording.file_io_max_length), 0);
-
     if (context_.recording.recording_events_enabled)
     {
         // `ArchiveConductor.java:224-225` and `Archive.Context` validation in
@@ -2214,10 +2210,10 @@ void ArchiveConductor::start_replay_request(const ReplayRequest& request, std::i
                                                                  " < mtuLength=" + std::to_string(summary.mtu_length));
         return;
     }
-    if (static_cast<std::int32_t>(replay_buffer_.size()) < summary.mtu_length)
+    if (context_.recording.file_io_max_length < summary.mtu_length)
     {
         session->send_error_response(request.correlation_id,
-                                     "replayBufferCapacity=" + std::to_string(replay_buffer_.size()) +
+                                     "replayBufferCapacity=" + std::to_string(context_.recording.file_io_max_length) +
                                          " < mtuLength=" + std::to_string(summary.mtu_length));
         return;
     }
@@ -2483,7 +2479,10 @@ void ArchiveConductor::new_replay_session(const CreateReplayPublicationSession::
     const std::int64_t replay_session_id = (static_cast<std::int64_t>(next_replay_id_++) << 32) |
                                            (static_cast<std::int64_t>(publication->session_id()) & 0xFFFF'FFFFLL);
 
-    std::size_t buffer_length = replay_buffer_.size();
+    // `Archive.Context.replayBuffer()` (`Archive.java:3894-3906`) is the read
+    // window's capacity; the buffer itself lives in the session's
+    // `SegmentReader` (the pread copy buffer or the mmap view).
+    std::size_t buffer_length = static_cast<std::size_t>(context_.recording.file_io_max_length);
     if (config.file_io_max_length > 0 && static_cast<std::size_t>(config.file_io_max_length) < buffer_length)
     {
         buffer_length = static_cast<std::size_t>(config.file_io_max_length);
@@ -2511,10 +2510,12 @@ void ArchiveConductor::new_replay_session(const CreateReplayPublicationSession::
     replay_config.control_session_id = config.control_session_id;
     replay_config.connect_timeout_ms = context_.connect_timeout_ms;
     replay_config.archive_dir = context_.archive_dir;
+    replay_config.backend = context_.replay.io_backend;
+    replay_config.fadvise = context_.replay.io_fadvise;
 
     auto session = std::make_unique<ReplaySession>(std::move(replay_config), std::move(publication), *this, replayer_,
                                                    replay_clock_, context_.replay_checksum, std::move(limit),
-                                                   std::span<std::uint8_t>{replay_buffer_.data(), buffer_length}, this);
+                                                   static_cast<std::int32_t>(buffer_length), this);
 
     replay_session_by_id_[replay_session_id] = session.get();
     add_replay_session(std::move(session));

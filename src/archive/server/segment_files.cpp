@@ -318,8 +318,20 @@ FrameHeaderCheck check_first_frame(int fd, std::int64_t offset, std::int32_t ter
         return FrameHeaderCheck::read_error;
     }
 
-    if (read_int32(header + TERM_OFFSET_FIELD_OFFSET) != term_offset ||
-        read_int32(header + TERM_ID_OFFSET) != term_id || read_int32(header + STREAM_ID_OFFSET) != stream_id)
+    return check_first_frame(std::span<const std::uint8_t>{header, sizeof(header)}, term_offset, term_id, stream_id);
+}
+
+FrameHeaderCheck check_first_frame(std::span<const std::uint8_t> header, std::int32_t term_offset, std::int32_t term_id,
+                                   std::int32_t stream_id) noexcept
+{
+    if (header.size() < static_cast<std::size_t>(DATA_HEADER_LENGTH))
+    {
+        return FrameHeaderCheck::read_error;
+    }
+
+    if (read_int32(header.data() + TERM_OFFSET_FIELD_OFFSET) != term_offset ||
+        read_int32(header.data() + TERM_ID_OFFSET) != term_id ||
+        read_int32(header.data() + STREAM_ID_OFFSET) != stream_id)
     {
         return FrameHeaderCheck::unaligned;
     }

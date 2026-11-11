@@ -533,8 +533,6 @@ private:
     };
     std::unordered_map<std::int64_t, SessionForReplay> replay_tokens_;
     std::uint64_t replay_token_state_{0x9E3779B97F4A7C15ULL};
-    /// `ctx.replayBuffer()`: one archive-level buffer, sliced per session.
-    std::vector<std::uint8_t> replay_buffer_;
     SystemReplayClock replay_clock_{cached_clock_};
 
     // DEDICATED handoff (A5a).
