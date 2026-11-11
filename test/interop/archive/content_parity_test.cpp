@@ -619,6 +619,23 @@ protected:
             return {};
         }
 
+        // `startRecording` answering means the archive's subscription exists,
+        // but the image behind it links asynchronously and Aeron drops what is
+        // published before a subscriber is linked. Waiting for the publication
+        // to be connected (not just created) is what keeps the archive's first
+        // messages: measured on CI, the reference replay started 74 messages
+        // into the stream, so the segment count and the first payload differed.
+        for (int iteration = 0; iteration < 10'000 && !aeron_publication_is_connected(publication); ++iteration)
+        {
+            (void)aeron_main_do_work(client);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!aeron_publication_is_connected(publication))
+        {
+            ADD_FAILURE() << "publication never connected on " << channel;
+            return {};
+        }
+
         Published published;
         published.session_id = aeron_publication_session_id(publication);
         const auto start = std::chrono::steady_clock::now();
