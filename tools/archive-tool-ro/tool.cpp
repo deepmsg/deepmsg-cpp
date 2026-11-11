@@ -9,16 +9,26 @@
 
 #include "tool.h"
 
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <expected>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
 
 #include "archive/server/archive_mark_file.h"
 #include "archive/server/catalog.h"
+#include "io_aeron_archive_codecs/RecordingDescriptor.h"
+#include "io_aeron_archive_codecs/RecordingState.h"
+#include "io_aeron_archive_codecs_mark/MarkFileHeader.h"
+#include "io_aeron_archive_codecs_mark/MessageHeader.h"
 
 namespace deepmsg::tools
 {
@@ -28,7 +38,11 @@ namespace
 using axc::core::Error;
 using deepmsg::archive::server::ArchiveMarkFile;
 using deepmsg::archive::server::Catalog;
+using deepmsg::archive::server::CatalogEntry;
 using deepmsg::archive::server::CatalogOpenOptions;
+
+namespace archive_codecs = ::io::aeron::archive::codecs;
+namespace archive_mark_codecs = ::io::aeron::archive::codecs::mark;
 
 /// `ArchiveTool.printHelp` (`ArchiveTool.java:1753-1787`), byte for byte. The
 /// text still lists the write commands the reference has, because the help is
@@ -116,7 +130,8 @@ std::filesystem::path resolve_mark_file_dir(const std::filesystem::path& archive
 /// `ArchiveTool.openMarkFile` (`ArchiveTool.java:1134-1138`) with the reference's
 /// 5 s liveness wait not needed for a read-only inspection: the file is opened
 /// through `ArchiveMarkFile::open_existing`, which validates the major version.
-std::expected<ArchiveMarkFile, Error> open_mark_file(const std::filesystem::path& archive_dir, std::string& error)
+std::expected<ArchiveMarkFile, Error> open_mark_file(const std::filesystem::path& archive_dir, std::string& error,
+                                                     bool log_exists)
 {
     const std::filesystem::path mark_dir = resolve_mark_file_dir(archive_dir, error);
     if (mark_dir.empty())
@@ -128,7 +143,16 @@ std::expected<ArchiveMarkFile, Error> open_mark_file(const std::filesystem::path
     options.directory = mark_dir.string();
     // `refresh_header` replaces this with the header's `errorBufferLength`.
     options.error_buffer_length = 0;
-    return ArchiveMarkFile::open_existing(options);
+    auto mark_file = ArchiveMarkFile::open_existing(options);
+    if (mark_file && log_exists)
+    {
+        // Agrona `MarkFile`'s logger (`org.agrona.MarkFile`, the constructor the
+        // reference passes `out::println` to): describe/describe-all/dump print
+        // this before anything else; pid/errors pass a null logger.
+        const std::filesystem::path mark_path = mark_dir / ArchiveMarkFile::FILENAME;
+        std::printf("INFO: mark file exists: %s\n", mark_path.string().c_str());
+    }
+    return mark_file;
 }
 
 std::expected<Catalog, Error> open_catalog_read_only(const std::filesystem::path& archive_dir)
@@ -138,6 +162,100 @@ std::expected<Catalog, Error> open_catalog_read_only(const std::filesystem::path
     options.catalog_capacity = Catalog::MIN_CAPACITY;
     options.writable = false;
     return Catalog::open(options);
+}
+
+/// `RecordingDescriptorDecoder.appendTo` (`RecordingDescriptorDecoder.java`, the
+/// SBE-generated `toString`): the field order, the `|` separator and the
+/// acting/current version and block-length forms are the output contract.
+std::string descriptor_to_string(archive_codecs::RecordingDescriptor& descriptor)
+{
+    std::string out = "[RecordingDescriptor](sbeTemplateId=22|sbeSchemaId=101|sbeSchemaVersion=";
+    if (descriptor.actingVersion() != archive_codecs::RecordingDescriptor::SBE_SCHEMA_VERSION)
+    {
+        out += std::to_string(descriptor.actingVersion());
+        out += '/';
+    }
+    out += "14|sbeBlockLength=80):";
+    out += "controlSessionId=" + std::to_string(descriptor.controlSessionId());
+    out += "|correlationId=" + std::to_string(descriptor.correlationId());
+    out += "|recordingId=" + std::to_string(descriptor.recordingId());
+    out += "|startTimestamp=" + std::to_string(descriptor.startTimestamp());
+    out += "|stopTimestamp=" + std::to_string(descriptor.stopTimestamp());
+    out += "|startPosition=" + std::to_string(descriptor.startPosition());
+    out += "|stopPosition=" + std::to_string(descriptor.stopPosition());
+    out += "|initialTermId=" + std::to_string(descriptor.initialTermId());
+    out += "|segmentFileLength=" + std::to_string(descriptor.segmentFileLength());
+    out += "|termBufferLength=" + std::to_string(descriptor.termBufferLength());
+    out += "|mtuLength=" + std::to_string(descriptor.mtuLength());
+    out += "|sessionId=" + std::to_string(descriptor.sessionId());
+    out += "|streamId=" + std::to_string(descriptor.streamId());
+    out += "|strippedChannel='" + descriptor.getStrippedChannelAsString() + '\'';
+    out += "|originalChannel='" + descriptor.getOriginalChannelAsString() + '\'';
+    out += "|sourceIdentity='" + descriptor.getSourceIdentityAsString() + '\'';
+    return out;
+}
+
+/// `MarkFileHeaderDecoder.appendTo` (the SBE-generated `toString` used by
+/// `markFile.decoder().toString()`).
+std::string mark_header_to_string(ArchiveMarkFile& mark_file)
+{
+    const std::span<std::uint8_t> bytes = mark_file.buffer();
+    auto* buffer = reinterpret_cast<char*>(bytes.data());
+
+    archive_mark_codecs::MessageHeader message_header;
+    message_header.wrap(buffer, 0, archive_mark_codecs::MessageHeader::sbeSchemaVersion(), bytes.size());
+
+    archive_mark_codecs::MarkFileHeader header;
+    header.wrapForDecode(buffer, static_cast<std::uint64_t>(mark_file.header_offset()),
+                         archive_mark_codecs::MarkFileHeader::SBE_BLOCK_LENGTH, message_header.version(), bytes.size());
+
+    std::string out = "[MarkFileHeader](sbeTemplateId=200|sbeSchemaId=100|sbeSchemaVersion=";
+    if (header.actingVersion() != archive_mark_codecs::MarkFileHeader::SBE_SCHEMA_VERSION)
+    {
+        out += std::to_string(header.actingVersion());
+        out += '/';
+    }
+    out += "2|sbeBlockLength=128):";
+    out += "version=" + std::to_string(header.version());
+    out += "|activityTimestamp=" + std::to_string(header.activityTimestamp());
+    out += "|startTimestamp=" + std::to_string(header.startTimestamp());
+    out += "|pid=" + std::to_string(header.pid());
+    out += "|controlStreamId=" + std::to_string(header.controlStreamId());
+    out += "|localControlStreamId=" + std::to_string(header.localControlStreamId());
+    out += "|eventsStreamId=" + std::to_string(header.eventsStreamId());
+    out += "|headerLength=" + std::to_string(header.headerLength());
+    out += "|errorBufferLength=" + std::to_string(header.errorBufferLength());
+    out += "|archiveId=" + std::to_string(header.archiveId());
+    out += "|controlChannel='" + header.getControlChannelAsString() + '\'';
+    out += "|localControlChannel='" + header.getLocalControlChannelAsString() + '\'';
+    out += "|eventsChannel='" + header.getEventsChannelAsString() + '\'';
+    out += "|aeronDirectory='" + header.getAeronDirectoryAsString() + '\'';
+    return out;
+}
+
+std::string format_time(std::int64_t epoch_millis, const char* format)
+{
+    const std::time_t seconds = static_cast<std::time_t>(epoch_millis / 1000);
+    std::tm broken_down{};
+    localtime_r(&seconds, &broken_down);
+    char buffer[64];
+    std::strftime(buffer, sizeof(buffer), format, &broken_down);
+    return buffer;
+}
+
+/// `ArchiveTool.printMarkInformation` (`ArchiveTool.java:1237-1243`): the
+/// first time is "now", then the mark file's start and activity timestamps.
+void print_mark_information(ArchiveMarkFile& mark_file, std::string& out)
+{
+    const auto now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    out += format_time(now, "%H:%M:%S");
+    out += " (start: " + format_time(mark_file.start_timestamp(), "%Y-%m-%d %H:%M:%S");
+    out += ", activity: " + format_time(mark_file.activity_timestamp_volatile(), "%Y-%m-%d %H:%M:%S");
+    out += ")\n";
+    out += mark_header_to_string(mark_file);
+    out += '\n';
 }
 
 int command_count_entries(const std::filesystem::path& archive_dir)
@@ -164,7 +282,7 @@ int command_max_entries()
 int command_pid(const std::filesystem::path& archive_dir)
 {
     std::string error;
-    auto mark_file = open_mark_file(archive_dir, error);
+    auto mark_file = open_mark_file(archive_dir, error, false);
     if (!mark_file)
     {
         print_error(mark_file.error());
@@ -172,6 +290,67 @@ int command_pid(const std::filesystem::path& archive_dir)
     }
 
     std::printf("%d\n", mark_file->pid());
+    return 0;
+}
+
+/// `ArchiveTool.describe` / `describeAll` / `describeRecording`
+/// (`ArchiveTool.java:421-489`).
+int command_describe(const std::filesystem::path& archive_dir, bool all_valid, bool one_recording, long recording_id)
+{
+    auto catalog = open_catalog_read_only(archive_dir);
+    if (!catalog)
+    {
+        print_error(catalog.error());
+        return 1;
+    }
+
+    if (one_recording)
+    {
+        bool found = false;
+        catalog->for_each(
+            [&](CatalogEntry& entry)
+            {
+                if (entry.descriptor.recordingId() == recording_id)
+                {
+                    found = true;
+                    std::printf("%s\n", descriptor_to_string(entry.descriptor).c_str());
+                }
+            });
+        if (!found)
+        {
+            std::fprintf(stderr, "io.aeron.exceptions.AeronException: no recording found with recordingId: %ld\n",
+                         recording_id);
+            return 1;
+        }
+        return 0;
+    }
+
+    std::string error;
+    auto mark_file = open_mark_file(archive_dir, error, true);
+    if (!mark_file)
+    {
+        print_error(mark_file.error());
+        return 1;
+    }
+
+    std::string out;
+    print_mark_information(*mark_file, out);
+    out += "Catalog capacity in bytes: " + std::to_string(catalog->capacity()) + '\n';
+    catalog->for_each(
+        [&](CatalogEntry& entry)
+        {
+            if (all_valid || archive_codecs::RecordingState::VALID == entry.header.state())
+            {
+                out += descriptor_to_string(entry.descriptor);
+                if (all_valid)
+                {
+                    out += '|';
+                    out += archive_codecs::RecordingState::c_str(entry.header.state());
+                }
+                out += '\n';
+            }
+        });
+    std::fwrite(out.data(), 1, out.size(), stdout);
     return 0;
 }
 
@@ -211,9 +390,22 @@ int run_archive_tool_ro(int argc, char* argv[])
     {
         return command_pid(archive_dir);
     }
+    // `args.length > 1 && "describe-all"` (`ArchiveTool.java:129-131`): extra
+    // arguments are ignored by the reference.
+    if (command == "describe-all" && arguments >= 1)
+    {
+        return command_describe(archive_dir, true, false, 0);
+    }
+    if (command == "describe" && arguments == 1)
+    {
+        return command_describe(archive_dir, false, false, 0);
+    }
+    if (command == "describe" && arguments == 2)
+    {
+        return command_describe(archive_dir, false, true, std::strtol(argv[3], nullptr, 10));
+    }
 
-    if (command == "describe" || command == "describe-all" || command == "dump" || command == "errors" ||
-        command == "verify" || command == "checksum")
+    if (command == "dump" || command == "errors" || command == "verify" || command == "checksum")
     {
         std::fprintf(stderr, "ERR: %.*s is not implemented yet\n", static_cast<int>(command.size()), command.data());
         return 2;
