@@ -33,8 +33,8 @@ commit.
 | client connect request (`SessionConnectRequest` template 3: fields in schema order, `version` = protocol 0.3.0 = `768`, `clientInfo` = `name=<clientName> version=1.54.0 commit=454da1e4e6`) and the four egress templates the client reads (`SessionMessageHeader` 1, `SessionEvent` 2, `NewLeaderEvent` 6, `Challenge` 7) | `AeronCluster.java:2452-2471` (`AeronCounters.formatVersionInfo`, `AeronCounters.java:1633-1636`; `AeronClusterVersion` = 1.54.0 / `454da1e4e6`); `EgressPoller.java:235-320` | C3a: `async_connect_test.cpp::theSevenStepsReachALiveSessionAndTheRequestCarriesTheReferencesFields` (decodes the bytes our client offered) + `egress_poller_test.cpp` (each template, the unknown schema and the full-slot `ABORT`) + `client_connect_interop_test.cpp` against the reference `ClusteredMediaDriver` |
 | `aeron.cluster.cpp.standby.snapshot.on.startup` (`warn`/`refuse`, default `warn`) — this build's own name, not in the reference; it gates the Q6 standby-startup check (a standby snapshot newer than every local snapshot) | Q6 (`analysis/cpp/impl-2026-11-07-cpp-cluster.md:59`) | C4a: `StandbyStartupCheckTest` (warn/refuse, newer/equal/older) + `ConsensusModuleInteropTest.aNewerStandbySnapshotWarnsAndCountsAnError` / `refuseModeStopsTheStart` |
 | `cluster-mark.dat` written by the CM (component `CONSENSUS_MODULE`, `memberId`, `serviceId` = -1, `clusterId`, archive/service/CM/ingress stream ids) | `ConsensusModule.Context.concludeMarkFile` (`ConsensusModule.java:4610-4650`) | C4a: `ConsensusModuleInteropTest.theSkeletonStartsAgainstTheReferenceArchiveAndPublishesItsState` |
-
-
+| cluster session counter 241: key `[clusterId int32][clusterSessionId int64]`, label `cluster-session: <sessionInfo> - clusterId=<id>` | `ClusterSession.addSessionCounter` (`ClusterSession.java:529-553`) | C4b: `SessionManagerTest.aSessionCounterUsesTheClusterAndSessionKey` (type id and the key's cluster-id prefix) |
+| log session message: the 32-byte `SessionMessageHeader` + payload; `SessionOpenEvent` and `SessionCloseEvent` records | `LogPublisher.appendMessage/appendSessionOpen/appendSessionClose` (`LogPublisher.java:115-218`) | C4b: `LogPublisherTest` (all three records decoded field by field; `payload_bytes_copied() == 0`) |
 ## C++-only switches (A6c/A6d, 2026-11-10)
 
 These never join the reference's 48-name table (`archive_config_names()`), whose
@@ -64,3 +64,4 @@ cases this card is judged by, and each fails loudly rather than silently:
   request's credentials are supplied as-is (the reference's
   `ReplicationCredentialsSupplier` does the same for a non-challenging source).
  (C4a: the consensus module launches, loops and watches its archive)
+ (C4b: the sessions, their ingress and the log/egress records)

@@ -11,6 +11,7 @@
 #include <aeronc.h>
 
 #include "cluster/common/cluster_counters.h"
+#include "cluster/common/cluster_member.h"
 #include "cluster/consensus/standby_startup_check.h"
 #include "core/io/fs.h"
 #include "core/time/clock.h"
@@ -43,9 +44,9 @@ constexpr std::int64_t ASYNC_ADD_TIMEOUT_NS = 5'000'000'000;
 }
 
 /// The reference's synchronous `aeron.addCounter` on the startup path.
-[[nodiscard]] std::expected<axc::core::CounterPtr, Error> await_counter(axc::core::DeepmsgClient& client,
-                                                                        axc::core::AsyncAdd<axc::core::CounterPtr>& add,
-                                                                        std::int64_t timeout_ns)
+template <class H>
+[[nodiscard]] std::expected<H, Error> await_handle(axc::core::DeepmsgClient& client, axc::core::AsyncAdd<H>& add,
+                                                   std::int64_t timeout_ns)
 {
     const std::int64_t deadline = axc::core::NanoClock::now() + timeout_ns;
     while (true)
@@ -273,11 +274,74 @@ std::expected<void, Error> ConsensusModuleAgent::on_start()
 
     // C4d brings `recoverFromSnapshotAndLog` and the Election; until then the
     // reference's `election.doWork` / ACTIVE transition is the end of onStart.
+    auto session_layer = open_session_layer();
+    if (!session_layer)
+    {
+        report(session_layer.error());
+        (void)mark_file_.signal_failed_start();
+        return std::unexpected(session_layer.error());
+    }
+
     state(ConsensusModuleState::active, "started");
     role(ClusterRole::follower);
     time_of_last_update_ns_ = now_ns();
 
     started_ = true;
+    return {};
+}
+
+std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
+{
+    auto members = common::parse_cluster_members(config_.members);
+    if (!members)
+    {
+        return std::unexpected(members.error());
+    }
+    ingress_endpoints_ = common::ingress_endpoints(*members);
+
+    log_publisher_ = std::make_unique<LogPublisher>(config_.log_channel);
+    auto log_publication_add = client_.add_exclusive_publication(config_.log_channel, config_.log_stream_id);
+    auto log_publication = await_handle(client_, log_publication_add, ASYNC_ADD_TIMEOUT_NS);
+    if (!log_publication)
+    {
+        return std::unexpected(log_publication.error());
+    }
+    log_publisher_->publication(std::move(*log_publication));
+
+    auto ingress_add = client_.add_subscription(config_.ingress_channel, config_.ingress_stream_id);
+    auto ingress = await_handle(client_, ingress_add, ASYNC_ADD_TIMEOUT_NS);
+    if (!ingress)
+    {
+        return std::unexpected(ingress.error());
+    }
+    ingress_subscription_ = std::move(*ingress);
+
+    if (config_.ingress_ipc_allowed)
+    {
+        auto ipc_add = client_.add_subscription("aeron:ipc", config_.ingress_stream_id);
+        auto ipc = await_handle(client_, ipc_add, ASYNC_ADD_TIMEOUT_NS);
+        if (!ipc)
+        {
+            return std::unexpected(ipc.error());
+        }
+        ipc_ingress_subscription_ = std::move(*ipc);
+    }
+
+    egress_publisher_ = std::make_unique<EgressPublisher>(config_.leader_heartbeat_timeout_ns);
+    ingress_adapter_ = std::make_unique<IngressAdapter>(*this, config_.ingress_fragment_limit);
+    ingress_adapter_->connect(std::move(ingress_subscription_), std::move(ipc_ingress_subscription_));
+
+    SessionManagerConfig session_config;
+    session_config.member_id = config_.member_id;
+    session_config.cluster_id = config_.cluster_id;
+    session_config.session_timeout_ns = config_.session_timeout_ns;
+    session_config.max_concurrent_sessions = config_.max_concurrent_sessions;
+    session_config.service_count = config_.service_count;
+
+    session_manager_ = std::make_unique<SessionManager>(
+        session_config, client_, *log_publisher_, *egress_publisher_, authenticator_, authorisation_service_,
+        [this]() { return now_ns(); }, [this]() { return now_ms(); },
+        [this]() { counter_increment(timed_out_client_counter_); }, [this](const Error& error) { report(error); });
     return {};
 }
 
@@ -358,7 +422,7 @@ std::expected<void, Error> ConsensusModuleAgent::allocate_counters()
         auto add =
             common::allocate_versioned(client_, "Cluster Errors", common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID,
                                        config_.cluster_id, VERSION, GIT_SHA);
-        auto counter = await_counter(client_, add, ASYNC_ADD_TIMEOUT_NS);
+        auto counter = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
         if (!counter)
         {
             return std::unexpected(counter.error());
@@ -370,7 +434,7 @@ std::expected<void, Error> ConsensusModuleAgent::allocate_counters()
                                     std::int32_t type_id) -> std::expected<axc::core::CounterPtr, Error>
     {
         auto add = common::allocate(client_, name, type_id, config_.cluster_id);
-        return await_counter(client_, add, ASYNC_ADD_TIMEOUT_NS);
+        return await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
     };
 
     struct Counter
@@ -496,6 +560,18 @@ int ConsensusModuleAgent::slow_tick_work(std::int64_t now_ns) noexcept
     }
 
     work_count += poll_archive_error_response();
+
+    // `ConsensusModuleAgent.slowTickWork:2431-2460`: the leader runs redirects,
+    // rejections and the pending-session checks before the consensus work.
+    if (nullptr != session_manager_ && ClusterRole::leader == role_ && state_ == ConsensusModuleState::active)
+    {
+        work_count += session_manager_->send_redirects(leadership_term_id_, config_.member_id, now_ns);
+        work_count += session_manager_->send_rejections(leadership_term_id_, config_.member_id, now_ns);
+        work_count += session_manager_->process_all_pending_sessions(now_ns, config_.member_id, leadership_term_id_);
+        work_count +=
+            session_manager_->check_sessions(now_ns, leadership_term_id_, config_.member_id, ingress_endpoints_);
+    }
+
     return work_count;
 }
 
@@ -526,10 +602,21 @@ int ConsensusModuleAgent::poll_archive_error_response() noexcept
 
 int ConsensusModuleAgent::consensus_work(std::int64_t /*timestamp*/, std::int64_t /*now_ns*/) noexcept
 {
-    // C4b/C4d transcribe `ConsensusModuleAgent.consensusWork` (`:2499`):
-    // ingress, log publication, commit position and the service ack path. The
-    // skeleton has no log publication and no sessions yet.
-    return 0;
+    // `ConsensusModuleAgent.consensusWork:2499-2540`: the leader's active
+    // branch polls ingress. `updateLeaderPosition`, commit/service acks and the
+    // follower branch are C4c/C4d.
+    if (nullptr == session_manager_ || ClusterRole::leader != role_ || state_ != ConsensusModuleState::active)
+    {
+        return 0;
+    }
+
+    auto polled = ingress_adapter_->poll();
+    if (!polled)
+    {
+        report(polled.error());
+        return 0;
+    }
+    return *polled;
 }
 
 void ConsensusModuleAgent::measure_duty_cycle(std::int64_t now_ns) noexcept
@@ -579,6 +666,81 @@ void ConsensusModuleAgent::role(ClusterRole new_role) noexcept
     }
 }
 
+bool ConsensusModuleAgent::on_ingress_message(std::int64_t leadership_term_id, std::int64_t cluster_session_id,
+                                              const std::uint8_t* payload, std::size_t payload_length)
+{
+    if (nullptr != session_manager_ && leadership_term_id == leadership_term_id_ && ClusterRole::leader == role_)
+    {
+        return session_manager_->on_session_message(leadership_term_id, cluster_session_id, payload, payload_length);
+    }
+    return true;
+}
+
+void ConsensusModuleAgent::on_session_connect(std::int64_t correlation_id, std::int32_t response_stream_id,
+                                              std::int32_t version, std::string_view response_channel,
+                                              std::span<const std::uint8_t> encoded_credentials,
+                                              std::string_view client_info, const IngressImageInfo& image_info)
+{
+    if (nullptr == session_manager_)
+    {
+        return;
+    }
+    session_manager_->on_session_connect(correlation_id, response_stream_id, version, std::string{response_channel},
+                                         encoded_credentials, client_info, image_info.correlation_id,
+                                         image_info.source_identity, image_info.session_id, role_, ingress_endpoints_);
+}
+
+void ConsensusModuleAgent::on_session_close(std::int64_t leadership_term_id, std::int64_t cluster_session_id)
+{
+    if (nullptr != session_manager_ && leadership_term_id == leadership_term_id_ && ClusterRole::leader == role_)
+    {
+        session_manager_->on_session_close(leadership_term_id, cluster_session_id);
+    }
+}
+
+void ConsensusModuleAgent::on_session_keep_alive(std::int64_t leadership_term_id, std::int64_t cluster_session_id,
+                                                 std::int64_t image_correlation_id)
+{
+    if (nullptr != session_manager_ && leadership_term_id == leadership_term_id_ && ClusterRole::leader == role_)
+    {
+        session_manager_->on_session_keep_alive(leadership_term_id, cluster_session_id, image_correlation_id);
+    }
+}
+
+void ConsensusModuleAgent::on_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
+                                                 std::span<const std::uint8_t> encoded_credentials)
+{
+    if (nullptr != session_manager_ && ClusterRole::leader == role_)
+    {
+        session_manager_->on_challenge_response(correlation_id, cluster_session_id, encoded_credentials);
+    }
+    else
+    {
+        // The non-leader path forwards to the leader over the consensus
+        // publication (`ConsensusPublisher.challengeResponse`), which C6 owns.
+        report(make_error(ErrorCode::internal_error, "challenge response for a follower is not transcribed yet (C6)"));
+    }
+}
+
+void ConsensusModuleAgent::on_admin_request(std::int64_t leadership_term_id, std::int64_t cluster_session_id,
+                                            std::int64_t correlation_id, std::int32_t request_type,
+                                            std::span<const std::uint8_t> /*payload*/)
+{
+    (void)leadership_term_id;
+    (void)cluster_session_id;
+    (void)correlation_id;
+    report(make_error(ErrorCode::internal_error,
+                      "admin request type=" + std::to_string(request_type) + " is not transcribed yet (C4c)"));
+}
+
+void ConsensusModuleAgent::on_extension_message(std::int32_t schema_id, std::int32_t template_id,
+                                                std::span<const std::uint8_t> /*message*/)
+{
+    report(make_error(ErrorCode::protocol_error, "expected schemaId=" + std::to_string(common::SBE_SCHEMA_ID) +
+                                                     ", actual=" + std::to_string(schema_id) +
+                                                     " (templateId=" + std::to_string(template_id) + ")"));
+}
+
 void ConsensusModuleAgent::on_close() noexcept
 {
     if (!started_ || closed_)
@@ -587,6 +749,11 @@ void ConsensusModuleAgent::on_close() noexcept
     }
 
     closed_ = true;
+    if (nullptr != session_manager_)
+    {
+        // `SessionManager.closeSessions` (`SessionManager.java:1063-1068`).
+        session_manager_->close_sessions();
+    }
     state(ConsensusModuleState::closed, "closed");
     close_resources();
 
@@ -599,6 +766,12 @@ void ConsensusModuleAgent::on_close() noexcept
 
 void ConsensusModuleAgent::close_resources() noexcept
 {
+    // Session manager first: it refers to both publishers.
+    session_manager_.reset();
+    ingress_adapter_.reset();
+    egress_publisher_.reset();
+    log_publisher_.reset();
+
     if (nullptr != archive_)
     {
         (void)aeron_archive_close(archive_);

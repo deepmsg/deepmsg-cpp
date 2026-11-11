@@ -1,11 +1,14 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
 #
-# C4a note: `consensus_module_agent.cpp` is deliberately not registered yet.
-# Its `do_work`/`slow_tick_work` path is allocation-free, but the same TU holds
-# the startup and error paths (std::string error descriptions, std::filesystem
-# in the mark-file link), so the object references `operator new`. The
-# reference keeps `slowTickWork`/`consensusWork` in the agent class too; the
-# registration waits for the C4/C6 split (or the C10 allocation test) that can
-# tell warm-up from steady state, as the client module does for egress_poller.
-# log_publisher.cpp / log_adapter.cpp / session_manager.cpp land in C4/C6 and
-# must be listed here.
+# C4a/C4b note: `consensus_module_agent.cpp`, `session_manager.cpp`,
+# `cluster_session.cpp`, `log_publisher.cpp` and `egress_publisher.cpp` are
+# deliberately not registered yet. Their steady-state paths are allocation-free
+# (`append_message` is a two-vector offerv), but the same translation units hold
+# the startup/error/session-establishment paths (std::string error descriptions,
+# std::filesystem in the mark-file link, session counters/publications), so the
+# objects reference `operator new`. Registration waits for the C4/C6 split (or
+# the C10 allocation test) that can tell warm-up from steady state, as the
+# client module does for egress_poller.
+#
+# During a poll with back-pressure the ingress adapter ABORTs; the log/egress
+# writers are the ones the C10 benchmark will pin.

@@ -59,6 +59,15 @@ std::array<std::uint8_t, 2 * sizeof(std::int32_t)> service_counter_key(std::int3
     return key;
 }
 
+std::array<std::uint8_t, sizeof(std::int32_t) + sizeof(std::int64_t)> session_counter_key(
+    std::int32_t cluster_id, std::int64_t session_id) noexcept
+{
+    std::array<std::uint8_t, sizeof(std::int32_t) + sizeof(std::int64_t)> key{};
+    put_le32(key.data(), cluster_id);
+    std::memcpy(key.data() + sizeof(std::int32_t), &session_id, sizeof(session_id));
+    return key;
+}
+
 std::string cluster_counter_label(std::string_view name, std::int32_t cluster_id)
 {
     std::string label{name};
@@ -73,6 +82,13 @@ std::string service_counter_label(std::string_view name, std::int32_t cluster_id
     label.append(SERVICE_ID_LABEL_SUFFIX);
     label.append(std::to_string(service_id));
     return label;
+}
+
+std::string session_counter_label(std::string_view session_info, std::int32_t cluster_id)
+{
+    std::string label{"cluster-session: "};
+    label.append(session_info);
+    return cluster_counter_label(label, cluster_id);
 }
 
 std::string version_info(std::string_view version, std::string_view commit_hash)

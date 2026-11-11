@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "cluster/consensus/consensus_constants.h"
 #include "core/config/property_source.h"
 #include "core/error/error.h"
 
@@ -14,9 +15,6 @@ namespace deepmsg::cluster::consensus
 {
 
 using axc::core::Error;
-
-/// `Aeron.NULL_VALUE`.
-inline constexpr std::int64_t NULL_VALUE = -1;
 
 /// `ConsensusModule.State` (`ConsensusModule.java:140-200`): the counter code
 /// is the enum's ordinal.

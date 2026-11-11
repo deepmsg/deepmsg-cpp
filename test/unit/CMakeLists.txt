@@ -127,8 +127,14 @@ axc_add_executable(axc_cluster_consensus_unit_tests
     SOURCES
         cluster/consensus/consensus_module_context_test.cpp
         cluster/consensus/standby_startup_check_test.cpp
+        cluster/consensus/session_manager_test.cpp
+        cluster/consensus/log_publisher_test.cpp
+        cluster/consensus/ingress_adapter_test.cpp
     DEPS
         axc_cluster_consensus
+        axc_core
+        aeron_driver_static
+        aeron_static
         GTest::gtest_main)
 
 # C3c: the same schema transformed to version 5, for the compatibility test.
