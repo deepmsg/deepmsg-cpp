@@ -10,9 +10,11 @@ axc_add_library(axc_cluster_service
         service_adapter.cpp
         log_adapter.cpp
         snapshot.cpp
+        dynamic_service.cpp
     DEPS
         axc_cluster_common
         axc_core
         axc_sbe
         aeron_static
-        aeron_archive_c_client_static)
+        aeron_archive_c_client_static
+        ${CMAKE_DL_LIBS})
