@@ -83,6 +83,9 @@ axc_add_executable(axc_cluster_unit_tests
         cluster/common/cluster_config_test.cpp
         cluster/common/cluster_mark_file_test.cpp
         cluster/common/cluster_mark_file_golden_test.cpp
+        cluster/common/priority_heap_timer_service_test.cpp
+        cluster/common/wheel_timer_service_test.cpp
+        cluster/common/timer_golden_test.cpp
     DEPS
         axc_cluster_common
         GTest::gtest_main)
