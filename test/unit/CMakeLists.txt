@@ -105,11 +105,20 @@ axc_add_executable(axc_cluster_client_unit_tests
         cluster/client/egress_poller_test.cpp
         cluster/client/async_connect_test.cpp
         cluster/client/cluster_client_test.cpp
+        cluster/client/egress_adapter_test.cpp
+        cluster/client/session_event_codec_compatibility_test.cpp
     DEPS
         axc_cluster_client
         aeron_driver_static
         aeron_static
         GTest::gtest_main)
+
+# C3c: the same schema transformed to version 5, for the compatibility test.
+if (AXC_WITH_SBE)
+    add_dependencies(axc_cluster_client_unit_tests axc_sbe_cluster_codecs_v5)
+    target_include_directories(axc_cluster_client_unit_tests PRIVATE
+        "${PROJECT_BINARY_DIR}/generated/axc/sbe-v5")
+endif ()
 
 include(GoogleTest)
 # PRE_TEST: discover at test time, not build time. Sanitizer binaries (TSan in

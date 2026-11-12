@@ -195,13 +195,15 @@ ClusterClient::ClusterClient(axc::core::DeepmsgClient& client, ClientConfig conf
       config_(std::move(config)),
       egress_subscription_(std::move(egress_subscription)),
       ingress_publication_(std::move(ingress_publication)),
-      egress_image_(egress_image),
+      egress_image_(nullptr),
       cluster_session_id_(cluster_session_id),
       leadership_term_id_(leadership_term_id),
       leader_member_id_(leader_member_id)
 {
     encode_session_header(header_, leadership_term_id_, cluster_session_id_);
     ingress_channel_ = config_.ingress_channel.value_or(std::string{});
+    // The hand-off from `AsyncConnect` is the first image the session owns.
+    set_egress_image(egress_image);
 
     if (0 != aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this))
     {
@@ -219,7 +221,7 @@ ClusterClient::ClusterClient(ClusterClient&& other) noexcept
     : client_(other.client_),
       config_(std::move(other.config_)),
       ingress_channel_(std::move(other.ingress_channel_)),
-      pending_error_(std::move(other.pending_error_)),
+      pending_error_(other.pending_error_),
       egress_subscription_(std::move(other.egress_subscription_)),
       ingress_publication_(std::move(other.ingress_publication_)),
       egress_image_(other.egress_image_),
@@ -248,6 +250,7 @@ ClusterClient::ClusterClient(ClusterClient&& other) noexcept
     (void)aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this);
     (void)aeron_controlled_fragment_assembler_create(&controlled_assembler_, &ClusterClient::on_fragment, this);
     other.client_ = nullptr;
+    other.egress_image_ = nullptr;
 }
 
 ClusterClient& ClusterClient::operator=(ClusterClient&& other) noexcept
@@ -263,10 +266,11 @@ ClusterClient& ClusterClient::operator=(ClusterClient&& other) noexcept
             (void)aeron_controlled_fragment_assembler_delete(controlled_assembler_);
         }
 
+        release_egress_image();
         client_ = other.client_;
         config_ = std::move(other.config_);
         ingress_channel_ = std::move(other.ingress_channel_);
-        pending_error_ = std::move(other.pending_error_);
+        pending_error_ = other.pending_error_;
         egress_subscription_ = std::move(other.egress_subscription_);
         ingress_publication_ = std::move(other.ingress_publication_);
         egress_image_ = other.egress_image_;
@@ -294,12 +298,14 @@ ClusterClient& ClusterClient::operator=(ClusterClient&& other) noexcept
         (void)aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this);
         (void)aeron_controlled_fragment_assembler_create(&controlled_assembler_, &ClusterClient::on_fragment, this);
         other.client_ = nullptr;
+        other.egress_image_ = nullptr;
     }
     return *this;
 }
 
 ClusterClient::~ClusterClient()
 {
+    release_egress_image();
     if (nullptr != assembler_)
     {
         (void)aeron_fragment_assembler_delete(assembler_);
@@ -313,6 +319,29 @@ ClusterClient::~ClusterClient()
 std::int64_t ClusterClient::now_ns() const
 {
     return config_.clock ? config_.clock() : axc::core::NanoClock::now();
+}
+
+void ClusterClient::set_egress_image(aeron_image_t* image) noexcept
+{
+    if (image == egress_image_)
+    {
+        return;
+    }
+    release_egress_image();
+    egress_image_ = image;
+    if (nullptr != egress_image_ && nullptr != egress_subscription_)
+    {
+        (void)aeron_subscription_image_retain(egress_subscription_.get(), egress_image_);
+    }
+}
+
+void ClusterClient::release_egress_image() noexcept
+{
+    if (nullptr != egress_image_ && nullptr != egress_subscription_)
+    {
+        (void)aeron_subscription_image_release(egress_subscription_.get(), egress_image_);
+    }
+    egress_image_ = nullptr;
 }
 
 void ClusterClient::state(State new_state, std::int64_t deadline_ns) noexcept
@@ -741,6 +770,7 @@ void ClusterClient::close()
     }
 
     ingress_publication_.close();
+    release_egress_image();
     egress_subscription_.reset();
     for (MemberIngress& member : members_)
     {
@@ -856,7 +886,7 @@ aeron_controlled_fragment_handler_action_t ClusterClient::dispatch(std::span<con
                 return AERON_ACTION_CONTINUE;
             }
 
-            egress_image_ = image;
+            set_egress_image(image);
             const std::string endpoints = decoder.ingressEndpoints();
             auto promoted = on_new_leader(session_id, decoder.leadershipTermId(), decoder.leaderMemberId(), endpoints);
             if (!promoted)
@@ -909,7 +939,16 @@ aeron_controlled_fragment_handler_action_t ClusterClient::dispatch(std::span<con
 }
 
 EgressAdapter::EgressAdapter(EgressListener& listener, std::int64_t cluster_session_id, std::size_t fragment_limit)
-    : listener_(listener), cluster_session_id_(cluster_session_id), fragment_limit_(fragment_limit)
+    : EgressAdapter(listener, nullptr, cluster_session_id, fragment_limit)
+{
+}
+
+EgressAdapter::EgressAdapter(EgressListener& listener, EgressListenerExtension* listener_extension,
+                             std::int64_t cluster_session_id, std::size_t fragment_limit)
+    : listener_(listener),
+      listener_extension_(listener_extension),
+      cluster_session_id_(cluster_session_id),
+      fragment_limit_(fragment_limit)
 {
     if (0 != aeron_fragment_assembler_create(&assembler_, &EgressAdapter::on_fragment, this))
     {
@@ -943,13 +982,40 @@ std::expected<int, Error> EgressAdapter::poll(aeron_subscription_t* subscription
 
 void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::size_t length, aeron_header_t*)
 {
-    auto* adapter = static_cast<EgressAdapter*>(clientd);
-    const std::span<const std::uint8_t> message(buffer, length);
+    static_cast<EgressAdapter*>(clientd)->dispatch(std::span<const std::uint8_t>(buffer, length));
+}
 
-    auto header = common::message_header(message);
+std::optional<Error> EgressAdapter::take_error() noexcept
+{
+    std::optional<Error> error = pending_error_;
+    pending_error_.reset();
+    return error;
+}
+
+void EgressAdapter::dispatch(std::span<const std::uint8_t> message)
+{
+    // `EgressAdapter.java:99-113`: a foreign schema goes to the extension
+    // listener, and without one it is an error (the reference throws
+    // `ClusterException`; our `poll()` carries the same text as an error).
+    auto header = common::raw_message_header(message);
     if (!header)
     {
-        adapter->pending_error_ = header.error();
+        pending_error_ = header.error();
+        return;
+    }
+
+    if (header->schemaId() != common::SBE_SCHEMA_ID)
+    {
+        if (nullptr != listener_extension_)
+        {
+            listener_extension_->on_extension_message(header->blockLength(), header->templateId(), header->schemaId(),
+                                                      header->version(),
+                                                      message.subspan(common::MESSAGE_HEADER_LENGTH));
+            return;
+        }
+        pending_error_ =
+            make_error(ErrorCode::protocol_error, "expected schemaId=" + std::to_string(common::SBE_SCHEMA_ID) +
+                                                      ", actual=" + std::to_string(header->schemaId()));
         return;
     }
 
@@ -958,10 +1024,10 @@ void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::
         case codecs::SessionMessageHeader::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
-                adapter->listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
-                                              message.subspan(SESSION_HEADER_LENGTH));
+                listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
+                                     message.subspan(SESSION_HEADER_LENGTH));
             }
             break;
         }
@@ -969,11 +1035,11 @@ void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::
         case codecs::SessionEvent::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
-                adapter->listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
-                                                    decoder.leadershipTermId(), decoder.leaderMemberId(),
-                                                    decoder.code(), decoder.getDetailAsString());
+                listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
+                                           decoder.leadershipTermId(), decoder.leaderMemberId(), decoder.code(),
+                                           decoder.getDetailAsString());
             }
             break;
         }
@@ -981,10 +1047,10 @@ void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::
         case codecs::NewLeaderEvent::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
-                adapter->listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
-                                                 decoder.leaderMemberId(), decoder.ingressEndpoints());
+                listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
+                                        decoder.leaderMemberId(), decoder.ingressEndpoints());
             }
             break;
         }
@@ -992,7 +1058,7 @@ void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::
         case codecs::AdminResponse::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
                 const std::string detail = decoder.getMessageAsString();
                 const std::uint32_t payload_length = decoder.payloadLength();
@@ -1002,8 +1068,8 @@ void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::
                     offset <= message.size()
                         ? message.subspan(offset, std::min<std::size_t>(payload_length, message.size() - offset))
                         : std::span<const std::uint8_t>{};
-                adapter->listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(),
-                                                     decoder.requestType(), decoder.responseCode(), detail, payload);
+                listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(), decoder.requestType(),
+                                            decoder.responseCode(), detail, payload);
             }
             break;
         }
@@ -1015,7 +1081,17 @@ void EgressAdapter::on_fragment(void* clientd, const std::uint8_t* buffer, std::
 
 ControlledEgressAdapter::ControlledEgressAdapter(ControlledEgressListener& listener, std::int64_t cluster_session_id,
                                                  std::size_t fragment_limit)
-    : listener_(listener), cluster_session_id_(cluster_session_id), fragment_limit_(fragment_limit)
+    : ControlledEgressAdapter(listener, nullptr, cluster_session_id, fragment_limit)
+{
+}
+
+ControlledEgressAdapter::ControlledEgressAdapter(ControlledEgressListener& listener,
+                                                 ControlledEgressListenerExtension* listener_extension,
+                                                 std::int64_t cluster_session_id, std::size_t fragment_limit)
+    : listener_(listener),
+      listener_extension_(listener_extension),
+      cluster_session_id_(cluster_session_id),
+      fragment_limit_(fragment_limit)
 {
     if (0 != aeron_controlled_fragment_assembler_create(&assembler_, &ControlledEgressAdapter::on_fragment, this))
     {
@@ -1052,13 +1128,38 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::on_fragment(
                                                                                 const std::uint8_t* buffer,
                                                                                 std::size_t length, aeron_header_t*)
 {
-    auto* adapter = static_cast<ControlledEgressAdapter*>(clientd);
-    const std::span<const std::uint8_t> message(buffer, length);
+    return static_cast<ControlledEgressAdapter*>(clientd)->dispatch(std::span<const std::uint8_t>(buffer, length));
+}
 
-    auto header = common::message_header(message);
+std::optional<Error> ControlledEgressAdapter::take_error() noexcept
+{
+    std::optional<Error> error = pending_error_;
+    pending_error_.reset();
+    return error;
+}
+
+aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::dispatch(std::span<const std::uint8_t> message)
+{
+    // `ControlledEgressAdapter.java:89-113`: same schema rule as the
+    // unsolicited adapter, with the listener's action as the return.
+    auto header = common::raw_message_header(message);
     if (!header)
     {
-        adapter->pending_error_ = header.error();
+        pending_error_ = header.error();
+        return AERON_ACTION_ABORT;
+    }
+
+    if (header->schemaId() != common::SBE_SCHEMA_ID)
+    {
+        if (nullptr != listener_extension_)
+        {
+            return listener_extension_->on_extension_message(header->blockLength(), header->templateId(),
+                                                             header->schemaId(), header->version(),
+                                                             message.subspan(common::MESSAGE_HEADER_LENGTH));
+        }
+        pending_error_ =
+            make_error(ErrorCode::protocol_error, "expected schemaId=" + std::to_string(common::SBE_SCHEMA_ID) +
+                                                      ", actual=" + std::to_string(header->schemaId()));
         return AERON_ACTION_ABORT;
     }
 
@@ -1067,10 +1168,10 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::on_fragment(
         case codecs::SessionMessageHeader::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
-                return adapter->listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
-                                                     message.subspan(SESSION_HEADER_LENGTH));
+                return listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
+                                            message.subspan(SESSION_HEADER_LENGTH));
             }
             break;
         }
@@ -1078,11 +1179,11 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::on_fragment(
         case codecs::SessionEvent::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
-                adapter->listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
-                                                    decoder.leadershipTermId(), decoder.leaderMemberId(),
-                                                    decoder.code(), decoder.getDetailAsString());
+                listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
+                                           decoder.leadershipTermId(), decoder.leaderMemberId(), decoder.code(),
+                                           decoder.getDetailAsString());
             }
             break;
         }
@@ -1090,10 +1191,10 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::on_fragment(
         case codecs::NewLeaderEvent::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
-                adapter->listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
-                                                 decoder.leaderMemberId(), decoder.ingressEndpoints());
+                listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
+                                        decoder.leaderMemberId(), decoder.ingressEndpoints());
                 return AERON_ACTION_COMMIT;
             }
             break;
@@ -1102,7 +1203,7 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::on_fragment(
         case codecs::AdminResponse::sbeTemplateId():
         {
             auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
-            if (decoder.clusterSessionId() == adapter->cluster_session_id_)
+            if (decoder.clusterSessionId() == cluster_session_id_)
             {
                 const std::string detail = decoder.getMessageAsString();
                 const std::uint32_t payload_length = decoder.payloadLength();
@@ -1112,8 +1213,8 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::on_fragment(
                     offset <= message.size()
                         ? message.subspan(offset, std::min<std::size_t>(payload_length, message.size() - offset))
                         : std::span<const std::uint8_t>{};
-                adapter->listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(),
-                                                     decoder.requestType(), decoder.responseCode(), detail, payload);
+                listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(), decoder.requestType(),
+                                            decoder.responseCode(), detail, payload);
             }
             break;
         }

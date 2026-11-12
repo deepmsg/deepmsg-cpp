@@ -56,6 +56,33 @@ public:
                                    std::span<const std::uint8_t> payload) = 0;
 };
 
+/// `EgressListenerExtension` (`EgressListenerExtension.java:28-52`): a message
+/// whose schema is not the cluster's own. `buffer` is the message body, i.e.
+/// after the 8-byte SBE header (`EgressAdapter.java:100-113`).
+class EgressListenerExtension
+{
+public:
+    virtual ~EgressListenerExtension() = default;
+
+    virtual void on_extension_message(std::int32_t acting_block_length, std::int32_t template_id,
+                                      std::int32_t schema_id, std::int32_t acting_version,
+                                      std::span<const std::uint8_t> buffer) = 0;
+};
+
+/// `ControlledEgressListenerExtension`: the controlled form returns the
+/// poller's action.
+class ControlledEgressListenerExtension
+{
+public:
+    virtual ~ControlledEgressListenerExtension() = default;
+
+    virtual aeron_controlled_fragment_handler_action_t on_extension_message(std::int32_t acting_block_length,
+                                                                            std::int32_t template_id,
+                                                                            std::int32_t schema_id,
+                                                                            std::int32_t acting_version,
+                                                                            std::span<const std::uint8_t> buffer) = 0;
+};
+
 /// `ControlledEgressListener` (`AeronCluster.java:984-1127`): `on_message`
 /// returns the poller's action, everything else is fire-and-forget.
 class ControlledEgressListener
@@ -316,6 +343,12 @@ private:
 
     [[nodiscard]] aeron_controlled_fragment_handler_action_t dispatch(std::span<const std::uint8_t> message,
                                                                       aeron_image_t* image, bool controlled);
+    /// `egressImage = (Image)header.context()` (`AeronCluster.java:933`). The C
+    /// client deletes an unretained image once the subscriber has polled past
+    /// it, so the session holds its own reference
+    /// (`aeron_subscription_image_retain`); `is_closed` stays readable.
+    void set_egress_image(aeron_image_t* image) noexcept;
+    void release_egress_image() noexcept;
     void on_disconnected();
     void close_session();
     void state(State new_state, std::int64_t deadline_ns) noexcept;
@@ -355,6 +388,8 @@ class EgressAdapter
 {
 public:
     EgressAdapter(EgressListener& listener, std::int64_t cluster_session_id, std::size_t fragment_limit);
+    EgressAdapter(EgressListener& listener, EgressListenerExtension* listener_extension,
+                  std::int64_t cluster_session_id, std::size_t fragment_limit);
     ~EgressAdapter();
 
     EgressAdapter(const EgressAdapter&) = delete;
@@ -362,10 +397,20 @@ public:
 
     [[nodiscard]] std::expected<int, Error> poll(aeron_subscription_t* subscription);
 
+    /// `EgressAdapter.onFragment(...)` (`EgressAdapter.java:92-241`), the
+    /// entry point the reference's own `EgressAdapterTest` calls.
+    void dispatch(std::span<const std::uint8_t> message);
+
+    /// The error the last `dispatch` stored. The reference throws from
+    /// `onFragment`; here `poll()` returns it, and a caller that feeds
+    /// fragments itself (`EgressAdapterTest` does) takes it from here.
+    [[nodiscard]] std::optional<Error> take_error() noexcept;
+
 private:
     static void on_fragment(void* clientd, const std::uint8_t* buffer, std::size_t length, aeron_header_t* header);
 
     EgressListener& listener_;
+    EgressListenerExtension* listener_extension_{nullptr};
     std::int64_t cluster_session_id_;
     std::size_t fragment_limit_;
     aeron_fragment_assembler_t* assembler_{nullptr};
@@ -377,6 +422,8 @@ class ControlledEgressAdapter
 public:
     ControlledEgressAdapter(ControlledEgressListener& listener, std::int64_t cluster_session_id,
                             std::size_t fragment_limit);
+    ControlledEgressAdapter(ControlledEgressListener& listener, ControlledEgressListenerExtension* listener_extension,
+                            std::int64_t cluster_session_id, std::size_t fragment_limit);
     ~ControlledEgressAdapter();
 
     ControlledEgressAdapter(const ControlledEgressAdapter&) = delete;
@@ -384,11 +431,18 @@ public:
 
     [[nodiscard]] std::expected<int, Error> poll(aeron_subscription_t* subscription);
 
+    /// `ControlledEgressAdapter.onFragment(...)`.
+    [[nodiscard]] aeron_controlled_fragment_handler_action_t dispatch(std::span<const std::uint8_t> message);
+
+    /// The error the last `dispatch` stored (see `EgressAdapter::take_error`).
+    [[nodiscard]] std::optional<Error> take_error() noexcept;
+
 private:
     static aeron_controlled_fragment_handler_action_t on_fragment(void* clientd, const std::uint8_t* buffer,
                                                                   std::size_t length, aeron_header_t* header);
 
     ControlledEgressListener& listener_;
+    ControlledEgressListenerExtension* listener_extension_{nullptr};
     std::int64_t cluster_session_id_;
     std::size_t fragment_limit_;
     aeron_controlled_fragment_assembler_t* assembler_{nullptr};
