@@ -19,8 +19,6 @@ namespace
 
 namespace codecs = common::codecs;
 
-/// `FRAGMENT_LIMIT` (`AeronCluster.java:103`).
-constexpr std::size_t FRAGMENT_LIMIT = 10;
 /// `AERON_CLIENT_MAX_CHANNEL_STR_LEN` is private to the C client; the same
 /// bound as `DeepmsgClient::MAX_CHANNEL_LENGTH`.
 constexpr std::size_t MAX_CHANNEL_LENGTH = 4096;
@@ -211,7 +209,7 @@ std::expected<std::optional<ClusterClient>, Error> AsyncConnect::poll(axc::core:
         }
 
         case State::conclude_connect:
-            return conclude_connect();
+            return conclude_connect(client);
 
         case State::done:
             break;
@@ -647,7 +645,7 @@ void AsyncConnect::update_members()
     state_ = State::await_publication_connected;
 }
 
-std::expected<std::optional<ClusterClient>, Error> AsyncConnect::conclude_connect()
+std::expected<std::optional<ClusterClient>, Error> AsyncConnect::conclude_connect(axc::core::DeepmsgClient& client)
 {
     // `AeronCluster.java:2572-2598`.
     if (!config_.new_leader_timeout_ns.has_value())
@@ -657,7 +655,7 @@ std::expected<std::optional<ClusterClient>, Error> AsyncConnect::conclude_connec
         config_.new_leader_timeout_ns = 2 * heartbeat;
     }
 
-    ClusterClient cluster(config_, std::move(egress_subscription_), std::move(ingress_publication_),
+    ClusterClient cluster(client, config_, std::move(egress_subscription_), std::move(ingress_publication_),
                           egress_poller_->egress_image(), cluster_session_id_, leadership_term_id_, leader_member_id_);
 
     // The leader's ingress publication went into the cluster above; the other
