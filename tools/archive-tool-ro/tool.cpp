@@ -35,6 +35,7 @@
 #include "archive/server/frame_layout.h"
 #include "archive/server/recording_reader.h"
 #include "archive/server/segment_files.h"
+#include "core/io/distinct_error_log.h"
 #include "core/io/mapped_file.h"
 #include "io_aeron_archive_codecs/RecordingDescriptor.h"
 #include "io_aeron_archive_codecs/RecordingState.h"
@@ -99,7 +100,7 @@ constexpr std::string_view HELP_TEXT =
 
 /// `ArchiveMarkFile.LINK_FILENAME`: the ASCII path of the directory holding the
 /// mark file, written next to the archive directory when the two differ.
-constexpr const char* MARK_FILE_LINK_NAME = "archive-mark.lnk";
+constexpr const char* MARK_FILE_LINK_NAME = ArchiveMarkFile::LINK_FILENAME;
 
 void print_help()
 {
@@ -1134,80 +1135,14 @@ int command_dump(const std::filesystem::path& archive_dir, std::int64_t fragment
     return 0;
 }
 
-std::int64_t read_int64_le(const std::uint8_t* bytes) noexcept
-{
-    std::uint64_t value = 0;
-    for (int i = 7; i >= 0; --i)
-    {
-        value = (value << 8) | bytes[i];
-    }
-    return static_cast<std::int64_t>(value);
-}
-
-/// `CommonContext.DATE_TIME_FORMATTER` (`CommonContext.java:572`):
-/// `uuuu-MM-dd HH:mm:ss.SSSSSSZ`, i.e. microseconds and a numeric offset.
-std::string format_error_time(std::int64_t epoch_millis)
-{
-    const std::time_t seconds = static_cast<std::time_t>(epoch_millis / 1000);
-    std::tm local{};
-    localtime_r(&seconds, &local);
-    char date[64];
-    std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &local);
-
-    const std::int64_t micros = ((epoch_millis % 1000) + 1000) % 1000 * 1000;
-    const long offset_seconds = local.tm_gmtoff;
-    const char sign = offset_seconds < 0 ? '-' : '+';
-    const long offset = offset_seconds < 0 ? -offset_seconds : offset_seconds;
-
-    char buffer[96];
-    std::snprintf(buffer, sizeof(buffer), "%s.%06lld%c%02ld%02ld", date, static_cast<long long>(micros), sign,
-                  offset / 3600, (offset % 3600) / 60);
-    return buffer;
-}
-
-/// `CommonContext.printErrorLog` (`CommonContext.java:1274-1297`) over an
-/// Aeron distinct-error-log region (`aeron_distinct_error_log.h:27-40`): a
-/// 24-byte header per entry (length, observation count, last/first timestamps)
-/// followed by the description, entries 8-byte aligned, the length stored last.
+/// `CommonContext.printErrorLog` (`CommonContext.java:1274-1297`): the
+/// rendering lives in core so the archive's `saveExistingErrors` and this
+/// command cannot drift apart.
 int print_error_log(const std::uint8_t* buffer, std::size_t size)
 {
-    if (size < 24 || 0 == read_int32_le(buffer))
-    {
-        // `CommonContext.printErrorLog`'s else branch (`:1297-1301`): no
-        // errors still prints the summary, without the trailing period.
-        std::printf("\n0 distinct errors observed\n");
-        return 0;
-    }
-
-    int distinct_error_count = 0;
-    std::size_t offset = 0;
-    while (offset + 24 <= size)
-    {
-        const std::int32_t length = read_int32_le(buffer + offset);
-        if (0 == length)
-        {
-            break;
-        }
-        if (length < 24 || offset + static_cast<std::size_t>(length) > size)
-        {
-            break;
-        }
-
-        const std::int32_t observations = read_int32_le(buffer + offset + 4);
-        const std::int64_t last_timestamp = read_int64_le(buffer + offset + 8);
-        const std::int64_t first_timestamp = read_int64_le(buffer + offset + 16);
-        const auto payload = static_cast<std::size_t>(length - 24);
-        std::printf("\n%d observations from %s to %s for:\n", observations, format_error_time(first_timestamp).c_str(),
-                    format_error_time(last_timestamp).c_str());
-        std::fwrite(buffer + offset + 24, 1, payload, stdout);
-        std::printf("\n");
-
-        ++distinct_error_count;
-        offset += (static_cast<std::size_t>(length) + 7) & ~static_cast<std::size_t>(7);
-    }
-
-    std::printf("\n%d distinct errors observed.\n", distinct_error_count);
-    return distinct_error_count;
+    const axc::core::RenderedErrorLog rendered = axc::core::render_distinct_error_log({buffer, size});
+    std::fwrite(rendered.text.data(), 1, rendered.text.size(), stdout);
+    return rendered.distinct_error_count;
 }
 
 /// `ArchiveTool.printErrors` (`ArchiveTool.java:1526-1543`): the archive's own

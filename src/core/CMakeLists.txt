@@ -11,6 +11,7 @@ axc_add_library(axc_core
         config/property_source.cpp
         counters/counter_directory.cpp
         io/fs.cpp
+        io/distinct_error_log.cpp
         io/mapped_file.cpp
         io/mark_file.cpp
         time/clock.cpp
