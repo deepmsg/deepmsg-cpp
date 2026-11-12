@@ -414,7 +414,7 @@ TEST_F(ClusterMarkFileTest, shouldNameAndResolveServiceMarkFiles)
     std::filesystem::create_directories(real_dir);
     {
         std::ofstream link{directory_ + "/cluster-mark.lnk"};
-        link << real_dir << "/cluster-mark.dat\n";
+        link << real_dir << "\n";
     }
 
     EXPECT_EQ(real_dir, ClusterMarkFile::resolve_mark_file_dir(directory_));
