@@ -1,10 +1,14 @@
 #include "archive/server/archive_mark_file.h"
 
+#include <fcntl.h>
 #include <unistd.h>
-
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <utility>
 
+#include "core/io/distinct_error_log.h"
 #include "core/io/fs.h"
 
 namespace deepmsg::archive::server
@@ -43,6 +47,15 @@ constexpr std::int32_t NULL_VALUE = -1;
                                      " does not match software: " + std::to_string(ArchiveMarkFile::MAJOR_VERSION));
 }
 
+/// The SBE header block has to fit the mapping before it is decoded; the
+/// reference's `headerDecoder.wrap` throws otherwise (inside the try block that
+/// resets the activity timestamp).
+[[nodiscard]] bool header_fits(const std::span<const std::uint8_t> bytes, std::int32_t header_offset) noexcept
+{
+    const auto start = static_cast<std::size_t>(header_offset);
+    return bytes.size() >= start && archive_mark_codecs::MarkFileHeader::SBE_BLOCK_LENGTH <= bytes.size() - start;
+}
+
 }  // namespace
 
 ArchiveMarkFile::ArchiveMarkFile(ArchiveMarkFile&& other) noexcept = default;
@@ -59,6 +72,8 @@ std::expected<ArchiveMarkFile, axc::core::Error> ArchiveMarkFile::create_or_open
 {
     const std::string path = mark_file_path(options.directory);
     const bool exists = axc::core::file_exists(path);
+    const std::int64_t now_ms =
+        nullptr != options.epoch_clock ? options.epoch_clock->time_ms() : axc::core::EpochClock::now_ms();
 
     ArchiveMarkFile archive_mark;
     archive_mark.error_buffer_length_ = options.error_buffer_length;
@@ -77,33 +92,85 @@ std::expected<ArchiveMarkFile, axc::core::Error> ArchiveMarkFile::create_or_open
     }
     archive_mark.header_offset_ = header_offset;
 
-    const auto version_offset =
-        static_cast<std::size_t>(header_offset + archive_mark_codecs::MarkFileHeader::versionEncodingOffset());
-    const auto activity_offset = static_cast<std::size_t>(
-        header_offset + archive_mark_codecs::MarkFileHeader::activityTimestampEncodingOffset());
-
-    if (exists && HEADER_OFFSET == header_offset)
+    if (exists)
     {
-        // `ArchiveMarkFile.java:122-131`: open the existing file and validate it.
-        auto mark_file = axc::core::MarkFile::open_existing(path, version_offset, activity_offset);
+        // `ArchiveMarkFile.java:121-131`: open the existing file. Agrona
+        // checks the version before it touches the activity timestamp.
+        auto mark_file = axc::core::MarkFile::open_existing(
+            path,
+            static_cast<std::size_t>(header_offset + archive_mark_codecs::MarkFileHeader::versionEncodingOffset()),
+            static_cast<std::size_t>(header_offset +
+                                     archive_mark_codecs::MarkFileHeader::activityTimestampEncodingOffset()));
         if (!mark_file)
         {
             return std::unexpected(mark_file.error());
         }
         archive_mark.mark_file_ = std::move(*mark_file);
-        archive_mark.refresh_header();
 
         const std::int32_t version = archive_mark.mark_file_.version();
         if (((version >> 16) & 0xFFFF) != MAJOR_VERSION)
         {
             return std::unexpected(version_error(path, version));
         }
+
+        // `MarkFile.mapNewOrExistingMarkFile`: one liveness decision, then the
+        // CAS claim. Not a polling wait.
+        auto activated = archive_mark.mark_file_.activate(now_ms, LIVENESS_TIMEOUT_MS, path);
+        if (!activated)
+        {
+            return std::unexpected(activated.error());
+        }
+
+        // `ArchiveMarkFile.java:190-196`: a start that fails after the claim
+        // must not leave an "always active" timestamp behind.
+        const auto fail = [&archive_mark](axc::core::Error error) -> std::expected<ArchiveMarkFile, axc::core::Error>
+        {
+            archive_mark.mark_file_.update_activity(NULL_VALUE);
+            const auto flushed = archive_mark.mark_file_.flush();
+            (void)flushed;
+            return std::unexpected(error);
+        };
+
+        const std::span<std::uint8_t> existing = archive_mark.mark_file_.mapped();
+        if (!header_fits(existing, header_offset))
+        {
+            return fail(axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                              "mark file too short to hold its header: " + path));
+        }
+
+        archive_mark.refresh_header();
+        // `ArchiveMarkFile.java:146-160`: before the header is overwritten,
+        // save the previous process's errors and zero their buffer.
+        archive_mark.save_existing_errors(path);
+
+        if (HEADER_OFFSET != header_offset)
+        {
+            // `ArchiveMarkFile.java:166-203`: rebuild a legacy file in the
+            // current layout (the old mapping dies with the old file).
+            archive_mark.mark_file_ = axc::core::MarkFile{};
+            auto recreated = axc::core::MarkFile::create(
+                path, static_cast<std::size_t>(options.total_file_length),
+                static_cast<std::size_t>(HEADER_OFFSET + archive_mark_codecs::MarkFileHeader::versionEncodingOffset()),
+                static_cast<std::size_t>(HEADER_OFFSET +
+                                         archive_mark_codecs::MarkFileHeader::activityTimestampEncodingOffset()));
+            if (!recreated)
+            {
+                return std::unexpected(recreated.error());
+            }
+            archive_mark.mark_file_ = std::move(*recreated);
+            archive_mark.header_offset_ = HEADER_OFFSET;
+            std::memset(archive_mark.mark_file_.mapped().data(), 0, archive_mark.mark_file_.mapped().size());
+            archive_mark.refresh_header();
+        }
     }
     else
     {
-        // New file, or a legacy one being re-created in the current layout
-        // (`ArchiveMarkFile.java:166-203`).
-        auto mark_file = axc::core::MarkFile::create(path, options.total_file_length, version_offset, activity_offset);
+        // New file (`ArchiveMarkFile.java:205-218`).
+        auto mark_file = axc::core::MarkFile::create(
+            path, static_cast<std::size_t>(options.total_file_length),
+            static_cast<std::size_t>(header_offset + archive_mark_codecs::MarkFileHeader::versionEncodingOffset()),
+            static_cast<std::size_t>(header_offset +
+                                     archive_mark_codecs::MarkFileHeader::activityTimestampEncodingOffset()));
         if (!mark_file)
         {
             return std::unexpected(mark_file.error());
@@ -117,6 +184,59 @@ std::expected<ArchiveMarkFile, axc::core::Error> ArchiveMarkFile::create_or_open
     archive_mark.header_.pid(static_cast<std::int64_t>(::getpid()));
     archive_mark.apply(values);
     return archive_mark;
+}
+
+void ArchiveMarkFile::save_existing_errors(const std::string& mark_file_path_value)
+{
+    const std::int32_t old_header_length = header_.headerLength();
+    const std::int32_t old_error_buffer_length = header_.errorBufferLength();
+    const std::span<std::uint8_t> bytes = mark_file_.mapped();
+    if (old_error_buffer_length <= 0 || old_header_length <= 0 ||
+        static_cast<std::size_t>(old_header_length) + static_cast<std::size_t>(old_error_buffer_length) > bytes.size())
+    {
+        // A v0/v1 layout or a truncated file: no readable error region.
+        return;
+    }
+
+    const auto error_buffer = std::span<const std::uint8_t>(bytes.data() + old_header_length,
+                                                            static_cast<std::size_t>(old_error_buffer_length));
+    const axc::core::RenderedErrorLog rendered = axc::core::render_distinct_error_log(error_buffer);
+
+    if (rendered.distinct_error_count > 0)
+    {
+        // `CommonContext.saveExistingErrors`: system clock, system time zone,
+        // six fractional digits and a numeric offset.
+        const std::filesystem::path directory = std::filesystem::path{mark_file_path_value}.parent_path();
+        const std::string error_log_path =
+            (directory /
+             ("archive-" + axc::core::format_file_name_time(axc::core::EpochClock::now_ms()) + "-error.log"))
+                .string();
+
+        const int fd = ::open(error_log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        bool saved = false;
+        if (fd >= 0)
+        {
+            const ssize_t written = ::write(fd, rendered.text.data(), rendered.text.size());
+            saved = written == static_cast<ssize_t>(rendered.text.size());
+            ::close(fd);
+        }
+
+        if (saved)
+        {
+            std::fprintf(stderr, "WARNING: existing errors saved to: %s\n", error_log_path.c_str());
+        }
+        else
+        {
+            // `CommonContext.java:1344-1352`: log the failure and dump the
+            // rendered errors to the logger.
+            std::fprintf(stderr, "ERROR: Failed to save existing errors to: %s\n", error_log_path.c_str());
+            std::fprintf(stderr, "\nDumping errors here:\n\n");
+            std::fwrite(rendered.text.data(), 1, rendered.text.size(), stderr);
+        }
+    }
+
+    // The buffer is cleared whether or not the file could be written.
+    std::memset(bytes.data() + old_header_length, 0, static_cast<std::size_t>(old_error_buffer_length));
 }
 
 std::expected<ArchiveMarkFile, axc::core::Error> ArchiveMarkFile::open_existing(const Options& options)

@@ -412,6 +412,18 @@ std::expected<void, axc::core::Error> ArchiveServer::init()
     }
     mark_file_ = std::move(*mark_file);
 
+    // `Archive.Context.conclude` (`Archive.java:1392-1397`): when the mark file
+    // lives outside the archive directory, point `archive-mark.lnk` at its
+    // directory; when both are the same, remove a stale link.
+    if (auto linked = axc::core::ensure_mark_file_link(config_.archive_dir,
+                                                       config_.mark_file_dir + "/" + ArchiveMarkFile::FILENAME,
+                                                       ArchiveMarkFile::LINK_FILENAME);
+        !linked)
+    {
+        mark_file_.close();
+        return std::unexpected(linked.error());
+    }
+
     // The catalog is created by the conductor (`Archive.Context.catalog`).
     ArchiveConductorContext conductor_context;
     conductor_context.archive_dir = config_.archive_dir;

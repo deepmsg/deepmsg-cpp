@@ -20,11 +20,9 @@ namespace deepmsg::archive::server
 /// `MarkFileHeader` behind an 8-byte message header, followed by the error
 /// buffer.
 ///
-/// Not implemented here, with the card they land on:
-///   * the Agrona liveness wait (another archive process holding the directory) —
-///     A2a, with `Archive.launch`;
-///   * rendering existing errors to a logger and the `archive-mark.lnk` link file —
-///     A2a/A5a.
+/// The Agrona lifecycle on top of the mapping — liveness refusal and the
+/// activation CAS, saving the previous process's errors, and the
+/// `archive-mark.lnk` link file — is implemented here (A7).
 class ArchiveMarkFile
 {
 public:
@@ -35,6 +33,13 @@ public:
 
     static constexpr std::int32_t HEADER_LENGTH = 8 * 1024;
     static constexpr const char* FILENAME = "archive-mark.dat";
+
+    /// `ArchiveMarkFile.LINK_FILENAME` (`ArchiveMarkFile.java:87`).
+    static constexpr const char* LINK_FILENAME = "archive-mark.lnk";
+
+    /// `Archive.Configuration.LIVENESS_TIMEOUT_MS` (`Archive.java`): ten times
+    /// `MARK_FILE_UPDATE_INTERVAL_MS` (1000), not configurable.
+    static constexpr std::int64_t LIVENESS_TIMEOUT_MS = 10 * 1000;
 
     /// `MessageHeaderDecoder.ENCODED_LENGTH` (`ArchiveMarkFile.java:90`).
     static constexpr std::int32_t HEADER_OFFSET = 8;
@@ -133,6 +138,12 @@ public:
 private:
     void refresh_header() noexcept;
     void apply(const HeaderValues& values);
+
+    /// `ArchiveMarkFile.java:146-160` + `CommonContext.saveExistingErrors`
+    /// (`CommonContext.java:1316-1355`): render the previous process's error
+    /// buffer to `<dir>/archive-<time>-error.log` when it holds observations,
+    /// then zero it. Must run before the new header is written.
+    void save_existing_errors(const std::string& mark_file_path);
 
     axc::core::MarkFile mark_file_;
     std::int32_t header_offset_{HEADER_OFFSET};
