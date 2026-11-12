@@ -1,11 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <span>
 
+#include "cluster/common/cluster_codecs.h"
 #include "core/error/error.h"
-#include "io_aeron_cluster_codecs/MessageHeader.h"
 
 namespace deepmsg::cluster::service
 {
@@ -14,39 +15,11 @@ using axc::core::Error;
 
 namespace codecs = ::io::aeron::cluster::codecs;
 
-inline constexpr std::int32_t SBE_SCHEMA_ID = 111;
-inline constexpr std::size_t MESSAGE_HEADER_LENGTH = codecs::MessageHeader::encodedLength();
-
-/// The 8-byte SBE header of one cluster message, guarded for length and schema.
-[[nodiscard]] inline std::expected<codecs::MessageHeader, Error> message_header(
-    std::span<const std::uint8_t> message) noexcept
-{
-    if (message.size() < MESSAGE_HEADER_LENGTH)
-    {
-        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error,
-                                                     "a cluster message is too short for its own header"));
-    }
-
-    codecs::MessageHeader header;
-    header.wrap(const_cast<char*>(reinterpret_cast<const char*>(message.data())), 0,
-                codecs::MessageHeader::sbeSchemaVersion(), message.size());
-    if (header.schemaId() != SBE_SCHEMA_ID)
-    {
-        return std::unexpected(axc::core::make_error(
-            axc::core::ErrorCode::protocol_error,
-            "expected schemaId=" + std::to_string(SBE_SCHEMA_ID) + ", actual=" + std::to_string(header.schemaId())));
-    }
-    return header;
-}
-
-/// Wrap a generated decoder at the message body (offset 8), after the header.
-template <class Decoder>
-[[nodiscard]] Decoder wrap_body(std::span<const std::uint8_t> message, const codecs::MessageHeader& header)
-{
-    Decoder decoder;
-    decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(message.data())), MESSAGE_HEADER_LENGTH,
-                          header.blockLength(), header.version(), message.size());
-    return decoder;
-}
+// The guarded header and body wrappers are shared with the cluster client
+// (C3a); the definition lives in `cluster/common/cluster_codecs.h`.
+using common::message_header;
+using common::MESSAGE_HEADER_LENGTH;
+using common::SBE_SCHEMA_ID;
+using common::wrap_body;
 
 }  // namespace deepmsg::cluster::service
