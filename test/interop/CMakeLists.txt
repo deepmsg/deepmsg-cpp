@@ -61,12 +61,15 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/container_binary_interop_test.cpp
         cluster/client_connect_interop_test.cpp
         cluster/xc1_client_interop_test.cpp
+        cluster/consensus_module_interop_test.cpp
+        cluster/service_control_interop_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
         axc_cluster_common
         axc_cluster_service
         axc_cluster_client
+        axc_cluster_consensus
         axc_basic_auction_service
         axc_core
         aeron_static
@@ -97,6 +100,6 @@ add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container e
 add_dependencies(axc_archive_interop_tests archive-tool-ro)
 
 include(GoogleTest)
-gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
-gtest_discover_tests(axc_archive_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
-gtest_discover_tests(axc_cluster_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop)
+gtest_discover_tests(axc_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop TIMEOUT 600)
+gtest_discover_tests(axc_archive_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop TIMEOUT 600)
+gtest_discover_tests(axc_cluster_interop_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS interop TIMEOUT 600)

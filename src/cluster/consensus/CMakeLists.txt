@@ -1,8 +1,23 @@
 axc_add_library(axc_cluster_consensus
     SOURCES
+        consensus_module_context.cpp
+        consensus_module_agent.cpp
+        consensus_module.cpp
+        standby_startup_check.cpp
+        cluster_session.cpp
+        session_manager.cpp
+        ingress_adapter.cpp
+        log_publisher.cpp
+        egress_publisher.cpp
+        service_ack.cpp
+        service_proxy.cpp
+        pending_service_message_tracker.cpp
+        consensus_module_adapter.cpp
         module.cpp
     DEPS
         axc_cluster_common
         axc_cluster_election
+        axc_core
+        axc_sbe
         aeron_static
         aeron_archive_c_client_static)

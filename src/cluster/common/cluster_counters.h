@@ -72,7 +72,13 @@ inline constexpr std::string_view SERVICE_ID_LABEL_SUFFIX = " serviceId=";
 [[nodiscard]] std::array<std::uint8_t, 2 * sizeof(std::int32_t)> service_counter_key(std::int32_t cluster_id,
                                                                                      std::int32_t service_id) noexcept;
 
+/// `ClusterSession.addSessionCounter`: key is `clusterId` (4-byte LE) then the
+/// cluster session id (8-byte LE).
+[[nodiscard]] std::array<std::uint8_t, sizeof(std::int32_t) + sizeof(std::int64_t)> session_counter_key(
+    std::int32_t cluster_id, std::int64_t session_id) noexcept;
+
 [[nodiscard]] std::string cluster_counter_label(std::string_view name, std::int32_t cluster_id);
+[[nodiscard]] std::string session_counter_label(std::string_view session_info, std::int32_t cluster_id);
 [[nodiscard]] std::string service_counter_label(std::string_view name, std::int32_t cluster_id,
                                                 std::int32_t service_id);
 
