@@ -78,6 +78,11 @@ axc_add_executable(axc_cluster_unit_tests
         cluster/common/recording_log_test.cpp
         cluster/common/recording_log_golden_test.cpp
         cluster/common/node_state_file_test.cpp
+        cluster/common/cluster_member_test.cpp
+        cluster/common/cluster_counters_test.cpp
+        cluster/common/cluster_config_test.cpp
+        cluster/common/cluster_mark_file_test.cpp
+        cluster/common/cluster_mark_file_golden_test.cpp
     DEPS
         axc_cluster_common
         GTest::gtest_main)
