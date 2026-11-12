@@ -25,7 +25,9 @@ namespace
     return power;
 }
 
-[[nodiscard]] bool is_power_of_two(std::size_t value) noexcept
+// Only the assertions above use this, so in an NDEBUG build it would otherwise
+// be an unused static function and trip -Werror=unused-function.
+[[maybe_unused]] [[nodiscard]] bool is_power_of_two(std::size_t value) noexcept
 {
     return 0 != value && 0 == (value & (value - 1));
 }
