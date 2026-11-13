@@ -16,9 +16,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -26,6 +28,7 @@
 
 #include "cluster/common/cluster_counters.h"
 #include "cluster/common/cluster_mark_file.h"
+#include "cluster/common/cluster_versions.h"
 #include "cluster/common/recording_log.h"
 #include "cluster/consensus/consensus_module.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -49,7 +52,15 @@ using deepmsg::cluster::consensus::StandbySnapshotStartupMode;
 
 constexpr std::int32_t CLUSTER_ID = 9;
 constexpr std::int32_t MEMBER_ID = 0;
+// `onStart` waits for every service's startup ack before it returns
+// (`CMA:1888-1897`), so this fixture runs the reference's own service
+// container. The standby entries are written one per id in
+// `[-1, SERVICE_COUNT)` and `latestStandbySnapshots` wants exactly
+// `serviceCount + 1` at a position (`RecordingLog:911-941`).
 constexpr std::int32_t SERVICE_COUNT = 1;
+// `ConsensusModuleConfig::control_channel`'s default; the container must use
+// the same one.
+constexpr const char* CONTROL_CHANNEL = "aeron:ipc?term-length=128k";
 constexpr const char* MEMBERS = "0,localhost:0,localhost:0,localhost:0,localhost:0,localhost:0";
 
 [[nodiscard]] std::string aeron_jar()
@@ -59,6 +70,25 @@ constexpr const char* MEMBERS = "0,localhost:0,localhost:0,localhost:0,localhost
         return from_env;
     }
     return AXC_AERON_JAR;
+}
+
+[[nodiscard]] std::string tests_root()
+{
+    const char* from_env = std::getenv("AXC_AERON_TESTS");
+    return nullptr == from_env ? std::string{} : std::string{from_env};
+}
+
+[[nodiscard]] std::string find_probe(const std::string& root, const std::string& name)
+{
+    for (const std::string& relative : {"/deepmsg-tests/java/" + name, "/java/" + name, "/" + name})
+    {
+        const std::string candidate = root + relative;
+        if (std::filesystem::exists(candidate))
+        {
+            return candidate;
+        }
+    }
+    return {};
 }
 
 class ConsensusModuleInteropTest : public ::testing::Test
@@ -81,15 +111,24 @@ protected:
         aeron_dir_ = directory_ + "/aeron";
         cluster_dir_ = directory_ + "/cluster";
         archive_dir_ = directory_ + "/archive";
+        classes_dir_ = directory_ + "/classes";
         std::filesystem::create_directories(archive_dir_);
+        std::filesystem::create_directories(classes_dir_);
 
         start_java_driver();
         start_java_archive();
+        compile_probes_if_available();
     }
 
     void TearDown() override
     {
+        finish_launch();
         module_.reset();
+        if (container_)
+        {
+            container_->terminate(std::chrono::seconds(5));
+        }
+        container_.reset();
         archive_.reset();
         driver_.reset();
         std::error_code error;
@@ -198,9 +237,85 @@ protected:
         config.log_channel = "aeron:ipc";
         config.consensus_channel = "aeron:ipc";
         config.replication_channel = "aeron:udp";
+        config.control_channel = CONTROL_CHANNEL;
         config.service_count = SERVICE_COUNT;
         config.archive_control_response_stream_id = 20;
         return config;
+    }
+
+    /// The reference container is what acks `onStart`, so the two tests that
+    /// expect a running module need it; the `refuse` test fails before the
+    /// startup ack and runs without one.
+    void compile_probes_if_available()
+    {
+        if (!std::filesystem::exists("/usr/bin/javac") && !std::filesystem::exists("/usr/local/bin/javac"))
+        {
+            std::fprintf(stderr, "C4a: javac not found, the service container probe is skipped\n");
+            return;
+        }
+        const std::string root = tests_root();
+        if (root.empty())
+        {
+            std::fprintf(stderr, "C4a: AXC_AERON_TESTS is not set, the service container probe is skipped\n");
+            return;
+        }
+        for (const char* const name : {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java"})
+        {
+            const std::string path = find_probe(root, name);
+            if (path.empty())
+            {
+                std::fprintf(stderr, "C4a: probe source not found under %s: %s\n", root.c_str(), name);
+                return;
+            }
+            probe_sources_.push_back(path);
+        }
+
+        axc::interop::ProcessOptions compile;
+        compile.arguments = {"-proc:none", "-cp", jar_, "-d", classes_dir_};
+        for (const std::string& source : probe_sources_)
+        {
+            compile.arguments.push_back(source);
+        }
+        auto compiled = axc::interop::run_process("javac", compile);
+        if (!compiled || 0 != compiled->exit_code)
+        {
+            std::fprintf(stderr, "C4a: probe compilation failed: %s\n",
+                         compiled ? compiled->output.c_str() : compiled.error().message.view().data());
+            return;
+        }
+        probes_ready_ = true;
+    }
+
+    /// Started after `launch_async`: the container's `ack` in `recoverState`
+    /// throws if its publication is not connected yet (`ConsensusModuleProxy
+    /// .checkResult:218-228`), and it only connects once the consensus
+    /// module's control subscription exists.
+    void start_container()
+    {
+        std::vector<std::string> arguments = java_opens();
+        arguments.insert(arguments.end(),
+                         {"-cp", jar_ + ":" + classes_dir_, "ClusterServiceContainerProbe", aeron_dir_, cluster_dir_,
+                          std::to_string(CLUSTER_ID), "0", "ClusterEchoTimerService", "true", CONTROL_CHANNEL});
+
+        auto process = axc::interop::ChildProcess::spawn("java", arguments);
+        ASSERT_TRUE(process) << process.error().message.view();
+        container_ = std::make_unique<axc::interop::ChildProcess>(std::move(*process));
+
+        const std::string mark_path = cluster_dir_ + "/cluster-mark-service-0.dat";
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            ASSERT_TRUE(container_->running()) << "the Java container exited while starting";
+            auto mark = ClusterMarkFile::open_existing(mark_path, 0);
+            if (mark && mark->semantic_version() == deepmsg::cluster::common::CLUSTER_MARK_SEMANTIC_VERSION)
+            {
+                // The agent creates its subscriptions after the mark file.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        FAIL() << "the Java container never signalled ready";
     }
 
     void append_newer_standby_snapshot()
@@ -240,23 +355,63 @@ protected:
     std::string aeron_dir_;
     std::string cluster_dir_;
     std::string archive_dir_;
+    void launch_async(ConsensusModuleConfig config)
+    {
+        launcher_ = std::thread([this, config = std::move(config)]() mutable
+                                { launched_.emplace(ConsensusModule::launch(std::move(config))); });
+    }
+
+    void finish_launch()
+    {
+        if (launcher_.joinable())
+        {
+            launcher_.join();
+        }
+    }
+
+    std::thread launcher_{};
+    std::optional<std::expected<ConsensusModule, axc::core::Error>> launched_{};
     std::unique_ptr<axc::interop::ChildProcess> driver_;
     std::unique_ptr<axc::interop::ChildProcess> archive_;
+    std::unique_ptr<axc::interop::ChildProcess> container_;
     std::unique_ptr<ConsensusModule> module_;
+    std::string classes_dir_{};
+    std::vector<std::string> probe_sources_{};
+    /// False when javac or the fork's probe sources are missing: the tests
+    /// that need a running service skip, `refuseModeStopsTheStart` does not.
+    bool probes_ready_{false};
 };
 
 TEST_F(ConsensusModuleInteropTest, theSkeletonStartsAgainstTheReferenceArchiveAndPublishesItsState)
 {
-    auto launched = ConsensusModule::launch(make_config());
-    ASSERT_TRUE(launched) << launched.error().message.view();
-    module_ = std::make_unique<ConsensusModule>(std::move(*launched));
+    if (!probes_ready_)
+    {
+        GTEST_SKIP() << "the service container probe is required (set AXC_AERON_TESTS)";
+    }
 
-    EXPECT_EQ(ConsensusModuleState::active, module_->agent().state());
+    launch_async(make_config());
+    start_container();
+    finish_launch();
+
+    ASSERT_TRUE(launched_.has_value() && launched_->has_value())
+        << (launched_.has_value() ? launched_->error().message.view().data() : "no launch");
+    module_ = std::make_unique<ConsensusModule>(std::move(**launched_));
+
+    EXPECT_EQ(ConsensusModuleState::active, module_->agent().module_state());
     EXPECT_GE(module_->agent().archive_id(), 0);
     EXPECT_EQ(static_cast<std::int64_t>(ConsensusModuleState::active),
               counter_value(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID));
     EXPECT_EQ(0, counter_value(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID));
-    EXPECT_EQ(0, counter_value(deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID));
+    // With a service in place the module is a live single-member cluster: its
+    // conductor appends and commits its own leadership term, so the commit
+    // position moves off zero (C4a asserted zero, when nothing ran).
+    const auto commit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < commit_deadline &&
+           0 == counter_value(deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GT(counter_value(deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID), 0);
 
     auto mark_file =
         ClusterMarkFile::open_existing(cluster_dir_ + "/cluster-mark.dat", axc::core::EpochClock::now_ms());
@@ -280,16 +435,25 @@ TEST_F(ConsensusModuleInteropTest, theSkeletonStartsAgainstTheReferenceArchiveAn
 
 TEST_F(ConsensusModuleInteropTest, aNewerStandbySnapshotWarnsAndCountsAnError)
 {
+    if (!probes_ready_)
+    {
+        GTEST_SKIP() << "the service container probe is required (set AXC_AERON_TESTS)";
+    }
+
     append_newer_standby_snapshot();
 
     auto config = make_config();
     config.standby_snapshot_on_startup = StandbySnapshotStartupMode::warn;
 
-    auto launched = ConsensusModule::launch(std::move(config));
-    ASSERT_TRUE(launched) << launched.error().message.view();
-    module_ = std::make_unique<ConsensusModule>(std::move(*launched));
+    launch_async(std::move(config));
+    start_container();
+    finish_launch();
 
-    EXPECT_EQ(ConsensusModuleState::active, module_->agent().state());
+    ASSERT_TRUE(launched_.has_value() && launched_->has_value())
+        << (launched_.has_value() ? launched_->error().message.view().data() : "no launch");
+    module_ = std::make_unique<ConsensusModule>(std::move(**launched_));
+
+    EXPECT_EQ(ConsensusModuleState::active, module_->agent().module_state());
     EXPECT_EQ(1, counter_value(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID));
 }
 

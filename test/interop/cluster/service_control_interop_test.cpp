@@ -61,7 +61,6 @@ using deepmsg::cluster::consensus::PendingServiceMessageTracker;
 constexpr std::int32_t CLUSTER_ID = 11;
 constexpr std::int32_t MEMBER_ID = 0;
 constexpr std::int32_t SERVICE_COUNT = 1;
-constexpr std::int64_t TERM = 1;
 constexpr const char* MEMBERS = "0,localhost:0,localhost:0,localhost:0,localhost:0,localhost:0";
 constexpr const char* CONTROL_CHANNEL = "aeron:ipc?term-length=128k";
 
@@ -141,7 +140,13 @@ protected:
         compile_probes();
         start_java_driver();
         start_java_archive();
-        start_agent();
+
+        // C4d: `on_start` now recovers and blocks for the container's startup
+        // ack, while the container waits for our mark file. They must start
+        // concurrently, as the reference's agent thread does.
+        start_agent_async();
+        start_container();
+        finish_start_agent();
     }
 
     void TearDown() override
@@ -282,7 +287,7 @@ protected:
         return config;
     }
 
-    void start_agent()
+    void start_agent_async()
     {
         // `ConsensusModule.launch` concludes the configuration; constructing
         // the agent directly means the test does it (C4a's pitfall: without
@@ -292,8 +297,22 @@ protected:
         ASSERT_TRUE(concluded) << concluded.error().message.view();
 
         agent_ = std::make_unique<ConsensusModuleAgent>(std::move(config));
-        auto started = agent_->on_start();
-        ASSERT_TRUE(started) << started.error().message.view();
+        starter_ = std::thread(
+            [this]()
+            {
+                auto started = agent_->on_start();
+                start_ok_ = static_cast<bool>(started);
+                if (!started)
+                {
+                    start_error_ = started.error();
+                }
+            });
+    }
+
+    void finish_start_agent()
+    {
+        starter_.join();
+        ASSERT_TRUE(start_ok_) << start_error_.message.view();
     }
 
     void start_container()
@@ -335,45 +354,26 @@ protected:
         }
     }
 
-    void join_and_wait_for_the_acks()
+    void wait_for_leader_and_services()
     {
-        // The Election promotes the node in C4d; the test is the caller here.
-        agent_->role(deepmsg::cluster::consensus::ClusterRole::leader);
-
-        // The reference blocks in `awaitServicesReady`; here the same wait is
-        // a loop over `doWork`, which polls the control adapter.
-        bool joined = false;
-        const auto join_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-        while (std::chrono::steady_clock::now() < join_deadline && !joined)
-        {
-            auto result = agent_->join_log_as_leader(TERM, 0, agent_->log_publisher()->session_id(), true);
-            if (result)
-            {
-                joined = true;
-            }
-            else
-            {
-                (void)agent_->do_work();
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-        }
-        ASSERT_TRUE(joined);
-
-        bool acked = false;
-        const auto ack_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (std::chrono::steady_clock::now() < ack_deadline && !acked)
+        // C4d: the product Election elects the single member and joins the
+        // log on the `do_work` rounds after `on_start`. The startup ack is
+        // ackId 0 and the JoinLog ack is ackId 1, so `service_ack_id() >= 2`
+        // means "the services have joined".
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (std::chrono::steady_clock::now() < deadline)
         {
             (void)agent_->do_work();
-            auto reached = agent_->service_acks_reached();
-            ASSERT_TRUE(reached) << reached.error().message.view();
-            acked = *reached;
-            if (!acked)
+            if (deepmsg::cluster::consensus::ClusterRole::leader == agent_->cluster_role() &&
+                agent_->service_ack_id() >= 2)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                return;
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        ASSERT_TRUE(acked) << "the container never acked the JoinLog";
-        EXPECT_EQ(1, agent_->service_ack_id());
+        FAIL() << "the election never made this node leader and joined the log: role="
+               << static_cast<int>(agent_->cluster_role()) << " ackId=" << agent_->service_ack_id()
+               << " state=" << static_cast<int>(agent_->module_state());
     }
 
     [[nodiscard]] axc::interop::ProcessResult run_probe(const std::string& main_class,
@@ -433,12 +433,14 @@ protected:
     std::unique_ptr<axc::interop::ChildProcess> archive_{};
     std::unique_ptr<axc::interop::ChildProcess> container_{};
     std::unique_ptr<ConsensusModuleAgent> agent_{};
+    std::thread starter_{};
+    bool start_ok_{false};
+    axc::core::Error start_error_{};
 };
 
 TEST_F(ServiceControlInteropTest, theJoinLogIsAckedAndTheEchoTimersAndServiceMessagesRun)
 {
-    start_container();
-    join_and_wait_for_the_acks();
+    wait_for_leader_and_services();
 
     const auto echo_one = run_probe("ClusterEchoClientProbe", {aeron_dir_, "1", "30"}, std::chrono::seconds(40));
     EXPECT_EQ(0, echo_one.exit_code) << echo_one.output;
@@ -471,8 +473,7 @@ TEST_F(ServiceControlInteropTest, theJoinLogIsAckedAndTheEchoTimersAndServiceMes
 
 TEST_F(ServiceControlInteropTest, aServiceMessageAndAnAckWithAnUnknownServiceIdAreReportedAndDropped)
 {
-    start_container();
-    join_and_wait_for_the_acks();
+    wait_for_leader_and_services();
 
     const std::int64_t errors_before =
         cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
