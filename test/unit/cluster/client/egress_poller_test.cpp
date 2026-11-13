@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -175,6 +176,24 @@ TEST(EgressPollerTest, aNewLeaderEventCarriesTheIngressEndpoints)
     EXPECT_EQ(std::string{"0=localhost:20111,1=localhost:20112"}, poller.detail());
     EXPECT_EQ(OTHER_IMAGE, poller.egress_image());
     EXPECT_FALSE(poller.is_challenged());
+}
+
+// The `ingressEndpoints` var-data field carries its length; it is not
+// NUL-terminated on the wire. Bytes that follow the message must not leak
+// into the detail (`EP:296`).
+TEST(EgressPollerTest, theNewLeaderDetailStopsAtTheEncodedFieldLength)
+{
+    EgressPoller poller(10);
+    auto message = encode_new_leader_event(9, 4, 1, "0=localhost:20111");
+    const std::size_t encoded_length = message.size();
+    // A terminating NUL, so that a decoder that treats the field as a C
+    // string fails deterministically instead of reading out of bounds.
+    const char tail[] = "EXTRA";
+    message.resize(encoded_length + sizeof(tail));
+    std::memcpy(message.data() + encoded_length, tail, sizeof(tail));
+
+    EXPECT_EQ(AERON_ACTION_BREAK, poller.on_message(message, OTHER_IMAGE));
+    EXPECT_EQ(std::string{"0=localhost:20111"}, poller.detail());
 }
 
 TEST(EgressPollerTest, anUnknownSchemaIsSteppedOver)

@@ -134,9 +134,9 @@ aeron_controlled_fragment_handler_action_t EgressPoller::on_message(std::span<co
             cluster_session_id_ = decoder.clusterSessionId();
             leadership_term_id_ = decoder.leadershipTermId();
             leader_member_id_ = decoder.leaderMemberId();
-            // The decoder advances on the getter, so read it exactly once.
-            const char* endpoints = decoder.ingressEndpoints();
-            detail_ = nullptr == endpoints ? std::string{} : std::string{endpoints};
+            // `ingressEndpoints` is a length-prefixed var-data field, not a C
+            // string: build the detail from the encoded length.
+            detail_ = decoder.getIngressEndpointsAsString();
             is_poll_complete_ = true;
             egress_image_ = image;
             return AERON_ACTION_BREAK;

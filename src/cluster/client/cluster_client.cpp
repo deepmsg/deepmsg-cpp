@@ -887,7 +887,7 @@ aeron_controlled_fragment_handler_action_t ClusterClient::dispatch(std::span<con
             }
 
             set_egress_image(image);
-            const std::string endpoints = decoder.ingressEndpoints();
+            const std::string endpoints = decoder.getIngressEndpointsAsString();
             auto promoted = on_new_leader(session_id, decoder.leadershipTermId(), decoder.leaderMemberId(), endpoints);
             if (!promoted)
             {
@@ -1050,7 +1050,7 @@ void EgressAdapter::dispatch(std::span<const std::uint8_t> message)
             if (decoder.clusterSessionId() == cluster_session_id_)
             {
                 listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
-                                        decoder.leaderMemberId(), decoder.ingressEndpoints());
+                                        decoder.leaderMemberId(), decoder.getIngressEndpointsAsString());
             }
             break;
         }
@@ -1194,7 +1194,7 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::dispatch(std
             if (decoder.clusterSessionId() == cluster_session_id_)
             {
                 listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
-                                        decoder.leaderMemberId(), decoder.ingressEndpoints());
+                                        decoder.leaderMemberId(), decoder.getIngressEndpointsAsString());
                 return AERON_ACTION_COMMIT;
             }
             break;
