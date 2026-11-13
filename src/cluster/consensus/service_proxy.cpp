@@ -2,6 +2,8 @@
 
 #include <sched.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <tuple>
 #include <utility>

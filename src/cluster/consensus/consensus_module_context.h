@@ -93,6 +93,13 @@ struct ConsensusModuleConfig
     std::string control_channel{"aeron:ipc?term-length=128k"};
     std::int32_t service_stream_id{104};
     std::int32_t consensus_module_stream_id{105};
+    // The CM snapshot recording and the replay channel it loads snapshots
+    // through (`ConsensusModule.Context`, which reads the container's
+    // `aeron.cluster.{snapshot,replay}.*` names).
+    std::string snapshot_channel{"aeron:ipc?alias=snapshot"};
+    std::int32_t snapshot_stream_id{107};
+    std::string replay_channel{"aeron:ipc"};
+    std::int32_t replay_stream_id{103};
 
     // Directories.
     std::string aeron_dir{};

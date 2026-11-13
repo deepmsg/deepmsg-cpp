@@ -4,6 +4,8 @@
 #include <deque>
 #include <expected>
 #include <memory>
+#include <mutex>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -20,18 +22,27 @@ extern "C"
 #include "cluster/common/cluster_member.h"
 #include "cluster/common/node_state_file.h"
 #include "cluster/common/recording_log.h"
+#include "cluster/common/recovery_state.h"
 #include "cluster/common/timer/timer_service.h"
 #include "cluster/common/timer/timer_supplier.h"
 #include "cluster/consensus/authenticator.h"
+#include "cluster/consensus/cluster_termination.h"
+#include "cluster/consensus/cm_snapshot.h"
+#include "cluster/consensus/consensus_adapter.h"
 #include "cluster/consensus/consensus_module_adapter.h"
 #include "cluster/consensus/consensus_module_context.h"
+#include "cluster/consensus/consensus_publisher.h"
 #include "cluster/consensus/egress_publisher.h"
 #include "cluster/consensus/ingress_adapter.h"
+#include "cluster/consensus/log_adapter.h"
 #include "cluster/consensus/log_publisher.h"
+#include "cluster/consensus/log_replay.h"
 #include "cluster/consensus/pending_service_message_tracker.h"
 #include "cluster/consensus/service_ack.h"
 #include "cluster/consensus/service_proxy.h"
 #include "cluster/consensus/session_manager.h"
+#include "cluster/election/election.h"
+#include "cluster/service/role.h"
 #include "core/collections/long2long_hash_map.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error_handler.h"
@@ -66,7 +77,12 @@ inline constexpr std::int64_t LIVENESS_TIMEOUT_MS = 10'000;
 class ConsensusModuleAgent final : public axc::core::ErrorHandler,
                                    public IngressHandler,
                                    public ServiceControlHandler,
-                                   public common::timer::TimerHandler
+                                   public common::timer::TimerHandler,
+                                   public election::ElectionHost,
+                                   public LogMessageHandler,
+                                   public ConsensusMessageHandler,
+                                   public SnapshotLoadHandler,
+                                   public LogReplayHost
 {
 public:
     explicit ConsensusModuleAgent(ConsensusModuleConfig config);
@@ -129,7 +145,7 @@ public:
     /// interop test drives it, as the reference's own tests drive `role()`.
     [[nodiscard]] std::expected<void, Error> join_log_as_leader(std::int64_t leadership_term_id,
                                                                 std::int64_t log_position, std::int32_t log_session_id,
-                                                                bool is_startup);
+                                                                bool is_startup) override;
 
     /// `awaitServicesReady`'s completion check (`:1817-1838`) without the
     /// blocking: when every service has acked `expectedAckPosition`, consumes
@@ -179,12 +195,12 @@ public:
         return config_;
     }
 
-    [[nodiscard]] ConsensusModuleState state() const noexcept
+    [[nodiscard]] ConsensusModuleState module_state() const noexcept
     {
         return state_;
     }
 
-    [[nodiscard]] ClusterRole role() const noexcept
+    [[nodiscard]] ClusterRole cluster_role() const noexcept
     {
         return role_;
     }
@@ -205,6 +221,163 @@ public:
         return started_;
     }
 
+    /// Test seam: the JoinLog channel the leader advertises to its services.
+    [[nodiscard]] std::string local_log_channel_copy() const
+    {
+        std::lock_guard<std::mutex> lock(local_log_mutex_);
+        return local_log_channel_;
+    }
+
+    // ---- C4d: ElectionHost (`election_host.h`) -------------------------
+
+    void set_role(service::Role new_role) override;
+    [[nodiscard]] service::Role role() const override;
+    [[nodiscard]] election::ModuleState state() const override;
+    [[nodiscard]] std::int64_t log_recording_id() const override
+    {
+        return log_recording_id_;
+    }
+    void set_log_recording_id(std::int64_t recording_id) override
+    {
+        log_recording_id_ = recording_id;
+    }
+    [[nodiscard]] std::int64_t time_of_last_leader_update_ns() const override
+    {
+        return time_of_last_leader_update_ns_;
+    }
+    [[nodiscard]] std::int64_t quorum_position_bounded_by_leader_log(std::int64_t leader_append_position,
+                                                                     std::int64_t now_ns) override;
+    void update_member_log_position(common::ClusterMember& member, std::int64_t leadership_term_id,
+                                    std::int64_t log_position) override;
+    [[nodiscard]] std::expected<int, Error> update_leader_position(std::int64_t now_ns, std::int64_t append_position,
+                                                                   std::int64_t quorum_position) override;
+    [[nodiscard]] std::expected<void, Error> publish_commit_position(std::int64_t commit_position,
+                                                                     std::int64_t leadership_term_id) override;
+    [[nodiscard]] std::expected<bool, Error> try_join_log_as_follower(aeron_image_t* image, bool is_leader_startup,
+                                                                      std::int64_t now_ns) override;
+    [[nodiscard]] std::expected<std::int32_t, Error> add_log_publication(std::int64_t append_position) override;
+    [[nodiscard]] std::expected<std::unique_ptr<election::LogReplay>, Error> new_log_replay(
+        std::int64_t log_position, std::int64_t append_position) override;
+    [[nodiscard]] std::expected<std::unique_ptr<election::RecordingReplication>, Error> new_log_replication(
+        std::string_view leader_archive_endpoint, std::optional<std::string> response_archive_endpoint,
+        std::int64_t leader_recording_id, std::int64_t stop_position, std::int64_t now_ns) override;
+    [[nodiscard]] std::expected<void, Error> truncate_log_entry(std::int64_t leadership_term_id,
+                                                                std::int64_t log_position) override;
+    [[nodiscard]] std::expected<bool, Error> append_new_leadership_term_event(std::int64_t now_ns) override;
+    [[nodiscard]] std::expected<std::int64_t, Error> prepare_for_new_leadership(std::int64_t log_position,
+                                                                                std::int64_t now_ns) override;
+    [[nodiscard]] std::expected<void, Error> catchup_initiated(std::int64_t now_ns) override;
+    [[nodiscard]] std::expected<int, Error> catchup_poll(std::int64_t limit_position, std::int64_t now_ns) override;
+    [[nodiscard]] bool is_catchup_near_live(std::int64_t position) override;
+    [[nodiscard]] std::expected<void, Error> track_catchup_completion(common::ClusterMember& member,
+                                                                      std::int64_t leadership_term_id,
+                                                                      std::int16_t append_position_flags) override;
+    [[nodiscard]] std::expected<void, Error> stop_all_catchups() override;
+    [[nodiscard]] std::string_view live_log_destination() const override
+    {
+        return live_log_destination_;
+    }
+    [[nodiscard]] std::expected<void, Error> set_live_log_destination(std::string_view destination) override;
+    [[nodiscard]] std::string_view catchup_log_destination() const override
+    {
+        return catchup_log_destination_;
+    }
+    [[nodiscard]] std::expected<void, Error> set_catchup_log_destination(std::string_view destination) override;
+    [[nodiscard]] std::expected<void, Error> await_local_sockets_closed(std::int64_t registration_id) override;
+    [[nodiscard]] std::expected<void, Error> election_complete(std::int64_t leadership_term_id,
+                                                               std::int32_t leader_member_id, std::int64_t log_position,
+                                                               std::int64_t now_ns) override;
+    [[nodiscard]] std::expected<int, Error> poll_archive_events() override;
+    [[nodiscard]] bool member_has_publication(std::int32_t member_id) const override;
+    [[nodiscard]] std::expected<void, Error> try_add_member_publication(std::int32_t member_id) override;
+    [[nodiscard]] std::expected<std::int64_t, Error> add_log_subscription(std::int32_t log_session_id) override;
+    [[nodiscard]] std::expected<void, Error> remove_log_subscription(std::int64_t registration_id) override;
+    [[nodiscard]] std::expected<void, Error> add_log_destination(std::int64_t registration_id,
+                                                                 std::string_view destination) override;
+    [[nodiscard]] std::optional<std::string> log_subscription_resolved_endpoint(
+        std::int64_t registration_id) const override;
+    [[nodiscard]] bool log_subscription_channel_errored(std::int64_t registration_id) const override;
+    [[nodiscard]] std::string_view log_subscription_channel(std::int64_t registration_id) const override;
+    [[nodiscard]] std::optional<election::LogImage> log_image_by_session(std::int64_t registration_id,
+                                                                         std::int32_t session_id) override;
+
+    // ---- C4d: LogMessageHandler (the six replay handlers) --------------
+
+    void on_replay_session_message(std::int64_t cluster_session_id, std::int64_t timestamp) override;
+    void on_replay_timer_event(std::int64_t correlation_id) override;
+    void on_replay_session_open(std::int64_t log_position, std::int64_t correlation_id, std::int64_t cluster_session_id,
+                                std::int64_t timestamp, std::int32_t response_stream_id,
+                                std::string_view response_channel) override;
+    void on_replay_session_close(std::int64_t cluster_session_id, codecs::CloseReason::Value close_reason) override;
+    [[nodiscard]] std::expected<void, Error> on_replay_cluster_action(std::int64_t leadership_term_id,
+                                                                      std::int64_t log_position, std::int64_t timestamp,
+                                                                      std::int32_t action, std::int32_t flags) override;
+    [[nodiscard]] std::expected<void, Error> on_replay_new_leadership_term_event(
+        std::int64_t leadership_term_id, std::int64_t log_position, std::int64_t timestamp,
+        std::int64_t term_base_log_position, std::int32_t time_unit_code, std::int32_t app_version) override;
+
+    // ---- C4d: SnapshotLoadHandler -------------------------------------
+
+    [[nodiscard]] std::expected<void, Error> on_load_begin_snapshot(std::int32_t app_version,
+                                                                    service::TimeUnit time_unit) override;
+    [[nodiscard]] std::expected<void, Error> on_load_end_snapshot() override;
+    [[nodiscard]] std::expected<void, Error> on_load_cluster_session(
+        std::int64_t cluster_session_id, std::int64_t correlation_id, std::int64_t opened_log_position,
+        std::int64_t time_of_last_activity, codecs::CloseReason::Value close_reason, std::int32_t response_stream_id,
+        std::string_view response_channel) override;
+    [[nodiscard]] std::expected<void, Error> on_load_consensus_module_state(
+        std::int64_t next_session_id, std::int64_t next_service_session_id, std::int64_t log_service_session_id,
+        std::int32_t pending_message_capacity) override;
+    [[nodiscard]] std::expected<void, Error> on_load_pending_message_tracker(std::int64_t next_service_session_id,
+                                                                             std::int64_t log_service_session_id,
+                                                                             std::int32_t pending_message_capacity,
+                                                                             std::int32_t service_id) override;
+    [[nodiscard]] std::expected<void, Error> on_load_pending_message(std::int64_t cluster_session_id,
+                                                                     std::span<const std::uint8_t> message) override;
+    [[nodiscard]] std::expected<void, Error> on_load_timer(std::int64_t correlation_id, std::int64_t deadline) override;
+
+    // ---- C4d: LogReplayHost -------------------------------------------
+
+    [[nodiscard]] std::expected<void, Error> await_services_ready(std::string_view log_channel, std::int32_t stream_id,
+                                                                  std::int32_t log_session_id,
+                                                                  std::int64_t log_position,
+                                                                  std::int64_t max_log_position, bool is_startup,
+                                                                  service::Role role) override;
+    [[nodiscard]] std::expected<int, Error> replay_log_poll(LogAdapter& log_adapter,
+                                                            std::int64_t stop_position) override;
+    [[nodiscard]] bool is_snapshot_state() const override
+    {
+        return ConsensusModuleState::snapshot == state_;
+    }
+    void on_log_replay_error(const Error& error) override;
+
+    // ---- C4d: ConsensusMessageHandler (the ten inbound templates) -----
+
+    void on_canvass_position(std::int64_t log_leadership_term_id, std::int64_t log_position,
+                             std::int64_t leadership_term_id, std::int32_t follower_member_id,
+                             std::int32_t protocol_version) override;
+    void on_request_vote(std::int64_t log_leadership_term_id, std::int64_t log_position, std::int64_t candidate_term_id,
+                         std::int32_t candidate_member_id, std::int32_t protocol_version) override;
+    void on_vote(std::int64_t candidate_term_id, std::int64_t log_leadership_term_id, std::int64_t log_position,
+                 std::int32_t candidate_member_id, std::int32_t follower_member_id, bool vote) override;
+    void on_new_leadership_term(std::int64_t log_leadership_term_id, std::int64_t next_leadership_term_id,
+                                std::int64_t next_term_base_log_position, std::int64_t next_log_position,
+                                std::int64_t leadership_term_id, std::int64_t term_base_log_position,
+                                std::int64_t log_position, std::int64_t commit_position,
+                                std::int64_t leader_recording_id, std::int64_t timestamp, std::int32_t leader_member_id,
+                                std::int32_t log_session_id, std::int32_t app_version, bool is_startup) override;
+    void on_append_position(std::int64_t leadership_term_id, std::int64_t log_position, std::int32_t follower_member_id,
+                            std::int16_t flags) override;
+    void on_commit_position(std::int64_t leadership_term_id, std::int64_t log_position,
+                            std::int32_t leader_member_id) override;
+    void on_catchup_position(std::int64_t leadership_term_id, std::int64_t log_position,
+                             std::int32_t follower_member_id, std::string_view catchup_endpoint) override;
+    void on_stop_catchup(std::int64_t leadership_term_id, std::int32_t follower_member_id) override;
+    void on_termination_position(std::int64_t leadership_term_id, std::int64_t log_position) override;
+    void on_termination_ack(std::int64_t leadership_term_id, std::int64_t log_position,
+                            std::int32_t member_id) override;
+    void on_unhandled_template(std::int32_t template_id) override;
+
 private:
     [[nodiscard]] std::expected<void, Error> open_mark_file();
     [[nodiscard]] std::expected<void, Error> open_node_files();
@@ -218,8 +391,47 @@ private:
 
     [[nodiscard]] int update_leader_position(std::int64_t now_ns) noexcept;
     void sweep_uncommitted_entries_to(std::int64_t commit_position) noexcept;
+    void restore_uncommitted_entries(std::int64_t commit_position);
     [[nodiscard]] std::expected<void, Error> capture_service_ack(std::int64_t log_position, std::int64_t ack_id,
                                                                  std::int64_t relevant_id, std::int32_t service_id);
+
+    // ---- C4d: recovery, snapshot and the log recording ---------------
+
+    [[nodiscard]] std::expected<void, Error> recover_from_snapshot_and_log();
+    [[nodiscard]] std::expected<axc::core::CounterPtr, Error> add_recovery_state_counter(
+        const common::RecordingLog::RecoveryPlan& plan);
+    [[nodiscard]] std::expected<void, Error> load_snapshot(const common::RecordingLog::Snapshot& snapshot);
+    [[nodiscard]] std::expected<void, Error> start_log_recording(std::string_view channel, std::int32_t stream_id);
+    [[nodiscard]] std::expected<bool, Error> try_create_append_position(std::int32_t log_session_id);
+    [[nodiscard]] std::int64_t recording_position();
+    [[nodiscard]] std::expected<void, Error> snapshot_on_service_ack(std::int64_t log_position, std::int64_t timestamp,
+                                                                     std::span<const ServiceAck> acks);
+    [[nodiscard]] std::expected<void, Error> take_snapshot(std::int64_t timestamp, std::int64_t log_position,
+                                                           std::span<const ServiceAck> acks);
+    [[nodiscard]] std::expected<void, Error> snapshot_state(SnapshotPublicationSink& publication,
+                                                            std::int64_t log_position);
+    [[nodiscard]] std::expected<void, Error> take_snapshot_recording();
+
+    // ---- C4d: control toggles and termination ------------------------
+
+    [[nodiscard]] std::expected<bool, Error> append_action(std::int32_t action, std::int64_t timestamp,
+                                                           std::int32_t flags);
+    void offer_position_and_previous_state(std::int64_t position, ConsensusModuleState state);
+    [[nodiscard]] int check_cluster_control_toggle(std::int64_t now_ns);
+    void enter_election(bool is_log_end_of_stream, std::string_view reason);
+    void do_termination(std::int64_t log_position);
+    void close_and_terminate();
+    void terminate_on_service_ack(std::int64_t log_position);
+    void try_stop_log_recording();
+    void connect_ingress();
+    std::int64_t get_last_appended_position();
+
+    // ---- C4d: small conversions and helpers --------------------------
+
+    void update_member_details(const common::ClusterMember& leader);
+    [[nodiscard]] std::int32_t find_member_index(std::int32_t member_id) const noexcept;
+    [[nodiscard]] std::string member_consensus_channel(const common::ClusterMember& member) const;
+    [[nodiscard]] std::int64_t read_counter_value(std::int32_t counter_id) noexcept;
 
     void report(const Error& error) noexcept;
     void state(ConsensusModuleState new_state, const char* reason) noexcept;
@@ -305,6 +517,35 @@ private:
     std::int64_t time_of_last_update_ns_{0};
     bool started_{false};
     bool closed_{false};
+
+    // C4d: the election, the consensus channel, the log recording, recovery
+    // and termination. Declaration order follows construction order.
+    std::unique_ptr<ConsensusPublisher> consensus_publisher_{};
+    std::unique_ptr<ConsensusAdapter> consensus_adapter_{};
+    axc::core::SubPtr consensus_subscription_{};
+    std::unique_ptr<election::Election> election_{};
+    std::unique_ptr<LogAdapter> log_adapter_{};
+    std::unique_ptr<ClusterTermination> cluster_termination_{};
+    common::RecordingLog::RecoveryPlan recovery_plan_{};
+    std::int64_t log_recording_id_{NULL_VALUE};
+    std::int64_t log_recording_subscription_id_{NULL_VALUE};
+    std::int64_t log_recording_stop_position_{0};
+    std::int32_t append_position_counter_id_{AERON_NULL_COUNTER_ID};
+    std::int64_t last_append_position_{0};
+    std::int64_t termination_position_{NULL_POSITION};
+    std::int64_t termination_leadership_term_id_{NULL_VALUE};
+    std::int64_t time_of_last_leader_update_ns_{0};
+    std::int64_t last_append_position_send_ns_{0};
+    std::string local_log_channel_{};
+    mutable std::mutex local_log_mutex_{};
+    std::string log_publication_tag_{};
+    std::string live_log_destination_{};
+    std::string catchup_log_destination_{};
+    std::deque<std::pair<std::int64_t, ConsensusModuleState>> uncommitted_previous_state_{};
+    bool is_node_startup_{true};
+    bool election_reset_pending_{false};
+    std::int64_t notified_commit_position_{0};
+    std::mt19937_64 random_{std::random_device{}()};
 };
 
 }  // namespace deepmsg::cluster::consensus

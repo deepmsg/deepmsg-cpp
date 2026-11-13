@@ -1,8 +1,12 @@
 #include "cluster/consensus/session_manager.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
+
+#include "cluster/consensus/cm_snapshot.h"
 
 namespace deepmsg::cluster::consensus
 {
@@ -184,7 +188,7 @@ void SessionManager::on_session_close(std::int64_t leadership_term_id, std::int6
     if (log_publisher_.append_session_close(*session, leadership_term_id, now_ms()))
     {
         session->closed_log_position(log_publisher_.position());
-        close_session(*session);
+        (void)close_session(*session);
     }
 }
 
@@ -292,12 +296,14 @@ int SessionManager::process_pending_sessions(std::vector<std::unique_ptr<Cluster
             {
                 session.open(position);
                 session.time_of_last_activity_ns(now_ns_value);
-                if (egress_publisher_.send_event(session, leadership_term_id, leader_member_id, codecs::EventCode::OK,
-                                                 {}))
+                const bool sent = egress_publisher_.send_event(session, leadership_term_id, leader_member_id,
+                                                               codecs::EventCode::OK, {});
+                if (sent)
                 {
                     session.clear_open_event_pending();
                 }
 
+                uncommitted_next_committed_session_ids_.emplace_back(log_publisher_.position(), session.id() + 1);
                 auto opened = std::move(pending[i]);
                 fast_unordered_remove(pending, i);
                 add_session(std::move(opened));
@@ -423,11 +429,12 @@ int SessionManager::send_for_all(std::vector<std::unique_ptr<ClusterSession>>& s
     return work_count;
 }
 
-void SessionManager::close_session(ClusterSession& session)
+std::unique_ptr<ClusterSession> SessionManager::close_session(ClusterSession& session)
 {
     const std::int64_t id = session.id();
     session.close(client_, "closed");
-    sessions_.erase(id);
+    const auto node = sessions_.extract(id);
+    return node.empty() ? nullptr : std::move(node.mapped());
 }
 
 void SessionManager::on_service_close_session(std::int64_t cluster_session_id, bool is_active_leader,
@@ -449,10 +456,198 @@ void SessionManager::on_service_close_session(std::int64_t cluster_session_id, b
             egress_publisher_.send_event(*session, leadership_term_id, config_.member_id, codecs::EventCode::CLOSED,
                                          "SERVICE_ACTION");
             session->closed_log_position(log_publisher_.position());
-            // `uncommittedClosedSessions` and the commit sweep are C4d.
-            close_session(*session);
+            // `uncommittedClosedSessions`: kept until the commit position
+            // passes the close (`SessionManager.java:471`, `:1057-1075`).
+            uncommitted_closed_sessions_.push_back(close_session(*session));
         }
     }
+}
+
+void SessionManager::on_replay_session_open(std::int64_t log_position, std::int64_t correlation_id,
+                                            std::int64_t cluster_session_id, std::int64_t timestamp,
+                                            std::int32_t response_stream_id, std::string response_channel)
+{
+    const std::string session_info = response_channel;
+    auto session = std::make_unique<ClusterSession>(config_.member_id, cluster_session_id, response_stream_id,
+                                                    std::move(response_channel), session_info);
+    session->open(log_position);
+    session->last_activity_ns(service::time_to_nanos(config_.cluster_time_unit, timestamp), correlation_id);
+
+    add_session(std::move(session));
+
+    if (cluster_session_id >= next_session_id_)
+    {
+        next_session_id_ = cluster_session_id + 1;
+    }
+    if (cluster_session_id >= next_committed_session_id_)
+    {
+        next_committed_session_id_ = cluster_session_id + 1;
+    }
+}
+
+void SessionManager::on_replay_session_close(std::int64_t cluster_session_id, codecs::CloseReason::Value close_reason)
+{
+    ClusterSession* session = find_by_session_id(cluster_session_id);
+    if (nullptr != session)
+    {
+        session->closing(close_reason);
+        (void)close_session(*session);
+    }
+}
+
+void SessionManager::on_load_cluster_session(std::int64_t cluster_session_id, std::int64_t correlation_id,
+                                             std::int64_t opened_log_position, std::int64_t time_of_last_activity_ns,
+                                             codecs::CloseReason::Value close_reason, std::int32_t response_stream_id,
+                                             std::string response_channel)
+{
+    const std::string session_info = response_channel;
+    auto session = std::make_unique<ClusterSession>(config_.member_id, cluster_session_id, response_stream_id,
+                                                    std::move(response_channel), session_info);
+    session->load_snapshot_state(correlation_id, opened_log_position, time_of_last_activity_ns, close_reason);
+
+    add_session(std::move(session));
+
+    if (cluster_session_id >= next_session_id_)
+    {
+        next_session_id_ = cluster_session_id + 1;
+        next_committed_session_id_ = next_session_id_;
+    }
+}
+
+void SessionManager::load_next_session_id(std::int64_t next_session_id)
+{
+    next_session_id_ = next_session_id;
+    next_committed_session_id_ = next_session_id;
+}
+
+void SessionManager::prepare_sessions_for_new_term(bool is_startup)
+{
+    if (is_startup)
+    {
+        for (auto& [id, session] : sessions_)
+        {
+            if (SessionState::open == session->state())
+            {
+                session->closing(codecs::CloseReason::TIMEOUT);
+            }
+        }
+        return;
+    }
+
+    for (auto& [id, session] : sessions_)
+    {
+        if (SessionState::open == session->state())
+        {
+            session->async_connect(client_, config_.cluster_id);
+        }
+    }
+
+    const std::int64_t now = now_ns();
+    for (auto& [id, session] : sessions_)
+    {
+        if (SessionState::open == session->state())
+        {
+            session->time_of_last_activity_ns(now);
+            session->has_new_leader_event_pending(true);
+        }
+    }
+}
+
+void SessionManager::clear_sessions_after(std::int64_t log_position, std::int64_t leadership_term_id)
+{
+    std::vector<std::int64_t> to_close{};
+    for (auto& [id, session] : sessions_)
+    {
+        if (session->opened_log_position() > log_position)
+        {
+            (void)egress_publisher_.send_event(*session, leadership_term_id, config_.member_id,
+                                               codecs::EventCode::CLOSED, "election");
+            to_close.push_back(id);
+        }
+    }
+    for (const std::int64_t id : to_close)
+    {
+        ClusterSession* session = find_by_session_id(id);
+        if (nullptr != session)
+        {
+            (void)close_session(*session);
+        }
+    }
+
+    for (auto& session : pending_sessions_)
+    {
+        (void)egress_publisher_.send_event(*session, leadership_term_id, config_.member_id, codecs::EventCode::CLOSED,
+                                           "election");
+        session->close(client_, "election");
+    }
+    pending_sessions_.clear();
+}
+
+void SessionManager::sweep_uncommitted_sessions(std::int64_t commit_position)
+{
+    while (!uncommitted_closed_sessions_.empty() &&
+           uncommitted_closed_sessions_.front()->closed_log_position() <= commit_position)
+    {
+        uncommitted_closed_sessions_.pop_front();
+    }
+
+    while (!uncommitted_next_committed_session_ids_.empty() &&
+           uncommitted_next_committed_session_ids_.front().first <= commit_position)
+    {
+        next_committed_session_id_ =
+            std::max(next_committed_session_id_, uncommitted_next_committed_session_ids_.front().second);
+        uncommitted_next_committed_session_ids_.pop_front();
+    }
+}
+
+void SessionManager::restore_uncommitted_sessions(std::int64_t commit_position)
+{
+    while (!uncommitted_closed_sessions_.empty())
+    {
+        std::unique_ptr<ClusterSession> session = std::move(uncommitted_closed_sessions_.front());
+        uncommitted_closed_sessions_.pop_front();
+        if (nullptr != session && session->closed_log_position() > commit_position)
+        {
+            session->closed_log_position(NULL_POSITION);
+            session->state(SessionState::closing, "uncommitted session");
+            add_session(std::move(session));
+        }
+    }
+
+    while (!uncommitted_next_committed_session_ids_.empty() &&
+           uncommitted_next_committed_session_ids_.front().first <= commit_position)
+    {
+        next_committed_session_id_ =
+            std::max(next_committed_session_id_, uncommitted_next_committed_session_ids_.front().second);
+        uncommitted_next_committed_session_ids_.pop_front();
+    }
+    uncommitted_next_committed_session_ids_.clear();
+}
+
+void SessionManager::update_time_of_last_activity()
+{
+    const std::int64_t now = now_ns();
+    for (auto& [id, session] : sessions_)
+    {
+        session->time_of_last_activity_ns(now);
+    }
+}
+
+std::expected<void, Error> SessionManager::snapshot_sessions(ConsensusModuleSnapshotTaker& snapshot_taker)
+{
+    for (auto& [id, session] : sessions_)
+    {
+        const SessionState state = session->state();
+        if (SessionState::open == state || SessionState::closing == state)
+        {
+            auto written = snapshot_taker.snapshot_session(*session);
+            if (!written)
+            {
+                return written;
+            }
+        }
+    }
+    return {};
 }
 
 void SessionManager::close_sessions()

@@ -1,9 +1,13 @@
 #include "cluster/consensus/log_publisher.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
+#include "io_aeron_cluster_codecs/ClusterActionRequest.h"
 #include "io_aeron_cluster_codecs/MessageHeader.h"
+#include "io_aeron_cluster_codecs/NewLeadershipTermEvent.h"
 #include "io_aeron_cluster_codecs/SessionCloseEvent.h"
 #include "io_aeron_cluster_codecs/SessionMessageHeader.h"
 #include "io_aeron_cluster_codecs/SessionOpenEvent.h"
@@ -192,6 +196,88 @@ long LogPublisher::append_timer(std::int64_t correlation_id, std::int64_t leader
     } while (--attempts > 0);
 
     return position;
+}
+
+bool LogPublisher::append_new_leadership_term_event(std::int64_t leadership_term_id, std::int64_t timestamp,
+                                                    std::int64_t term_base_log_position, std::int32_t leader_member_id,
+                                                    std::int32_t log_session_id, std::int32_t time_unit_code,
+                                                    std::int32_t app_version)
+{
+    if (nullptr == publication_)
+    {
+        return false;
+    }
+
+    const std::size_t length =
+        codecs::MessageHeader::encodedLength() + codecs::NewLeadershipTermEvent::sbeBlockLength();
+
+    for (int attempts = SEND_ATTEMPTS; attempts > 0; attempts--)
+    {
+        aeron_buffer_claim_t claim{};
+        const long position =
+            static_cast<long>(aeron_exclusive_publication_try_claim(publication_.get(), length, &claim));
+        if (position > 0)
+        {
+            const long aligned_frame_length = (32 + static_cast<long>(length) + 31) & ~31L;
+            codecs::NewLeadershipTermEvent encoder;
+            encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+            encoder.leadershipTermId(leadership_term_id)
+                .logPosition(position + aligned_frame_length)
+                .timestamp(timestamp)
+                .termBaseLogPosition(term_base_log_position)
+                .leaderMemberId(leader_member_id)
+                .logSessionId(log_session_id)
+                .timeUnit(static_cast<codecs::ClusterTimeUnit::Value>(time_unit_code))
+                .appVersion(app_version);
+            last_append_position_ = position + aligned_frame_length;
+            aeron_buffer_claim_commit(&claim);
+            return true;
+        }
+        if (is_fatal(position))
+        {
+            return false;
+        }
+    }
+    return false;
+}
+
+bool LogPublisher::append_cluster_action(std::int64_t leadership_term_id, std::int64_t timestamp, std::int32_t action,
+                                         std::int32_t flags)
+{
+    if (nullptr == publication_)
+    {
+        return false;
+    }
+
+    const std::size_t length = codecs::MessageHeader::encodedLength() + codecs::ClusterActionRequest::sbeBlockLength();
+    const long aligned_frame_length = (32 + static_cast<long>(length) + 31) & ~31L;
+    const long log_position =
+        static_cast<long>(aeron_exclusive_publication_position(publication_.get())) + aligned_frame_length;
+
+    for (int attempts = SEND_ATTEMPTS; attempts > 0; attempts--)
+    {
+        aeron_buffer_claim_t claim{};
+        const long position =
+            static_cast<long>(aeron_exclusive_publication_try_claim(publication_.get(), length, &claim));
+        if (position > 0)
+        {
+            codecs::ClusterActionRequest encoder;
+            encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+            encoder.leadershipTermId(leadership_term_id)
+                .logPosition(log_position)
+                .timestamp(timestamp)
+                .action(static_cast<codecs::ClusterAction::Value>(action))
+                .flags(static_cast<std::uint8_t>(flags));
+            last_append_position_ = log_position;
+            aeron_buffer_claim_commit(&claim);
+            return true;
+        }
+        if (is_fatal(position))
+        {
+            return false;
+        }
+    }
+    return false;
 }
 
 }  // namespace deepmsg::cluster::consensus

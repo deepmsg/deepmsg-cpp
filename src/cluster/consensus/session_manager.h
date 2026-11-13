@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -15,6 +16,7 @@
 #include "cluster/consensus/consensus_module_context.h"
 #include "cluster/consensus/egress_publisher.h"
 #include "cluster/consensus/log_publisher.h"
+#include "cluster/service/role.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error.h"
 
@@ -23,6 +25,8 @@ namespace deepmsg::cluster::consensus
 
 using axc::core::Error;
 
+class ConsensusModuleSnapshotTaker;
+
 struct SessionManagerConfig
 {
     std::int32_t member_id{0};
@@ -30,6 +34,7 @@ struct SessionManagerConfig
     std::int64_t session_timeout_ns{10'000'000'000};
     std::int32_t max_concurrent_sessions{10};
     std::int32_t service_count{1};
+    service::TimeUnit cluster_time_unit{service::TimeUnit::milliseconds};
 };
 
 /// `SessionManager` (`SessionManager.java`) for the user-session paths of C4b:
@@ -107,9 +112,49 @@ public:
     int send_redirects(std::int64_t leadership_term_id, std::int32_t leader_member_id, std::int64_t now_ns);
     int send_rejections(std::int64_t leadership_term_id, std::int32_t leader_member_id, std::int64_t now_ns);
 
-    void close_session(ClusterSession& session);
+    /// The session is removed from the table and handed back so the caller
+    /// can keep it alive: `uncommittedClosedSessions` holds it until the commit
+    /// position passes its close (`SessionManager.java:454-476`,
+    /// `:1057-1096`).
+    [[nodiscard]] std::unique_ptr<ClusterSession> close_session(ClusterSession& session);
     void close_sessions();
     void disconnect_sessions();
+
+    // ---- C4d: replay, snapshot load and the uncommitted sweep ----------
+
+    /// `onReplaySessionOpen` (`:478-505`).
+    void on_replay_session_open(std::int64_t log_position, std::int64_t correlation_id, std::int64_t cluster_session_id,
+                                std::int64_t timestamp, std::int32_t response_stream_id, std::string response_channel);
+
+    /// `onReplaySessionClose` (`:507-515`).
+    void on_replay_session_close(std::int64_t cluster_session_id, codecs::CloseReason::Value close_reason);
+
+    /// `onLoadClusterSession` (`:540-561`).
+    void on_load_cluster_session(std::int64_t cluster_session_id, std::int64_t correlation_id,
+                                 std::int64_t opened_log_position, std::int64_t time_of_last_activity_ns,
+                                 codecs::CloseReason::Value close_reason, std::int32_t response_stream_id,
+                                 std::string response_channel);
+
+    /// `loadNextSessionId` (`:563-567`).
+    void load_next_session_id(std::int64_t next_session_id);
+
+    /// `prepareSessionsForNewTerm` (`:932-967`).
+    void prepare_sessions_for_new_term(bool is_startup);
+
+    /// `clearSessionsAfter` (`:1028-1047`).
+    void clear_sessions_after(std::int64_t log_position, std::int64_t leadership_term_id);
+
+    /// `sweepUncommittedSessions` (`:1057-1075`).
+    void sweep_uncommitted_sessions(std::int64_t commit_position);
+
+    /// `restoreUncommittedSessions` (`:1077-1096`).
+    void restore_uncommitted_sessions(std::int64_t commit_position);
+
+    /// `updateTimeOfLastActivity` (`:1098-1105`).
+    void update_time_of_last_activity();
+
+    /// `snapshotSessions` (`:1107-1119`): OPEN and CLOSING sessions only.
+    [[nodiscard]] std::expected<void, Error> snapshot_sessions(ConsensusModuleSnapshotTaker& snapshot_taker);
 
     [[nodiscard]] std::size_t pending_session_count() const noexcept
     {
@@ -147,6 +192,8 @@ private:
     std::vector<std::unique_ptr<ClusterSession>> redirect_sessions_{};
     std::int64_t next_session_id_{1};
     std::int64_t next_committed_session_id_{1};
+    std::deque<std::unique_ptr<ClusterSession>> uncommitted_closed_sessions_{};
+    std::deque<std::pair<std::int64_t, std::int64_t>> uncommitted_next_committed_session_ids_{};
 };
 
 }  // namespace deepmsg::cluster::consensus
