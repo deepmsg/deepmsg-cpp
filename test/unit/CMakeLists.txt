@@ -135,6 +135,8 @@ axc_add_executable(axc_cluster_consensus_unit_tests
         cluster/consensus/service_proxy_test.cpp
         cluster/consensus/pending_service_message_tracker_test.cpp
         cluster/consensus/consensus_module_adapter_test.cpp
+        cluster/consensus/cm_snapshot_test.cpp
+        cluster/consensus/cluster_termination_test.cpp
     DEPS
         axc_cluster_consensus
         axc_core

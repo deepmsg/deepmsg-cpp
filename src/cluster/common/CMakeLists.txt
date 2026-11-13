@@ -7,6 +7,7 @@ axc_add_library(axc_cluster_common
         cluster_counters.cpp
         cluster_config.cpp
         cluster_mark_file.cpp
+        recovery_state.cpp
         timer/deadline_timer_wheel.cpp
         timer/wheel_timer_service.cpp
         timer/priority_heap_timer_service.cpp
