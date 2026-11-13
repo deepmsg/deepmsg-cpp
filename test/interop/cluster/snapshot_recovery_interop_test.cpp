@@ -121,8 +121,7 @@ protected:
         }
         for (const char* const name :
              {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java", "ClusterEchoClientProbe.java",
-              "ClusterTimerClientProbe.java", "ClusterServiceMessageClientProbe.java",
-              "ClusterSessionEventProbe.java"})
+              "ClusterTimerClientProbe.java", "ClusterServiceMessageClientProbe.java", "ClusterSessionEventProbe.java"})
         {
             const std::string path = find_probe(root, name);
             if (path.empty())
@@ -579,7 +578,8 @@ protected:
         return deepmsg::cluster::common::RecordingLog::Entry{};
     }
 
-    void set_control_toggle(std::int32_t value)    {
+    void set_control_toggle(std::int32_t value)
+    {
         (void)agent_->client().do_work();
         auto* reader = agent_->client().counters_reader();
         const std::int32_t id = deepmsg::cluster::common::find_cluster_counter(
@@ -853,8 +853,8 @@ TEST_F(SnapshotRecoveryInteropTest, aSuspendStopsProcessingAndAResumeRestartsIt)
         "ClusterSessionEventProbe", {aeron_dir_, "12000", "3", "4000"}, std::chrono::seconds(45),
         [&]()
         {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start);
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
             if (!suspended && elapsed > std::chrono::milliseconds(1500))
             {
                 set_control_toggle(2);
@@ -895,8 +895,7 @@ TEST_F(SnapshotRecoveryInteropTest, aStandbySnapshotRequestAppendsAndResetsButTa
     EXPECT_EQ(0, echo.exit_code) << echo.output;
     EXPECT_NE(std::string::npos, echo.output.find("RECEIVED 1")) << echo.output;
 
-    const std::int64_t snapshots_before =
-        cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    const std::int64_t snapshots_before = cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
 
     set_control_toggle(7);
     drive(std::chrono::seconds(2));
@@ -927,7 +926,9 @@ TEST_F(SnapshotRecoveryInteropTest, aStandbySnapshotRequestAppendsAndResetsButTa
         after_dump.append(entry.to_string()).append("\n");
     }
     EXPECT_EQ(terms_before + 1, entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_TERM).size())
-        << "before:\n" << before_dump << "after:\n" << after_dump;
+        << "before:\n"
+        << before_dump << "after:\n"
+        << after_dump;
 }
 
 // D: SHUTDOWN (`Agent:2611-2634`, `ClusterTermination.java:22-85`,
@@ -936,8 +937,7 @@ TEST_F(SnapshotRecoveryInteropTest, aStandbySnapshotRequestAppendsAndResetsButTa
 // are closed -- the client sees the CLOSED event.
 TEST_F(SnapshotRecoveryInteropTest, aShutdownSnapshotsThenTerminatesTheSessions)
 {
-    const std::int64_t snapshots_before =
-        cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    const std::int64_t snapshots_before = cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
     const std::int64_t errors_before =
         cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
 
@@ -952,8 +952,8 @@ TEST_F(SnapshotRecoveryInteropTest, aShutdownSnapshotsThenTerminatesTheSessions)
         "ClusterSessionEventProbe", {aeron_dir_, "12000", "1"}, std::chrono::seconds(45),
         [&]()
         {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start);
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
             if (!shutdown_sent && elapsed > std::chrono::milliseconds(1500))
             {
                 shutdown_sent = true;
@@ -1003,8 +1003,7 @@ TEST_F(SnapshotRecoveryInteropTest, aShutdownSnapshotsThenTerminatesTheSessions)
 // termination position.
 TEST_F(SnapshotRecoveryInteropTest, anAbortTerminatesWithoutASnapshot)
 {
-    const std::int64_t snapshots_before =
-        cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    const std::int64_t snapshots_before = cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
     const std::int64_t errors_before =
         cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
 
@@ -1019,8 +1018,8 @@ TEST_F(SnapshotRecoveryInteropTest, anAbortTerminatesWithoutASnapshot)
         "ClusterSessionEventProbe", {aeron_dir_, "12000", "1"}, std::chrono::seconds(45),
         [&]()
         {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start);
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
             if (!abort_sent && elapsed > std::chrono::milliseconds(1500))
             {
                 abort_sent = true;
@@ -1045,8 +1044,7 @@ TEST_F(SnapshotRecoveryInteropTest, anAbortTerminatesWithoutASnapshot)
 
     const auto terms = entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_TERM);
     ASSERT_FALSE(terms.empty());
-    EXPECT_EQ(commit_after, terms.back().log_position)
-        << "the committed position must be the termination position";
+    EXPECT_EQ(commit_after, terms.back().log_position) << "the committed position must be the termination position";
 }
 
 }  // namespace
