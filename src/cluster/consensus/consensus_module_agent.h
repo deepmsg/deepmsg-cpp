@@ -4,7 +4,6 @@
 #include <deque>
 #include <expected>
 #include <memory>
-#include <mutex>
 #include <random>
 #include <string>
 #include <string_view>
@@ -219,13 +218,6 @@ public:
     [[nodiscard]] bool is_started() const noexcept
     {
         return started_;
-    }
-
-    /// Test seam: the JoinLog channel the leader advertises to its services.
-    [[nodiscard]] std::string local_log_channel_copy() const
-    {
-        std::lock_guard<std::mutex> lock(local_log_mutex_);
-        return local_log_channel_;
     }
 
     // ---- C4d: ElectionHost (`election_host.h`) -------------------------
@@ -537,7 +529,6 @@ private:
     std::int64_t time_of_last_leader_update_ns_{0};
     std::int64_t last_append_position_send_ns_{0};
     std::string local_log_channel_{};
-    mutable std::mutex local_log_mutex_{};
     std::string log_publication_tag_{};
     std::string live_log_destination_{};
     std::string catchup_log_destination_{};

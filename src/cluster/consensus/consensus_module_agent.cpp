@@ -1214,7 +1214,6 @@ std::expected<void, Error> ConsensusModuleAgent::join_log_as_leader(std::int64_t
             const std::size_t end = service_channel.find('|', alias + 1);
             service_channel.erase(alias, std::string::npos == end ? std::string::npos : end - alias);
         }
-        std::lock_guard<std::mutex> lock(local_log_mutex_);
         local_log_channel_ = is_ipc ? service_channel : "aeron-spy:" + service_channel;
     }
     while (true)
