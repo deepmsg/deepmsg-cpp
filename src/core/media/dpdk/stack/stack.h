@@ -5,7 +5,7 @@
 // DPDK path over a queue pair — and handed to the driver as part of the
 // bindings. Transcribed from the Rust track's `media/userspace/stack.rs`; the
 // Rust mutexes become explicit spin locks (this repository does not use
-// `std::mutex`), and the receive path itself takes no lock.
+// the standard mutex type), and the receive path itself takes no lock.
 
 #pragma once
 

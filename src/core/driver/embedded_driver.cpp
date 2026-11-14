@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace axc::core::driver
@@ -45,7 +46,7 @@ std::expected<EmbeddedDriver, Error> EmbeddedDriver::create(const PropertySource
     aeron_driver_t* driver = nullptr;
     if (0 != aeron_driver_init(&driver, context))
     {
-        (void)media->close();
+        std::ignore = media->close();
         (void)aeron_driver_context_close(context);
         return std::unexpected(driver_error("driver init"));
     }
@@ -53,7 +54,7 @@ std::expected<EmbeddedDriver, Error> EmbeddedDriver::create(const PropertySource
     if (0 != aeron_driver_start(driver, false))
     {
         (void)aeron_driver_close(driver);
-        (void)media->close();
+        std::ignore = media->close();
         (void)aeron_driver_context_close(context);
         return std::unexpected(driver_error("driver start"));
     }
@@ -69,7 +70,7 @@ EmbeddedDriver::EmbeddedDriver(aeron_driver_context_t* context, aeron_driver_t* 
 
 EmbeddedDriver::~EmbeddedDriver()
 {
-    (void)close();
+    std::ignore = close();
 }
 
 EmbeddedDriver::EmbeddedDriver(EmbeddedDriver&& other) noexcept
@@ -83,7 +84,7 @@ EmbeddedDriver& EmbeddedDriver::operator=(EmbeddedDriver&& other) noexcept
 {
     if (this != &other)
     {
-        (void)close();
+        std::ignore = close();
         context_ = other.context_;
         driver_ = other.driver_;
         media_ = std::move(other.media_);

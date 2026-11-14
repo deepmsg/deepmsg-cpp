@@ -1,12 +1,12 @@
 // An explicit spin lock for the stack's cold paths.
 //
-// `std::mutex` is not used in this repository. The receive path takes no lock
+// The standard mutex type is not used in this repository. The receive path takes no lock
 // at all; bind/release and the neighbour table's writers do, and they are cold.
 
 #pragma once
 
+#include <sched.h>
 #include <atomic>
-#include <thread>
 
 namespace axc::core::media::dpdk::stack
 {
@@ -18,7 +18,7 @@ public:
     {
         while (flag_.test_and_set(std::memory_order_acquire))
         {
-            std::this_thread::yield();
+            ::sched_yield();
         }
     }
 

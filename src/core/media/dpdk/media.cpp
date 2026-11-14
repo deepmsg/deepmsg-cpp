@@ -1,6 +1,7 @@
 #include "core/media/dpdk/media.h"
 
 #include <arpa/inet.h>
+#include <tuple>
 
 #include <charconv>
 #include <cstdint>
@@ -354,7 +355,7 @@ std::expected<Settings, Error> parse_settings(const PropertySource& properties) 
 
 Media::~Media()
 {
-    (void)close();
+    std::ignore = close();
 }
 
 std::expected<void, Error> Media::close() noexcept

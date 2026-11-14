@@ -1,12 +1,12 @@
 #include "core/media/dpdk/stack/ports.h"
 
+#include <sched.h>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,7 +24,7 @@ constexpr std::uint32_t WILDCARD = 0xffffffffu;
 
 /// Bind and release happen on the conductor, one lock for the two of them;
 /// the receive path never takes it. An explicit spin lock rather than
-/// `std::mutex`, which this repository does not use.
+/// the standard mutex type, which this repository does not use.
 class SpinLock
 {
 public:
@@ -32,7 +32,7 @@ public:
     {
         while (flag_.test_and_set(std::memory_order_acquire))
         {
-            std::this_thread::yield();
+            ::sched_yield();
         }
     }
 

@@ -1,5 +1,6 @@
 #include "core/media/dpdk/stack/fake_port.h"
 
+#include <sched.h>
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -8,7 +9,6 @@
 #include <deque>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -30,7 +30,7 @@ public:
     {
         while (flag_.test_and_set(std::memory_order_acquire))
         {
-            std::this_thread::yield();
+            ::sched_yield();
         }
     }
 
