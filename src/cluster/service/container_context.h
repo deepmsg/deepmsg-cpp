@@ -7,6 +7,7 @@
 #include <string>
 
 #include "cluster/common/cluster_mark_file.h"
+#include "cluster/common/termination_hook.h"
 #include "core/agent/idle_strategy.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/error/error.h"
@@ -113,6 +114,24 @@ public:
     /// `idle(workCount)` (`CSA:423-430`).
     [[nodiscard]] std::expected<void, Error> idle(axc::core::DeepmsgClient& client, int work);
 
+    /// `ClusteredServiceContainer.Context.extendedTerminationHook()` and
+    /// `terminationHook()` (`ClusteredServiceContainer.java:1849-1900`).
+    void set_termination_hooks(common::ExtendedTerminationHook extended, common::TerminationHook termination)
+    {
+        extended_termination_hook_ = std::move(extended);
+        termination_hook_ = std::move(termination);
+    }
+
+    [[nodiscard]] const common::ExtendedTerminationHook& extended_termination_hook() const noexcept
+    {
+        return extended_termination_hook_;
+    }
+
+    [[nodiscard]] const common::TerminationHook& termination_hook() const noexcept
+    {
+        return termination_hook_;
+    }
+
     void reset_idle() noexcept
     {
         idle_ = fresh_idle_;
@@ -128,6 +147,8 @@ private:
     std::atomic<bool> shutdown_{false};
     std::atomic<bool> abort_{false};
     LifecycleCallback lifecycle_{LifecycleCallback::none};
+    common::ExtendedTerminationHook extended_termination_hook_{};
+    common::TerminationHook termination_hook_{};
 };
 
 }  // namespace deepmsg::cluster::service

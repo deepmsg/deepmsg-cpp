@@ -64,6 +64,7 @@ constexpr std::string_view TICKS_PER_WHEEL_PROP_NAME = "aeron.cluster.ticks.per.
 constexpr std::string_view TIMER_SERVICE_SUPPLIER_PROP_NAME = "aeron.cluster.timer.service.supplier";
 constexpr std::string_view IDLE_STRATEGY_PROP_NAME = "aeron.cluster.idle.strategy";
 constexpr std::string_view AGENT_ROLE_NAME_PROP_NAME = "aeron.cluster.consensus.module.agent.role.name";
+constexpr std::string_view AUTHORISATION_SERVICE_SUPPLIER_PROP_NAME = "aeron.cluster.authorisation.service.supplier";
 constexpr std::string_view THREAD_NAMING_PROP_NAME = "aeron.thread.naming";
 constexpr std::string_view AERON_DIR_PROP_NAME = "aeron.dir";
 constexpr std::string_view ARCHIVE_LOCAL_CONTROL_CHANNEL_PROP_NAME = "aeron.archive.local.control.channel";
@@ -346,6 +347,8 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
         get_string(properties, TIMER_SERVICE_SUPPLIER_PROP_NAME, config.timer_service_supplier);
     config.idle_strategy = get_string(properties, IDLE_STRATEGY_PROP_NAME, config.idle_strategy);
     config.agent_role_name = get_string(properties, AGENT_ROLE_NAME_PROP_NAME, {});
+    config.authorisation_service_supplier =
+        get_string(properties, AUTHORISATION_SERVICE_SUPPLIER_PROP_NAME, config.authorisation_service_supplier);
     config.archive_local_control_channel =
         get_string(properties, ARCHIVE_LOCAL_CONTROL_CHANNEL_PROP_NAME, config.archive_local_control_channel);
 
@@ -436,6 +439,29 @@ std::expected<void, Error> ConsensusModuleConfig::conclude()
     {
         return std::unexpected(make_error(ErrorCode::config_error,
                                           "zero services are only supported when ConsensusModuleExtension is enabled"));
+    }
+
+    // `Configuration.authorisationServiceSupplier()` (`:1350-1365`): the empty
+    // value is the default service; the two tokens are exact; a class name is
+    // not loadable here, so it is refused rather than silently ignored.
+    if (authorisation_service_supplier.empty())
+    {
+        authorisation_service_kind = AuthorisationServiceKind::allow_backup_and_standby;
+    }
+    else if ("ALLOW_ALL" == authorisation_service_supplier)
+    {
+        authorisation_service_kind = AuthorisationServiceKind::allow_all;
+    }
+    else if ("DENY_ALL" == authorisation_service_supplier)
+    {
+        authorisation_service_kind = AuthorisationServiceKind::deny_all;
+    }
+    else
+    {
+        return std::unexpected(make_error(
+            ErrorCode::config_error,
+            "aeron.cluster.authorisation.service.supplier=" + authorisation_service_supplier +
+                " is not one of the supported values (empty, ALLOW_ALL, DENY_ALL); a custom class cannot be loaded"));
     }
 
     // `ConsensusModule.Context.clusterMembers must be set` (`:1772-1775`).

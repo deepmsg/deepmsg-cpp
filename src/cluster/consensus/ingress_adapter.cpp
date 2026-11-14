@@ -239,11 +239,19 @@ aeron_controlled_fragment_handler_action_t IngressAdapter::dispatch(std::span<co
         case header_codec::AdminRequest::SBE_TEMPLATE_ID:
         {
             auto decoder = deepmsg::cluster::common::wrap_body<header_codec::AdminRequest>(message, *decoded_header);
-            const std::string_view payload = decoder.getPayloadAsStringView();
-            handler_.on_admin_request(
-                decoder.leadershipTermId(), decoder.clusterSessionId(), decoder.correlationId(),
-                static_cast<std::int32_t>(decoder.requestType()),
-                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()));
+            // `payload` is optional (`AdminRequest` schema, id 5). The Java
+            // decoder reads its length header past the fragment end into the
+            // larger client buffer; an exact-size span must not. A message
+            // that stops after the block means an empty payload.
+            std::span<const std::uint8_t> payload{};
+            if (message.size() >= decoder.sbePosition() + header_codec::AdminRequest::payloadHeaderLength())
+            {
+                const std::string_view view = decoder.getPayloadAsStringView();
+                payload =
+                    std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(view.data()), view.size());
+            }
+            handler_.on_admin_request(decoder.leadershipTermId(), decoder.clusterSessionId(), decoder.correlationId(),
+                                      static_cast<std::int32_t>(decoder.requestType()), payload);
             break;
         }
 

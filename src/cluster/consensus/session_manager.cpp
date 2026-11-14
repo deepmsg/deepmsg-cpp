@@ -320,6 +320,18 @@ void SessionManager::add_session(std::unique_ptr<ClusterSession> session)
     sessions_.emplace(session->id(), std::move(session));
 }
 
+void SessionManager::timeout_on_unavailable_image(std::int64_t image_correlation_id) noexcept
+{
+    for (auto& entry : sessions_)
+    {
+        ClusterSession& session = *entry.second;
+        if (session.ingress_image_correlation_id() == image_correlation_id && session.is_open())
+        {
+            session.closing(codecs::CloseReason::TIMEOUT);
+        }
+    }
+}
+
 int SessionManager::check_sessions(std::int64_t now_ns_value, std::int64_t leadership_term_id,
                                    std::int32_t leader_member_id, std::string_view ingress_endpoints)
 {

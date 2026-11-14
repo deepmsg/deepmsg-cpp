@@ -210,6 +210,8 @@ private:
     std::int32_t standby_snapshot_flags_{CLUSTER_ACTION_FLAGS_DEFAULT};
     std::int64_t last_cycle_ns_{0};
     bool terminated_{false};
+    bool termination_expected_{false};
+    bool termination_hooks_run_{false};
     std::optional<Error> termination_error_{};
 };
 
@@ -949,6 +951,7 @@ std::expected<void, Error> ClusteredServiceAgent<S>::on_start()
     }
 
     context_.emplace(*idle, config_.idle_strategy, std::move(*mark_file));
+    context_->set_termination_hooks(config_.extended_termination_hook, config_.termination_hook);
 
     axc::core::ClientConfig client_config;
     client_config.dir = config_.aeron_dir;
@@ -1452,6 +1455,9 @@ std::expected<void, Error> ClusteredServiceAgent<S>::invoke_background_work(std:
 template <ClusteredService S>
 Error ClusteredServiceAgent<S>::terminate(bool expected, bool ack_required)
 {
+    // `ClusterTerminationException(expected)` (`CSA:1240-1270`): the flag
+    // reaches `runTerminationHooks` through the error that ends `doWork`.
+    termination_expected_ = expected;
     is_service_active_ = false;
     context_->set_lifecycle(LifecycleCallback::on_terminate);
     Cluster cluster = make_cluster();
@@ -1515,6 +1521,17 @@ void ClusteredServiceAgent<S>::terminate_with(const Error& error) noexcept
         terminated_ = true;
         termination_error_ = error;
         is_service_active_ = false;
+
+        // `ClusteredServiceAgent.doWork`'s `catch (AgentTerminationException)`
+        // (`CSA:275-279`) runs the hooks before the exception leaves the agent;
+        // the ordinary `onClose` path does not.
+        if (!termination_hooks_run_)
+        {
+            termination_hooks_run_ = true;
+            const common::TerminationCause cause{termination_expected_, error};
+            common::run_termination_hooks(context_->extended_termination_hook(), context_->termination_hook(), cause,
+                                          [this](const Error& hook_error) { report(hook_error); });
+        }
     }
 }
 

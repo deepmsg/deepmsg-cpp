@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "cluster/common/termination_hook.h"
 #include "cluster/consensus/consensus_constants.h"
 #include "core/config/property_source.h"
 #include "core/error/error.h"
@@ -57,6 +58,16 @@ enum class StandbySnapshotStartupMode
 {
     warn,
     refuse
+};
+
+/// The three outcomes of `Configuration.authorisationServiceSupplier()`
+/// (`ConsensusModule.java:1350-1365`): the default
+/// `AllowBackupAndStandbyAuthorisationService`, or one of the two tokens.
+enum class AuthorisationServiceKind
+{
+    allow_backup_and_standby,
+    allow_all,
+    deny_all
 };
 
 /// `ConsensusModule.Context` for the C4a skeleton: launch, main loop, slow
@@ -127,6 +138,19 @@ struct ConsensusModuleConfig
     std::string idle_strategy{"org.agrona.concurrent.BackoffIdleStrategy"};
     std::string agent_role_name{};
     bool delete_dir_on_start{false};
+
+    // `aeron.cluster.authorisation.service.supplier`
+    // (`ConsensusModule.java:1340-1375`): empty means the reference default,
+    // `AllowBackupAndStandbyAuthorisationService`; `ALLOW_ALL` and `DENY_ALL`
+    // are the two tokens; any other value fails `conclude()`.
+    std::string authorisation_service_supplier{};
+    AuthorisationServiceKind authorisation_service_kind{AuthorisationServiceKind::allow_backup_and_standby};
+
+    // `ExtendedTerminationHook.java:26-35` / `ConsensusModule.Context`
+    // (`ConsensusModule.java:4155-4210`) and `terminationHook`. Tests inject
+    // them; launch can leave both empty (the reference defaults to no-ops).
+    common::ExtendedTerminationHook extended_termination_hook{};
+    common::TerminationHook termination_hook{};
 
     // Local archive (the reference's `AeronArchive.Context` defaults,
     // `AeronArchive.java:2722-2764`). The response stream id is completed in

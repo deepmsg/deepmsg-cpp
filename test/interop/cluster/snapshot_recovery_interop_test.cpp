@@ -43,6 +43,7 @@
 #include "cluster/common/cluster_mark_file.h"
 #include "cluster/common/cluster_versions.h"
 #include "cluster/common/recording_log.h"
+#include "cluster/common/recovery_state.h"
 #include "cluster/consensus/consensus_module_agent.h"
 #include "cluster/consensus/consensus_module_context.h"
 #include "cluster/consensus/pending_service_message_tracker.h"
@@ -121,7 +122,8 @@ protected:
         }
         for (const char* const name :
              {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java", "ClusterEchoClientProbe.java",
-              "ClusterTimerClientProbe.java", "ClusterServiceMessageClientProbe.java", "ClusterSessionEventProbe.java"})
+              "ClusterTimerClientProbe.java", "ClusterServiceMessageClientProbe.java", "ClusterSessionEventProbe.java",
+              "ClusterAdminRequestProbe.java"})
         {
             const std::string path = find_probe(root, name);
             if (path.empty())
@@ -153,6 +155,33 @@ protected:
         start_container();
         finish_start_agent();
         wait_for_leader_and_services();
+        // C4e: the C4d readiness signal (leader + term + ack) is still early --
+        // `joinLogAsLeader` sets the term before `electionComplete` runs, so
+        // the node toggle is the first signal that the election actually
+        // completed and `election_` was reset. Wait for it before a test
+        // touches a control counter.
+        wait_for_node_control_ready();
+    }
+
+    /// Drives until `electionComplete` has activated the node toggle, then a
+    /// few more passes so `do_work` clears `election_`.
+    void wait_for_node_control_ready()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_agent_once();
+            if (1 == node_toggle())
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    drive_agent_once();
+                }
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ADD_FAILURE() << "the node control toggle was never activated by electionComplete";
     }
 
     void TearDown() override
@@ -301,7 +330,16 @@ protected:
         config.control_channel = CONTROL_CHANNEL;
         config.service_count = SERVICE_COUNT;
         config.archive_control_response_stream_id = 20;
+        config.authorisation_service_supplier = authorisation_service_supplier();
         return config;
+    }
+
+    /// The base fixture runs the reference default
+    /// (`AllowBackupAndStandbyAuthorisationService`); the admin-positive case
+    /// is the one that configures `ALLOW_ALL`, like the reference's own test.
+    [[nodiscard]] virtual std::string authorisation_service_supplier() const
+    {
+        return {};
     }
 
     void start_agent_async()
@@ -590,6 +628,31 @@ protected:
         __atomic_store_n(address, static_cast<std::int64_t>(value), __ATOMIC_RELEASE);
     }
 
+    void set_node_toggle(std::int32_t value)
+    {
+        (void)agent_->client().do_work();
+        auto* reader = agent_->client().counters_reader();
+        const std::int32_t id = deepmsg::cluster::common::find_cluster_counter(
+            reader, deepmsg::cluster::common::NODE_CONTROL_TOGGLE_TYPE_ID, CLUSTER_ID);
+        ASSERT_NE(AERON_NULL_COUNTER_ID, id);
+        std::int64_t* address = aeron_counters_reader_addr(reader, id);
+        ASSERT_NE(nullptr, address);
+        __atomic_store_n(address, static_cast<std::int64_t>(value), __ATOMIC_RELEASE);
+    }
+
+    [[nodiscard]] std::int64_t node_toggle()
+    {
+        auto* reader = agent_->client().counters_reader();
+        const std::int32_t id = deepmsg::cluster::common::find_cluster_counter(
+            reader, deepmsg::cluster::common::NODE_CONTROL_TOGGLE_TYPE_ID, CLUSTER_ID);
+        if (AERON_NULL_COUNTER_ID == id)
+        {
+            return -1;
+        }
+        std::int64_t* address = aeron_counters_reader_addr(reader, id);
+        return nullptr == address ? -1 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
+    }
+
     void wait_for_snapshot()
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
@@ -767,6 +830,7 @@ protected:
         start_container();
         finish_start_agent();
         wait_for_leader_and_services();
+        wait_for_node_control_ready();
     }
 };
 
@@ -835,6 +899,22 @@ TEST_F(SnapshotRecoveryInteropTest, aSnapshotSurvivesARestartAndTheLogContinues)
     // one term; it must not take another snapshot by itself.
     EXPECT_EQ(terms_before + 1, entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_TERM).size());
     EXPECT_EQ(2u, entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_SNAPSHOT).size());
+
+    // C4d M4: the restarted module fed the recovery plan into `RecoveryState`,
+    // so the key the container read carries the service's own recording id
+    // (the first-start key would carry none).
+    const auto key = agent_->last_recovery_state_key_for_test();
+    const auto read_i64 = [](const std::uint8_t* at)
+    {
+        std::int64_t value = 0;
+        std::memcpy(&value, at, sizeof(value));
+        return value;
+    };
+    using deepmsg::cluster::common::RecoveryState;
+    ASSERT_EQ(RecoveryState::SNAPSHOT_RECORDING_IDS_OFFSET + sizeof(std::int64_t), key.size())
+        << "the key must carry one service recording id";
+    EXPECT_EQ(service_snapshot.recording_id, read_i64(key.data() + RecoveryState::SNAPSHOT_RECORDING_IDS_OFFSET));
+    EXPECT_EQ(cm_snapshot.log_position, read_i64(key.data() + RecoveryState::LOG_POSITION_OFFSET));
 }
 
 // C: SUSPEND/RESUME (`ConsensusModuleAgent.java:2578-2587`, `:2663-2677`).
@@ -1045,6 +1125,161 @@ TEST_F(SnapshotRecoveryInteropTest, anAbortTerminatesWithoutASnapshot)
     const auto terms = entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_TERM);
     ASSERT_FALSE(terms.empty());
     EXPECT_EQ(commit_after, terms.back().log_position) << "the committed position must be the termination position";
+}
+
+// C4e: NodeControl. `REPLICATE_STANDBY_SNAPSHOT` is the Q6 shell: the toggle
+// must be reset to NEUTRAL and the error counted (the card's DoD); the node
+// stays ACTIVE and no snapshot is taken.
+TEST_F(SnapshotRecoveryInteropTest, theNodeReplicateToggleResetsAndCountsAnError)
+{
+    const std::int64_t errors_before =
+        cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
+    const std::int64_t snapshots_before = cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+
+    set_node_toggle(2);
+    EXPECT_EQ(2, node_toggle()) << "the test did not write the counter";
+
+    bool reset = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        drive_agent_once();
+        if (1 == node_toggle())
+        {
+            reset = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(reset) << "the node toggle never returned to NEUTRAL";
+    EXPECT_EQ(1, node_toggle());
+    EXPECT_EQ(errors_before + 1,
+              cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID))
+        << "the Q6 shell must be a counted error, never a silent no-op";
+    EXPECT_EQ(snapshots_before, cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID));
+    EXPECT_EQ(deepmsg::cluster::consensus::ConsensusModuleState::active, agent_->module_state());
+}
+
+// C4e: `VALIDATE_RECORDING_LOG` creates the validator, resets the toggle and
+// leaves the recording log alone when every snapshot recording exists.
+TEST_F(SnapshotRecoveryInteropTest, theNodeValidateToggleResetsAndLeavesTheLogAlone)
+{
+    const std::int64_t errors_before =
+        cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
+    const auto snapshots_before = entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_SNAPSHOT);
+
+    set_node_toggle(3);
+
+    bool reset = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        drive_agent_once();
+        if (1 == node_toggle())
+        {
+            reset = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(reset) << "the node toggle never returned to NEUTRAL";
+    EXPECT_EQ(errors_before, cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID));
+    EXPECT_EQ(snapshots_before.size(),
+              entries_of_type(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_SNAPSHOT).size());
+    EXPECT_EQ(deepmsg::cluster::consensus::ConsensusModuleState::active, agent_->module_state());
+}
+
+// C4e: `onUnavailableCounter` (`Agent:3284-3300`): a service client whose
+// counter disappears is an unexpected close -- error counted, module CLOSED.
+TEST_F(SnapshotRecoveryInteropTest, aClosedServiceCounterMarksTheModuleClosed)
+{
+    const std::int64_t errors_before =
+        cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
+
+    ASSERT_TRUE(container_);
+    container_->terminate(std::chrono::seconds(1));
+
+    bool closed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!closed && std::chrono::steady_clock::now() < deadline)
+    {
+        if (deepmsg::cluster::consensus::ConsensusModuleState::closed != agent_->module_state())
+        {
+            drive_agent_once();
+        }
+        closed = deepmsg::cluster::consensus::ConsensusModuleState::closed == agent_->module_state();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    ASSERT_TRUE(closed) << "the module did not notice the service counter going away";
+    EXPECT_GT(cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID), errors_before);
+}
+
+// C4e: the default authorisation service allows BackupQuery, HeartbeatRequest
+// and StandbySnapshot only, so an admin SNAPSHOT is refused (the reference's
+// `ClusterTest.shouldRejectTakeSnapshotRequestWithAnAuthorisationError`).
+TEST_F(SnapshotRecoveryInteropTest, anAdminSnapshotRequestIsRefusedByTheDefaultAuthorisation)
+{
+    const std::int64_t snapshots_before = cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+
+    const auto probe = run_probe("ClusterAdminRequestProbe", {aeron_dir_, "5000", "SNAPSHOT"}, std::chrono::seconds(20),
+                                 [this]() { drive_agent_once(); });
+
+    EXPECT_EQ(0, probe.exit_code) << probe.output;
+    EXPECT_NE(std::string::npos, probe.output.find("RESPONSE_SEEN")) << probe.output;
+    EXPECT_NE(std::string::npos, probe.output.find("ADMIN_RESPONSE UNAUTHORISED_ACCESS")) << probe.output;
+    EXPECT_NE(std::string::npos, probe.output.find("Execution of the SNAPSHOT request was not authorised"))
+        << probe.output;
+    EXPECT_EQ(snapshots_before, cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID));
+}
+
+// C4e: with `ALLOW_ALL` the admin SNAPSHOT request answers OK and takes a
+// snapshot (the reference's positive system test configures the same service).
+class AdminAllowAllInteropTest : public SnapshotRecoveryInteropTest
+{
+protected:
+    [[nodiscard]] std::string authorisation_service_supplier() const override
+    {
+        return "ALLOW_ALL";
+    }
+};
+
+TEST_F(AdminAllowAllInteropTest, anAdminSnapshotRequestTakesASnapshot)
+{
+    const std::int64_t snapshots_before = cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+
+    const auto probe = run_probe("ClusterAdminRequestProbe", {aeron_dir_, "5000", "SNAPSHOT"}, std::chrono::seconds(20),
+                                 [this]() { drive_agent_once(); });
+
+    EXPECT_EQ(0, probe.exit_code) << probe.output;
+    EXPECT_NE(std::string::npos, probe.output.find("ADMIN_RESPONSE OK")) << probe.output;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool taken = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        drive_agent_once();
+        if (cluster_counter(deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID) > snapshots_before &&
+            deepmsg::cluster::consensus::ConsensusModuleState::active == agent_->module_state())
+        {
+            taken = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(taken) << "the admin SNAPSHOT request never produced a snapshot";
+}
+
+TEST_F(AdminAllowAllInteropTest, anUnknownAdminRequestTypeIsAnError)
+{
+    const auto probe = run_probe("ClusterAdminRequestProbe", {aeron_dir_, "5000", "NULL_VAL"}, std::chrono::seconds(20),
+                                 [this]() { drive_agent_once(); });
+
+    EXPECT_EQ(0, probe.exit_code) << probe.output;
+    EXPECT_NE(std::string::npos, probe.output.find("ADMIN_RESPONSE ERROR")) << probe.output;
+    EXPECT_NE(std::string::npos, probe.output.find("Unknown request type: NULL_VAL")) << probe.output;
 }
 
 }  // namespace

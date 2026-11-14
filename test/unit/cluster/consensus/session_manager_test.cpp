@@ -494,6 +494,81 @@ TEST_F(SessionManagerTest, keepAliveRefreshesTheActivityAndTimeoutClosesTheSessi
     EXPECT_EQ(1, log_.closed_count);
 }
 
+TEST_F(SessionManagerTest, anUnavailableIngressImageTimesOutOnlyItsSession)
+{
+    make_manager();
+    connect_session(1);
+    ASSERT_TRUE(pump_until_open(1));
+
+    manager_->on_session_connect(43, RESPONSE_STREAM_ID, 768, RESPONSE_CHANNEL, {}, "probe-2", 2'000, "ipc", 2'000,
+                                 ClusterRole::leader, INGRESS_ENDPOINTS);
+    ASSERT_TRUE(pump_until_open(2));
+
+    ClusterSession* first = manager_->find_by_session_id(1);
+    ClusterSession* second = manager_->find_by_session_id(2);
+    ASSERT_NE(nullptr, first);
+    ASSERT_NE(nullptr, second);
+    ASSERT_EQ(1'000, first->ingress_image_correlation_id());
+    ASSERT_EQ(2'000, second->ingress_image_correlation_id());
+
+    // `SessionManager.timeoutOnUnavailableImage` (`:1121-1132`).
+    manager_->timeout_on_unavailable_image(1'000);
+    EXPECT_EQ(SessionState::closing, first->state());
+    EXPECT_EQ(SessionState::open, second->state());
+    EXPECT_NE(nullptr, manager_->find_by_session_id(1));
+    EXPECT_NE(nullptr, manager_->find_by_session_id(2));
+}
+
+// C4e (C4d gap): `clearSessionsAfter` (`SessionManager.java:1028-1047`): a
+// session opened after the cut is closed, an earlier one stays.
+TEST_F(SessionManagerTest, clearSessionsAfterClosesOnlyTheLaterSessions)
+{
+    make_manager();
+    connect_session(1);
+    ASSERT_TRUE(pump_until_open(1));
+    manager_->on_session_connect(43, RESPONSE_STREAM_ID, 768, RESPONSE_CHANNEL, {}, "probe-2", 2'000, "ipc", 2'000,
+                                 ClusterRole::leader, INGRESS_ENDPOINTS);
+    ASSERT_TRUE(pump_until_open(2));
+
+    manager_->clear_sessions_after(64, LEADERSHIP_TERM_ID);
+
+    EXPECT_NE(nullptr, manager_->find_by_session_id(1));
+    EXPECT_EQ(nullptr, manager_->find_by_session_id(2));
+}
+
+// C4e (C4d gap): `sweepUncommittedSessions` / `restoreUncommittedSessions`
+// (`SessionManager.java:1057-1096`): the commit position is the gate.
+TEST_F(SessionManagerTest, anUncommittedServiceCloseIsRestoredUntilItIsCommitted)
+{
+    make_manager();
+    connect_session(1);
+    ASSERT_TRUE(pump_until_open(1));
+    manager_->on_service_close_session(1, true, LEADERSHIP_TERM_ID);
+    ASSERT_EQ(nullptr, manager_->find_by_session_id(1)) << "the close is uncommitted";
+
+    manager_->sweep_uncommitted_sessions(95);
+    manager_->restore_uncommitted_sessions(64);
+
+    ClusterSession* restored = manager_->find_by_session_id(1);
+    ASSERT_NE(nullptr, restored);
+    EXPECT_EQ(SessionState::closing, restored->state());
+}
+
+TEST_F(SessionManagerTest, aCommittedServiceCloseIsNotRestored)
+{
+    make_manager();
+    connect_session(1);
+    ASSERT_TRUE(pump_until_open(1));
+    manager_->on_service_close_session(1, true, LEADERSHIP_TERM_ID);
+    ASSERT_EQ(nullptr, manager_->find_by_session_id(1));
+
+    manager_->sweep_uncommitted_sessions(96);
+    manager_->restore_uncommitted_sessions(96);
+
+    EXPECT_EQ(nullptr, manager_->find_by_session_id(1));
+    EXPECT_EQ(1, log_.closed_count);
+}
+
 TEST_F(SessionManagerTest, anIngressMessageIsAppendedToTheLogOnceAndBackPressureAborts)
 {
     make_manager();
