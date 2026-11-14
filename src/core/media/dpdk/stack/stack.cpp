@@ -209,6 +209,21 @@ std::size_t Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint desti
         return 0;
     }
 
+    // A datagram this stack addresses to its own address cannot travel on the
+    // wire: nobody out there answers an ARP for an address that is ours. The
+    // kernel media loops it through the local route; a media that owns the
+    // address does the same, and the port table decides who receives it.
+    if (destination.address == params_.address)
+    {
+        const auto target = lookup(destination.address, destination.port, {params_.address, binding.port});
+        if (!target)
+        {
+            return 0;
+        }
+        const bool delivered = deliver(*target, {params_.address, binding.port}, payload);
+        return delivered ? payload.size() : 0;
+    }
+
     const auto next = next_hop(destination.address);
     if (!next)
     {
