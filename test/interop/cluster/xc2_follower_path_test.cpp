@@ -250,8 +250,7 @@ TEST_F(Xc2FollowerPathTest, aFollowerMultipleTermsBehindReplicatesTheLog)
                     node_counter(i, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
                 const std::int64_t node_commit =
                     node_counter(i, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
-                const std::int64_t election =
-                    node_counter(i, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID);
+                const std::int64_t election = node_counter(i, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID);
                 all_active = all_active && (1 == state);
                 // A node finishing its catchup still runs an Election, and an
                 // Election is all its CM does: it answers no ingress until the
