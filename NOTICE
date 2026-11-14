@@ -10,3 +10,7 @@ The archive-server and cluster sources are transcriptions of Aeron 1.54.0
 unmodified upstream tree; the pin itself, not a patch, is the contract.
 
 Aeron is Copyright 2014-2026 Real Logic Limited and contributors.
+
+The DPDK media's C shim (`src/core/media/dpdk/shim/shim.c`) is derived from
+the deepmsg Rust track's `crates/dpdk/shim/shim.c` (commit 655ff6b), also
+Apache-2.0 and Copyright 2026 deepmsg.

@@ -22,6 +22,15 @@ if (AXC_WITH_DPDK)
     add_library(axc_dpdk INTERFACE)
     target_link_libraries(axc_dpdk INTERFACE PkgConfig::AXC_LIBDPDK)
 
+    # The one translation unit that includes a DPDK header. It is C, compiled
+    # against the installed headers; the C++ side sees only `shim.h`.
+    add_library(axc_dpdk_shim STATIC "${PROJECT_SOURCE_DIR}/src/core/media/dpdk/shim/shim.c")
+    target_link_libraries(axc_dpdk_shim PUBLIC PkgConfig::AXC_LIBDPDK)
+    target_include_directories(axc_dpdk_shim PUBLIC
+        "${PROJECT_SOURCE_DIR}/src/core/media/dpdk/shim"
+        "${AXC_SRC_DIR}")
+    set_target_properties(axc_dpdk_shim PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
     set(AXC_DPDK_AVAILABLE TRUE CACHE INTERNAL "")
     message(STATUS "libdpdk ${AXC_LIBDPDK_VERSION}: DPDK media compiled in")
 endif ()

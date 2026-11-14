@@ -41,6 +41,11 @@ axc_add_library(axc_driver
         aeron_driver_static)
 
 if (AXC_DPDK_AVAILABLE)
-    target_link_libraries(axc_driver PUBLIC axc_dpdk)
+    target_sources(axc_driver PRIVATE
+        media/dpdk/eal.cpp
+        media/dpdk/mempool.cpp
+        media/dpdk/port.cpp
+        media/dpdk/ring.cpp)
+    target_link_libraries(axc_driver PUBLIC axc_dpdk axc_dpdk_shim)
     target_compile_definitions(axc_driver PUBLIC AXC_WITH_DPDK=1)
 endif ()
