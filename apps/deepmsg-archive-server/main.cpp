@@ -16,8 +16,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <sched.h>
 
@@ -29,6 +31,7 @@ extern "C"
 
 #include "archive/server/archive_launch.h"
 #include "core/config/property_source.h"
+#include "core/driver/embedded_driver.h"
 
 namespace
 {
@@ -130,12 +133,21 @@ int main(int argc, char** argv)
         }
     }
     (void)properties->load_environment("AERON_");
+    if (auto loaded = properties->load_environment("DEEPMSG_", "deepmsg."); !loaded)
+    {
+        fail(std::string{loaded.error().message.view()});
+    }
 
     // The embedded driver reads its configuration from the environment
     // (`aeron_driver_context_init`), exactly as `aeronmd` does with `-D`.
+    // `deepmsg.*` is our own namespace and stays out of the driver's.
     properties->for_each(
         [](std::string_view name, std::string_view value)
         {
+            if (!name.starts_with("aeron."))
+            {
+                return;
+            }
             const std::string_view driver_value = driver_property_value(name, value);
             (void)aeron_properties_setenv(std::string{name}.c_str(), std::string{driver_value}.c_str());
         });
@@ -157,35 +169,21 @@ int main(int argc, char** argv)
     // The embedded shape starts the driver in this process; the standalone
     // shape (`io.aeron.archive.Archive`) connects to the driver already running
     // in `aeron.dir` and never closes it.
-    aeron_driver_context_t* driver_context = nullptr;
-    aeron_driver_t* driver = nullptr;
+    std::optional<axc::core::driver::EmbeddedDriver> driver;
     if (!standalone)
     {
-        if (0 != aeron_driver_context_init(&driver_context))
+        auto created_driver = axc::core::driver::EmbeddedDriver::create(*properties, &on_driver_termination, nullptr);
+        if (!created_driver)
         {
-            fail(std::string{"driver context init: "} + aeron_errmsg());
+            fail(std::string{created_driver.error().message.view()});
         }
-        (void)aeron_driver_context_set_driver_termination_hook(driver_context, &on_driver_termination, nullptr);
-
-        if (0 != aeron_driver_init(&driver, driver_context))
-        {
-            fail(std::string{"driver init: "} + aeron_errmsg());
-        }
-        // The driver runs its agents on its own threads.
-        if (0 != aeron_driver_start(driver, false))
-        {
-            fail(std::string{"driver start: "} + aeron_errmsg());
-        }
+        driver.emplace(std::move(*created_driver));
     }
 
     auto created = deepmsg::archive::server::ArchiveServer::create(*config);
     if (!created)
     {
-        if (!standalone)
-        {
-            (void)aeron_driver_close(driver);
-            (void)aeron_driver_context_close(driver_context);
-        }
+        driver.reset();
         fail(std::string{created.error().message.view()});
     }
     std::unique_ptr<deepmsg::archive::server::ArchiveServer> server = std::move(*created);
@@ -193,11 +191,7 @@ int main(int argc, char** argv)
     if (auto started = server->start(); !started)
     {
         server.reset();
-        if (!standalone)
-        {
-            (void)aeron_driver_close(driver);
-            (void)aeron_driver_context_close(driver_context);
-        }
+        driver.reset();
         fail(std::string{started.error().message.view()});
     }
 
@@ -234,15 +228,14 @@ int main(int argc, char** argv)
     server.reset();
 
     int exit_status = EXIT_SUCCESS;
-    if (!standalone && 0 != aeron_driver_close(driver))
+    if (driver)
     {
-        std::fprintf(stderr, "deepmsg-archive-server: driver close: %s\n", aeron_errmsg());
-        exit_status = EXIT_FAILURE;
-    }
-    if (!standalone && 0 != aeron_driver_context_close(driver_context))
-    {
-        std::fprintf(stderr, "deepmsg-archive-server: driver context close: %s\n", aeron_errmsg());
-        exit_status = EXIT_FAILURE;
+        if (auto closed = driver->close(); !closed)
+        {
+            std::fprintf(stderr, "deepmsg-archive-server: %s\n", std::string{closed.error().message.view()}.c_str());
+            exit_status = EXIT_FAILURE;
+        }
+        driver.reset();
     }
 
     return exit_status;

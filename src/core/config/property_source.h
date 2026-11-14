@@ -32,8 +32,12 @@ public:
     [[nodiscard]] std::expected<void, Error> load_file(std::string_view path) noexcept;
 
     /// `AERON_DIR` -> `aeron.dir`, `AERON_ARCHIVE_MAX_CONCURRENT_RECORDINGS` ->
-    /// `aeron.archive.max.concurrent.recordings`. Existing values win.
-    [[nodiscard]] std::expected<void, Error> load_environment(std::string_view prefix = "AERON_") noexcept;
+    /// `aeron.archive.max.concurrent.recordings`. `name_prefix` is the property
+    /// namespace the variable is filed under, so `DEEPMSG_DPDK_ENABLED` with
+    /// prefix `DEEPMSG_` and name prefix `deepmsg.` becomes
+    /// `deepmsg.dpdk.enabled`. Existing values win.
+    [[nodiscard]] std::expected<void, Error> load_environment(std::string_view prefix = "AERON_",
+                                                              std::string_view name_prefix = "aeron.") noexcept;
 
     /// Explicit override (highest precedence).
     void set(std::string_view name, std::string_view value);

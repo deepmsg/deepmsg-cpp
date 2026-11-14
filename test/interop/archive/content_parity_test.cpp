@@ -46,6 +46,7 @@
 #include "archive/server/recording_pos.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "fixture/c_driver.h"
+#include "fixture/media_driver.h"
 #include "fixture/process.h"
 
 extern "C"
@@ -145,9 +146,9 @@ protected:
         {
             GTEST_SKIP() << "reference aeron-all jar not built (set AXC_AERON_JAR)";
         }
-        if (!std::filesystem::exists(AXC_AERONMD_DEFAULT))
+        if (!std::filesystem::exists(axc::interop::media_driver_path()))
         {
-            GTEST_SKIP() << "aeronmd not built at " << AXC_AERONMD_DEFAULT;
+            GTEST_SKIP() << "aeronmd not built at " << axc::interop::media_driver_path();
         }
         if (!std::filesystem::exists(AXC_ARCHIVE_SERVER_BIN))
         {
@@ -237,7 +238,7 @@ protected:
     void start_c_driver(const std::string& aeron_dir)
     {
         auto driver =
-            axc::interop::CDriver::start(AXC_AERONMD_DEFAULT, aeron_dir,
+            axc::interop::CDriver::start(axc::interop::media_driver_path(), aeron_dir,
                                          {"AERON_SPIES_SIMULATE_CONNECTION=true", "AERON_TERM_BUFFER_LENGTH=65536",
                                           "AERON_IPC_TERM_BUFFER_LENGTH=65536"});
         ASSERT_TRUE(driver) << driver.error().message.view();

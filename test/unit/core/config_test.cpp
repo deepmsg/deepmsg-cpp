@@ -113,6 +113,21 @@ TEST(PropertySource, EnvironmentDoesNotOverrideExplicitValues)
     ::unsetenv("AERON_TEST_EXPLICIT");
 }
 
+TEST(PropertySource, EnvironmentUsesTheRequestedNamespace)
+{
+    ::setenv("DEEPMSG_DPDK_TEST_SAMPLE", "7", 1);
+
+    const char* argv[] = {"prog"};
+    auto source = axc::core::PropertySource::from_args(1, argv);
+    ASSERT_TRUE(source.has_value());
+    ASSERT_TRUE(source->load_environment("DEEPMSG_", "deepmsg.").has_value());
+
+    EXPECT_EQ("7", source->get_or("deepmsg.dpdk.test.sample", ""));
+    EXPECT_FALSE(source->contains("aeron.dpdk.test.sample"));
+
+    ::unsetenv("DEEPMSG_DPDK_TEST_SAMPLE");
+}
+
 TEST(NameTable, DispositionsAndUnknownNames)
 {
     axc::core::NameTable table;

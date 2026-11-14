@@ -1,4 +1,5 @@
 add_subdirectory(deepmsg-archive-server)
+add_subdirectory(deepmsg-media-driver)
 add_subdirectory(deepmsg-consensus-module)
 add_subdirectory(deepmsg-clustered-service-container)
 add_subdirectory(deepmsg-cluster-node)

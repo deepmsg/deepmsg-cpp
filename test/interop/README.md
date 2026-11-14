@@ -50,6 +50,9 @@ useful negative control: the suite must fail, proving the property is honoured.
   normal way a JVM peer stops.
 - `CDriver`: `aeronmd` on a caller-owned directory; the destructor stops the
   driver and **never deletes the directory** (it is shared with the peers).
+  `AXC_MEDIA_DRIVER` replaces the built `aeronmd` path with any binary that
+  accepts the same `-Daeron.dir=...` arguments — our `deepmsg-media-driver`
+  included.
 
 ## Reference test code
 
