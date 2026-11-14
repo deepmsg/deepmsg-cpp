@@ -108,6 +108,7 @@ private:
 
     unsigned index_;
     bool open_{true};
+    bool started_{false};
 };
 
 }  // namespace axc::core::media::dpdk

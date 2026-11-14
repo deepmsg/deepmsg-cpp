@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -25,6 +26,11 @@ extern "C"
 
 namespace axc::core::media::dpdk
 {
+
+namespace stack
+{
+class Stack;
+}
 
 /// An IPv4 address in host byte order with its prefix length.
 struct Ipv4Prefix
@@ -60,15 +66,14 @@ struct Settings
 /// way the reference refuses a configuration name it does not serve.
 [[nodiscard]] std::expected<Settings, Error> parse_settings(const PropertySource& properties) noexcept;
 
-/// The media a driver context holds. Empty until P3; move-only because what it
-/// will own (EAL, port, pool) cannot be shared.
+/// The media a driver context holds: the EAL, the pool, the port and the
+/// userspace stack. Move-only because none of those can be shared.
 class Media
 {
 public:
-    Media() = default;
-    explicit Media(bool enabled) noexcept : enabled_{enabled} {}
-    Media(Media&& other) noexcept = default;
-    Media& operator=(Media&& other) noexcept = default;
+    Media() noexcept;
+    Media(Media&& other) noexcept;
+    Media& operator=(Media&& other) noexcept;
     ~Media();
 
     Media(const Media&) = delete;
@@ -76,22 +81,38 @@ public:
 
     [[nodiscard]] bool enabled() const noexcept
     {
-        return enabled_;
+        return nullptr != impl_;
     }
+
+    /// The userspace stack, when the media is open.
+    [[nodiscard]] stack::Stack* stack() const noexcept;
 
     /// Stop and release what the media owns. Idempotent; the destructor calls it.
     [[nodiscard]] std::expected<void, Error> close() noexcept;
 
 private:
-    bool enabled_{false};
+    friend std::expected<Media, Error> open_media(const Settings& settings) noexcept;
+
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    bool eal_started_{false};
     bool closed_{false};
 };
+
+/// Open the media the settings describe (EAL, port, pool and the stack) without
+/// installing anything into a driver context. `install_if_configured` uses it
+/// once the bindings exist; tests use it directly.
+[[nodiscard]] std::expected<Media, Error> open_media(const Settings& settings) noexcept;
+
+/// Parse and open in one step.
+[[nodiscard]] std::expected<Media, Error> open_media(const PropertySource& properties) noexcept;
 
 /// Install the configured media into a driver context.
 ///
 /// A build without DPDK refuses `deepmsg.dpdk.enabled=true` with a message that
-/// names the build option; a DPDK build reports that the implementation lands
-/// in P3. With the media disabled this is a successful no-op.
+/// names the build option; with the media disabled this is a successful no-op.
+/// The bindings that put the stack in front of the driver's channels are P4b;
+/// until they land an enabled media is refused rather than half-installed.
 [[nodiscard]] std::expected<Media, Error> install_if_configured(aeron_driver_context_t* context,
                                                                 const PropertySource& properties) noexcept;
 

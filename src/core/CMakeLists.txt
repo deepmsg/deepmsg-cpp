@@ -45,7 +45,8 @@ if (AXC_DPDK_AVAILABLE)
         media/dpdk/eal.cpp
         media/dpdk/mempool.cpp
         media/dpdk/port.cpp
-        media/dpdk/ring.cpp)
+        media/dpdk/ring.cpp
+        media/dpdk/dpdk_port.cpp)
     target_link_libraries(axc_driver PUBLIC axc_dpdk axc_dpdk_shim)
     target_compile_definitions(axc_driver PUBLIC AXC_WITH_DPDK=1)
 endif ()

@@ -137,7 +137,7 @@ TEST(DpdkMediaConfig, EnabledIsRefusedInABuildWithoutDpdk)
 
     const std::string message = message_of(media.error());
 #if defined(AXC_WITH_DPDK)
-    EXPECT_NE(std::string::npos, message.find("not implemented"));
+    EXPECT_NE(std::string::npos, message.find("bindings"));
 #else
     EXPECT_NE(std::string::npos, message.find("AXC_WITH_DPDK=ON"));
 #endif

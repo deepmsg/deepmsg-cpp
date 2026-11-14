@@ -58,7 +58,9 @@ Port& Port::operator=(Port&& other) noexcept
         close();
         index_ = other.index_;
         open_ = other.open_;
+        started_ = other.started_;
         other.open_ = false;
+        other.started_ = false;
     }
     return *this;
 }
@@ -171,14 +173,16 @@ std::expected<void, Error> Port::start() noexcept
     {
         return std::unexpected(rte_error("rte_eth_dev_start"));
     }
+    started_ = true;
     return {};
 }
 
 void Port::stop() noexcept
 {
-    if (open_)
+    if (open_ && started_)
     {
         shim_port_stop(index_);
+        started_ = false;
     }
 }
 
@@ -186,6 +190,7 @@ void Port::close() noexcept
 {
     if (open_)
     {
+        stop();
         shim_port_close(index_);
         open_ = false;
     }
