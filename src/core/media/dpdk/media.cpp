@@ -308,6 +308,7 @@ constexpr std::string_view KNOWN_PROPERTIES[] = {
     return argument;
 }
 
+#if defined(AXC_WITH_DPDK)
 [[nodiscard]] std::string ipv4_prefix_text(const Ipv4Prefix& prefix) noexcept
 {
     std::string text;
@@ -323,6 +324,7 @@ constexpr std::string_view KNOWN_PROPERTIES[] = {
     text += std::to_string(prefix.prefix_length);
     return text;
 }
+#endif
 
 }  // namespace
 
