@@ -9,6 +9,7 @@
 
 #include "fixture/c_driver.h"
 #include "fixture/java_process.h"
+#include "fixture/media_driver.h"
 #include "fixture/process.h"
 
 #ifndef AXC_INTEROP_DIR
@@ -142,7 +143,7 @@ TEST(Shim, SelfTestPasses)
 
 TEST(CDriver, StartsAndStopsWithoutDeletingTheDirectory)
 {
-    const std::string aeronmd = AXC_AERONMD_DEFAULT;
+    const std::string aeronmd = axc::interop::media_driver_path();
     if (!std::filesystem::exists(aeronmd))
     {
         GTEST_SKIP() << "aeronmd not built at " << aeronmd;

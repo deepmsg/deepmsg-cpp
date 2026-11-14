@@ -43,6 +43,15 @@
       }
     },
     {
+      "name": "dpdk",
+      "displayName": "debug + DPDK (gcc)",
+      "inherits": "gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AXC_WITH_DPDK": "ON"
+      }
+    },
+    {
       "name": "release",
       "displayName": "release (gcc)",
       "inherits": "gcc",
@@ -137,6 +146,10 @@
     {
       "name": "debug",
       "configurePreset": "debug"
+    },
+    {
+      "name": "dpdk",
+      "configurePreset": "dpdk"
     },
     {
       "name": "release",

@@ -71,3 +71,56 @@ jobs:
 
       - name: Gate (gcc debug+release, clang-20 debug)
         run: scripts/check.sh debug release debug-clang
+
+  # The DPDK media, compiled in. A job of its own so the default gate above
+  # keeps running on a machine with no `libdpdk-dev`; the `dpdk` preset is the
+  # only one that turns `AXC_WITH_DPDK` on.
+  dpdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev libdpdk-dev wget
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 20
+          sudo apt-get install -y clang-20 clang-tidy-20 clang-format-20
+
+      - name: CMake >= 3.30
+        run: |
+          curl -sSL -o /tmp/cmake.tar.gz https://cmake.org/files/v3.31/cmake-3.31.6-linux-x86_64.tar.gz
+          sudo tar -C /opt -xzf /tmp/cmake.tar.gz
+          echo "/opt/cmake-3.31.6-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Gradle wrapper distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Warm Gradle wrapper (retry)
+        run: |
+          cd third_party/aeron
+          for attempt in 1 2 3 4 5; do
+            if ./gradlew --version; then
+              exit 0
+            fi
+            echo "gradle wrapper attempt $attempt failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
+
+      - name: Fetch SBE tool
+        run: scripts/fetch-sbe.sh
+
+      - name: Gate (debug + DPDK)
+        run: scripts/check.sh dpdk

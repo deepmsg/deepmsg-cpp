@@ -87,7 +87,8 @@ std::expected<void, Error> PropertySource::load_file(std::string_view path) noex
     return {};
 }
 
-std::expected<void, Error> PropertySource::load_environment(std::string_view prefix) noexcept
+std::expected<void, Error> PropertySource::load_environment(std::string_view prefix,
+                                                            std::string_view name_prefix) noexcept
 {
     if (nullptr == environ)
     {
@@ -104,7 +105,7 @@ std::expected<void, Error> PropertySource::load_environment(std::string_view pre
         }
 
         const std::string_view suffix = variable.substr(prefix.size(), equals - prefix.size());
-        std::string name{"aeron."};
+        std::string name{name_prefix};
         for (const char c : suffix)
         {
             name.push_back('_' == c ? '.' : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));

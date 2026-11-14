@@ -3,4 +3,5 @@ axc_add_executable(deepmsg-archive-server
         main.cpp
     DEPS
         axc_archive_server
+        axc_driver
         aeron_driver_static)

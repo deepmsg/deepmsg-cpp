@@ -14,8 +14,18 @@ axc_add_executable(axc_unit_tests
         core/trace_test.cpp
         core/many_to_one_queue_test.cpp
         core/duty_cycle_tracker_test.cpp
+        core/dpdk_media_config_test.cpp
+        core/dpdk_frame_test.cpp
+        core/dpdk_ports_test.cpp
+        core/dpdk_packet_io_test.cpp
+        core/dpdk_fake_port_test.cpp
+        core/dpdk_neighbour_test.cpp
+        core/dpdk_arp_test.cpp
+        core/dpdk_stack_test.cpp
+        core/dpdk_port_test.cpp
     DEPS
         axc_core
+        axc_driver
         GTest::gtest_main
         aeron_driver_static
         aeron_static)

@@ -26,6 +26,7 @@
 
 #include "archive/server/recording_pos.h"
 #include "fixture/c_driver.h"
+#include "fixture/media_driver.h"
 #include "fixture/process.h"
 
 // The internal archive client headers carry no `extern "C"` guard.
@@ -118,9 +119,9 @@ protected:
         archive_dir_ = root_ + "/archive";
         std::filesystem::create_directories(archive_dir_);
 
-        if (!std::filesystem::exists(AXC_AERONMD_DEFAULT))
+        if (!std::filesystem::exists(axc::interop::media_driver_path()))
         {
-            GTEST_SKIP() << "aeronmd not built at " << AXC_AERONMD_DEFAULT;
+            GTEST_SKIP() << "aeronmd not built at " << axc::interop::media_driver_path();
         }
         if (!std::filesystem::exists(AXC_ARCHIVE_SERVER_BIN))
         {
@@ -145,7 +146,8 @@ protected:
     {
         if (standalone)
         {
-            auto driver = CDriver::start(AXC_AERONMD_DEFAULT, aeron_dir_, {"AERON_SPIES_SIMULATE_CONNECTION=true"});
+            auto driver =
+                CDriver::start(axc::interop::media_driver_path(), aeron_dir_, {"AERON_SPIES_SIMULATE_CONNECTION=true"});
             ASSERT_TRUE(driver) << driver.error().message.view();
             driver_ = std::move(*driver);
         }

@@ -32,6 +32,7 @@
 #include "client/aeron_archive_async_connect.h"
 #include "fixture/c_driver.h"
 #include "fixture/java_process.h"
+#include "fixture/media_driver.h"
 
 #ifndef AXC_AERONMD_DEFAULT
 #define AXC_AERONMD_DEFAULT "aeronmd"
@@ -96,13 +97,13 @@ protected:
         archive_dir_ = root_ + "/archive";
         std::filesystem::create_directories(archive_dir_);
 
-        if (!std::filesystem::exists(AXC_AERONMD_DEFAULT))
+        if (!std::filesystem::exists(axc::interop::media_driver_path()))
         {
-            GTEST_SKIP() << "aeronmd not built at " << AXC_AERONMD_DEFAULT;
+            GTEST_SKIP() << "aeronmd not built at " << axc::interop::media_driver_path();
         }
 
-        auto driver =
-            axc::interop::CDriver::start(AXC_AERONMD_DEFAULT, aeron_dir_, {"AERON_SPIES_SIMULATE_CONNECTION=true"});
+        auto driver = axc::interop::CDriver::start(axc::interop::media_driver_path(), aeron_dir_,
+                                                   {"AERON_SPIES_SIMULATE_CONNECTION=true"});
         ASSERT_TRUE(driver) << driver.error().message.view();
         driver_ = std::move(*driver);
     }

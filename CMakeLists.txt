@@ -15,6 +15,7 @@ include(AxcTarget)
 include(Sanitizers)
 include(Pgo)
 include(Uring)
+include(Dpdk)
 include(Aeron)
 include(Sbe)
 
