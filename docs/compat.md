@@ -53,6 +53,55 @@ advice).
 | `deepmsg.archive.replay.io.backend` | `pread` | How `ReplaySession` reads segment files: `pread` copies into the session's read window (the reference's shape) or `mmap` maps the file `MAP_PRIVATE` so the frame loop walks the mapping (frame-header rewrites COW and never reach the file). A replay bounded by a position counter (a live recording) always reads through `pread`: the first header rewrite freezes its 4 KiB page, so the recorder's later appends into that page would be invisible to the mapping. | `ArchiveConfigTest`, `SegmentReaderTest`, `ReplaySessionTest` |
 | `deepmsg.archive.replay.io.fadvise` | `none` | `willneed` issues `POSIX_FADV_WILLNEED` when a segment is opened and `POSIX_FADV_DONTNEED` before it is dropped; a refused advice (`EINVAL`/`ENOSYS`) is not an error. | `ArchiveConfigTest`, `SegmentReaderTest` |
 
+## The DPDK media (C++-only, 2026-11-15)
+
+The reference's DPDK media is Premium and closed, so there is no oracle for its
+names or its log. These are our own, compiled in only with
+`-DAXC_WITH_DPDK=ON`; a default build refuses `deepmsg.dpdk.enabled=true` and
+names the build option. Every name is read through `PropertySource`, so the
+environment form is `DEEPMSG_DPDK_*` (`DEEPMSG_DPDK_IPV4_ADDRESS` ->
+`deepmsg.dpdk.ipv4.address`). An unknown `deepmsg.dpdk.*` name is refused.
+
+| Name | Default | Meaning | Pinned by |
+|---|---|---|---|
+| `deepmsg.dpdk.enabled` | `false` | The media's switch. This — not the reference's `aeron.udp.channel.transport.bindings.media` — selects it: the C driver resolves that name in `aeron_driver_context_init` (`aeron_driver_context.c:1288`) before a media can be installed, and no `dpdk` symbol is exported (P5 would add the alias). | `DpdkMediaConfigTest`, `DpdkCounters` |
+| `deepmsg.dpdk.eal.args` | empty | The operator's EAL arguments, whitespace-split and passed through (`-a 0000:03:00.0`, `--vdev=net_pcap0,...`, `--no-huge`). `--lcores`/`-l` is refused: the media chooses it from the process's own cpuset. | `DpdkMediaConfig` |
+| `deepmsg.dpdk.port` | first probed port | The EAL port name (a PCI address or a vdev name). | `DpdkMediaConfig`, `DpdkPortTest` |
+| `deepmsg.dpdk.ipv4.address` | required when enabled | This port's address/prefix, e.g. `10.10.0.1/24`. The kernel does not have it; the stack answers ARP for it. | `DpdkMediaChild` |
+| `deepmsg.dpdk.ipv4.gateway` | none | Next hop for destinations off this link. | `DpdkMediaConfig` |
+| `deepmsg.dpdk.static.neighbours` | empty | `address=mac,...` entries that never age out. | `DpdkMediaConfig`, `DpdkStackTest` |
+| `deepmsg.dpdk.rx.descriptors` / `tx.descriptors` | 1024 / 1024 | Queue depths. | `DpdkPortTest` |
+| `deepmsg.dpdk.mempool.size` | 8191 | Mbufs (`2^k - 1`, so every cache line is full). | `DpdkPortTest` |
+| `deepmsg.dpdk.mempool.cache` | 256 | Per-thread mbuf cache. | `DpdkPortTest` |
+| `deepmsg.dpdk.rx.burst` | 32 | Frames one `pump` takes off the port (the shim's floor is 4 on ixgbe). | `DpdkMediaConfig` |
+| `deepmsg.dpdk.sender.ring` | 1024 | Frames a transport's ring holds (`2^k`; the capacity is rounded up from the receive window). | `DpdkMediaConfig` |
+| `deepmsg.dpdk.ephemeral.ports` | `32768-60999` | Port range for a transport bound to port 0. | `DpdkMediaConfig` |
+| `deepmsg.dpdk.arp.timeout.ms` / `arp.retry.ms` | 300000 / 1000 | Neighbour ageing and ARP throttle. | `DpdkMediaConfig` |
+
+**Behaviour that is not configuration**
+
+- The media adds `--no-telemetry` and `--lcores=0@(<process cpuset>)` to the
+  operator's EAL arguments; an operator `--lcores`/`-l` is refused rather than
+  overridden (`plan-dpdk-media.md` §4.7). The main thread's affinity is saved
+  before `rte_eal_init` and restored after it.
+- `open_media` waits up to 30 s for the port's link before it returns; a
+  10GBASE-T link was measured at ~20 s after start, and frames sent before it
+  is up are lost without an error.
+- On success it writes one line to **stdout** — `dpdk media on <port>
+  (<driver>), address <address>/<prefix>, mtu <mtu>, link up (<speed> Mb/s)` —
+  and `dpdk media closed` on close. The reference's closed media says nothing;
+  this line is deliberate, because "configured" and "open on the media" must
+  not look alike. Nothing is written to stderr by our own code.
+- Receives: every transport keeps its kernel socket; a wildcard or this-port
+  bind is also entered in the stack's table, which is how the DPDK port acts as
+  an extra NIC. Sends are routed per destination: loopback, multicast,
+  broadcast and unreachable destinations fall back to the kernel; everything
+  else leaves through the DPDK port. Only `aeron.threading.mode=DEDICATED` is
+  accepted.
+- Counters use type ids 75–95 (`aeron_counters.h:155-173`); 80/81 are unused
+  and 92 is the port's extended-statistics name count. Their keys and labels
+  are ours, because the reference's media is closed.
+
 ## Known gaps (A4b, 2026-11-09)
 
 Deliberately not implemented; none of them is reachable from the reference C
