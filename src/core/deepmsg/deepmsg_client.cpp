@@ -57,6 +57,12 @@ std::expected<DeepmsgClient, Error> DeepmsgClient::connect(const ClientConfig& c
         }
     }
 
+    if (nullptr != config.on_error &&
+        0 != aeron_context_set_error_handler(context, config.on_error, config.on_error_clientd))
+    {
+        return std::unexpected(make_error(ErrorCode::config_error, "set error handler failed"));
+    }
+
     if (nullptr != config.on_unavailable_counter &&
         0 != aeron_context_set_on_unavailable_counter(context, config.on_unavailable_counter,
                                                       config.on_unavailable_counter_clientd))
@@ -141,7 +147,8 @@ AsyncAdd<ExPubPtr> DeepmsgClient::add_exclusive_publication(std::string_view cha
     if (0 != aeron_async_add_exclusive_publication(&async, client_.get(), channel_buffer.data(), stream_id))
     {
         return AsyncAdd<ExPubPtr>::failed(
-            make_error(ErrorCode::internal_error, "async add exclusive publication failed"));
+            make_error(ErrorCode::internal_error,
+                       "async add exclusive publication failed for " + std::string{channel} + ": " + aeron_errmsg()));
     }
 
     return AsyncAdd<ExPubPtr>(
@@ -174,7 +181,9 @@ AsyncAdd<PubPtr> DeepmsgClient::add_publication(std::string_view channel, std::i
     aeron_async_add_publication_t* async = nullptr;
     if (0 != aeron_async_add_publication(&async, client_.get(), channel_buffer.data(), stream_id))
     {
-        return AsyncAdd<PubPtr>::failed(make_error(ErrorCode::internal_error, "async add publication failed"));
+        return AsyncAdd<PubPtr>::failed(
+            make_error(ErrorCode::internal_error,
+                       "async add publication failed for " + std::string{channel} + ": " + aeron_errmsg()));
     }
 
     return AsyncAdd<PubPtr>(
@@ -203,7 +212,9 @@ AsyncAdd<SubPtr> DeepmsgClient::add_subscription(std::string_view channel, std::
                                           handlers.on_available, handlers.on_available_clientd, handlers.on_unavailable,
                                           handlers.on_unavailable_clientd))
     {
-        return AsyncAdd<SubPtr>::failed(make_error(ErrorCode::internal_error, "async add subscription failed"));
+        return AsyncAdd<SubPtr>::failed(
+            make_error(ErrorCode::internal_error,
+                       "async add subscription failed for " + std::string{channel} + ": " + aeron_errmsg()));
     }
 
     return AsyncAdd<SubPtr>(

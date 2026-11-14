@@ -1,5 +1,11 @@
 #include "cluster/election/election.h"
 
+#include <cstdio>
+
+#include <cstdio>
+
+#include <cstdio>
+
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -25,48 +31,6 @@ constexpr std::int64_t ONE_DAY_NS = 24LL * 60 * 60 * 1'000'000'000;
 
 /// `Aeron.NULL_VALUE` in the state-change trace's leader field.
 constexpr std::int32_t NULL_MEMBER_ID = -1;
-
-/// `ChannelUri.createDestinationUri(channel, endpoint)` (`ChannelUri.java:589-601`):
-/// the media of the log channel with a remote endpoint, carrying `interface=`
-/// over when it was there.
-[[nodiscard]] std::string create_destination_uri(std::string_view channel, std::string_view remote_endpoint)
-{
-    constexpr std::string_view AERON_PREFIX = "aeron:";
-    std::string_view media = channel;
-    const std::size_t prefix = channel.find(AERON_PREFIX);
-    if (std::string_view::npos != prefix)
-    {
-        media = channel.substr(prefix + AERON_PREFIX.size());
-    }
-    std::string_view params{};
-    const std::size_t question = media.find('?');
-    if (std::string_view::npos != question)
-    {
-        params = media.substr(question + 1);
-        media = media.substr(0, question);
-    }
-
-    std::string result = "aeron:" + std::string{media} + "?endpoint=" + std::string{remote_endpoint};
-
-    std::size_t begin = 0;
-    while (begin < params.size())
-    {
-        const std::size_t bar = params.find('|', begin);
-        const std::string_view token =
-            std::string_view::npos == bar ? params.substr(begin) : params.substr(begin, bar - begin);
-        const std::size_t equals = token.find('=');
-        if (std::string_view::npos != equals && token.substr(0, equals) == "interface")
-        {
-            result += "|interface=" + std::string{token.substr(equals + 1)};
-        }
-        if (std::string_view::npos == bar)
-        {
-            break;
-        }
-        begin = bar + 1;
-    }
-    return result;
-}
 
 [[nodiscard]] bool ends_with_zero_port(std::string_view endpoint) noexcept
 {
@@ -659,17 +623,22 @@ std::expected<int, Error> Election::init(std::int64_t now_ns)
 
         if (NULL_VALUE != log_subscription_registration_id_)
         {
-            auto removed = host_.remove_log_subscription(log_subscription_registration_id_);
+            const std::int64_t registration_id = log_subscription_registration_id_;
+            auto removed = host_.remove_log_subscription(registration_id);
             if (!removed)
             {
                 return std::unexpected(removed.error());
             }
-            auto awaited = host_.await_local_sockets_closed(log_subscription_registration_id_);
+            // The subscription is gone. The id is the C++ "do we have one"
+            // marker, so it is cleared before the socket wait: a failed wait
+            // (`Election.java:674-676` retries on a closed object) must retry
+            // the wait, not ask the agent to remove the subscription again.
+            log_subscription_registration_id_ = NULL_VALUE;
+            auto awaited = host_.await_local_sockets_closed(registration_id);
             if (!awaited)
             {
                 return std::unexpected(awaited.error());
             }
-            log_subscription_registration_id_ = NULL_VALUE;
         }
     }
 
@@ -860,8 +829,7 @@ std::expected<int, Error> Election::leader_log_replication(std::int64_t now_ns)
     // `Election.java:809-826`.
     int work_count = 0;
 
-    this_member_.log_position = append_position_;
-    this_member_.time_of_last_append_position_ns = now_ns;
+    sync_this_member_log(leadership_term_id_, append_position_, now_ns, true);
 
     const std::int64_t quorum_position = host_.quorum_position_bounded_by_leader_log(append_position_, now_ns);
     auto new_terms = publish_new_leadership_term_on_interval(quorum_position, now_ns);
@@ -918,9 +886,7 @@ std::expected<int, Error> Election::leader_replay(std::int64_t now_ns)
 
         work_count++;
         is_leader_startup_ = is_node_startup_;
-        this_member_.leadership_term_id = leadership_term_id_;
-        this_member_.log_position = append_position_;
-        this_member_.time_of_last_append_position_ns = now_ns;
+        sync_this_member_log(leadership_term_id_, append_position_, now_ns, true);
     }
     else
     {
@@ -1069,7 +1035,12 @@ std::expected<int, Error> Election::follower_log_replication(std::int64_t now_ns
             return std::unexpected(polled.error());
         }
         work_count += *polled;
-        log_replication_->poll(now_ns);
+        auto replicated = log_replication_->poll(now_ns);
+        if (!replicated)
+        {
+            return std::unexpected(replicated.error());
+        }
+        work_count += *replicated;
         const bool replication_done = log_replication_->has_replication_ended() && log_replication_->has_stopped();
         // Log replication runs concurrently; publishing after the completion
         // check makes the last position at the end of the leadership the one
@@ -1672,7 +1643,7 @@ bool Election::send_catchup_position(std::string_view catchup_endpoint)
 std::expected<void, Error> Election::add_catchup_log_destination()
 {
     // `Election.java:1345-1349`.
-    const std::string destination = create_destination_uri(context_.log_channel, this_member_.catchup_endpoint);
+    const std::string destination = common::create_destination_uri(context_.log_channel, this_member_.catchup_endpoint);
     auto added = host_.add_log_destination(log_subscription_registration_id_, destination);
     if (!added)
     {
@@ -1684,9 +1655,9 @@ std::expected<void, Error> Election::add_catchup_log_destination()
 std::expected<void, Error> Election::add_live_log_destination()
 {
     // `Election.java:1351-1364`.
-    const std::string destination = context_.log_is_mdc
-                                        ? create_destination_uri(context_.log_channel, this_member_.log_endpoint)
-                                        : context_.log_channel;
+    const std::string destination =
+        context_.log_is_mdc ? common::create_destination_uri(context_.log_channel, this_member_.log_endpoint)
+                            : context_.log_channel;
     auto added = host_.add_log_destination(log_subscription_registration_id_, destination);
     if (!added)
     {
@@ -1761,12 +1732,32 @@ void Election::stop_replay() noexcept
     last_published_append_position_ = 0;
 }
 
+void Election::sync_this_member_log(std::int64_t leadership_term_id, std::int64_t log_position, std::int64_t time_ns,
+                                    bool set_time) noexcept
+{
+    this_member_.leadership_term_id = leadership_term_id;
+    this_member_.log_position = log_position;
+    if (set_time)
+    {
+        this_member_.time_of_last_append_position_ns = time_ns;
+    }
+    common::ClusterMember* self = common::find_member(cluster_members_, this_member_.id);
+    if (nullptr != self)
+    {
+        self->leadership_term_id = leadership_term_id;
+        self->log_position = log_position;
+        if (set_time)
+        {
+            self->time_of_last_append_position_ns = time_ns;
+        }
+    }
+}
+
 void Election::reset_members() noexcept
 {
     // `Election.java:1446-1451`.
     common::reset_members(cluster_members_);
-    this_member_.leadership_term_id = leadership_term_id_;
-    this_member_.log_position = append_position_;
+    sync_this_member_log(leadership_term_id_, append_position_, 0, false);
     leader_member_ = nullptr;
 }
 

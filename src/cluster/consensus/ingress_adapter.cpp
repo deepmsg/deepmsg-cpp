@@ -1,5 +1,7 @@
 #include "cluster/consensus/ingress_adapter.h"
 
+#include <cstdio>
+
 #include <string_view>
 #include <utility>
 

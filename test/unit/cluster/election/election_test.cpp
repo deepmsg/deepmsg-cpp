@@ -152,7 +152,7 @@ class MockRecordingReplication : public deepmsg::cluster::election::RecordingRep
 {
 public:
     MOCK_METHOD(void, on_signal, (std::int64_t, std::int64_t, std::int64_t, std::int32_t), (override));
-    MOCK_METHOD(void, poll, (std::int64_t), (override));
+    MOCK_METHOD((std::expected<int, Error>), poll, (std::int64_t), (override));
     MOCK_METHOD(bool, has_replication_ended, (), (const, override));
     MOCK_METHOD(bool, has_stopped, (), (const, override));
     MOCK_METHOD(bool, has_synced, (), (const, override));
@@ -1258,8 +1258,12 @@ TEST_F(ElectionTest, followerShouldReplicateAndSendAppendPositionWhenLogReplicat
     ON_CALL(*replication, position())
         .WillByDefault(::testing::Invoke([&replication_position] { return replication_position; }));
     ON_CALL(*replication, poll(_))
-        .WillByDefault(::testing::Invoke([&replication_position](std::int64_t)
-                                         { replication_position = next_term_base_log_position; }));
+        .WillByDefault(::testing::Invoke(
+            [&replication_position](std::int64_t) -> std::expected<int, Error>
+            {
+                replication_position = next_term_base_log_position;
+                return 1;
+            }));
     ON_CALL(*replication, has_replication_ended()).WillByDefault(Return(true));
     ON_CALL(*replication, has_stopped()).WillByDefault(Return(true));
     ON_CALL(*replication, recording_id()).WillByDefault(Return(RECORDING_ID));

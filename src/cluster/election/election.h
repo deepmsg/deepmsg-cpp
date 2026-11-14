@@ -205,6 +205,10 @@ private:
     void stop_log_replication() noexcept;
     void stop_replay() noexcept;
     void reset_members() noexcept;
+    /// The C++ `this_member_` is a copy, while the reference's array element is
+    /// the same object; every write must go to both.
+    void sync_this_member_log(std::int64_t leadership_term_id, std::int64_t log_position, std::int64_t time_ns,
+                              bool set_time) noexcept;
     [[nodiscard]] std::expected<void, Error> update_recording_log(std::int64_t now_ns);
     [[nodiscard]] std::expected<void, Error> update_recording_log_for_replication(std::int64_t leadership_term_id,
                                                                                   std::int64_t term_base_log_position,

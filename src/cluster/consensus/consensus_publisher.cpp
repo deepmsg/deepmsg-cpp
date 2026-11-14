@@ -1,5 +1,6 @@
 #include "cluster/consensus/consensus_publisher.h"
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -11,9 +12,11 @@
 #include "io_aeron_cluster_codecs/AppendPosition.h"
 #include "io_aeron_cluster_codecs/CanvassPosition.h"
 #include "io_aeron_cluster_codecs/CatchupPosition.h"
+#include "io_aeron_cluster_codecs/ChallengeResponse.h"
 #include "io_aeron_cluster_codecs/CommitPosition.h"
 #include "io_aeron_cluster_codecs/NewLeadershipTerm.h"
 #include "io_aeron_cluster_codecs/RequestVote.h"
+#include "io_aeron_cluster_codecs/StopCatchup.h"
 #include "io_aeron_cluster_codecs/TerminationAck.h"
 #include "io_aeron_cluster_codecs/TerminationPosition.h"
 #include "io_aeron_cluster_codecs/Vote.h"
@@ -41,8 +44,13 @@ std::vector<std::uint8_t> encode(Fill&& fill)
 }  // namespace
 
 ConsensusPublisher::ConsensusPublisher(axc::core::DeepmsgClient& client, std::string consensus_channel,
-                                       std::int32_t consensus_stream_id)
-    : client_(&client), consensus_channel_(std::move(consensus_channel)), consensus_stream_id_(consensus_stream_id)
+                                       std::int32_t consensus_stream_id, std::string control_endpoint,
+                                       bool enable_control)
+    : client_(&client),
+      consensus_channel_(std::move(consensus_channel)),
+      consensus_stream_id_(consensus_stream_id),
+      control_endpoint_(std::move(control_endpoint)),
+      enable_control_(enable_control)
 {
 }
 
@@ -63,6 +71,17 @@ std::string ConsensusPublisher::member_channel(const common::ClusterMember& memb
     channel.push_back(std::string::npos == channel.find('?') ? '?' : '|');
     channel.append("endpoint=");
     channel.append(member.consensus_endpoint);
+
+    // `ClusterMember.setControlEndpoint` (`ClusterMember.java:1271-1285`): the
+    // sender binds its own control endpoint (port 0) or the receiver's
+    // status/NAK cannot come back.
+    if (enable_control_ && 0 == channel.rfind("aeron:udp", 0))
+    {
+        if (const auto control = common::replace_port_with_wildcard(control_endpoint_); control.has_value())
+        {
+            channel.append("|control=").append(*control);
+        }
+    }
     return channel;
 }
 
@@ -73,7 +92,8 @@ std::expected<void, Error> ConsensusPublisher::add_publication(const common::Clu
         return {};
     }
 
-    auto add = client_->add_publication(member_channel(member), consensus_stream_id_);
+    const std::string channel = member_channel(member);
+    auto add = client_->add_publication(channel, consensus_stream_id_);
     const std::int64_t deadline = axc::core::NanoClock::now() + 5'000'000'000;
     while (true)
     {
@@ -113,7 +133,12 @@ bool ConsensusPublisher::offer(std::int32_t member_id, std::span<const std::uint
     {
         return false;
     }
-    return aeron_publication_offer(it->second.get(), message.data(), message.size(), nullptr, nullptr) > 0;
+    const std::int64_t result =
+        aeron_publication_offer(it->second.get(), message.data(), message.size(), nullptr, nullptr);
+    if (result <= 0)
+    {
+    }
+    return result > 0;
 }
 
 void ConsensusPublisher::canvass_position(std::int32_t member_id, std::int64_t log_leadership_term_id,
@@ -221,6 +246,30 @@ bool ConsensusPublisher::catchup_position(std::int32_t member_id, std::int64_t l
                 .followerMemberId(follower_member_id)
                 .putCatchupEndpoint(catchup_endpoint);
         });
+    return offer(member_id, buffer);
+}
+
+bool ConsensusPublisher::challenge_response(std::int32_t member_id, std::int64_t next_correlation_id,
+                                            std::int64_t cluster_session_id,
+                                            std::span<const std::uint8_t> encoded_credentials)
+{
+    const auto buffer = encode<codecs::ChallengeResponse>(
+        [&](codecs::ChallengeResponse& encoder)
+        {
+            encoder.correlationId(next_correlation_id)
+                .clusterSessionId(cluster_session_id)
+                .putEncodedCredentials(reinterpret_cast<const char*>(encoded_credentials.data()),
+                                       static_cast<std::uint32_t>(encoded_credentials.size()));
+        });
+    return offer(member_id, buffer);
+}
+
+bool ConsensusPublisher::stop_catchup(std::int32_t member_id, std::int64_t leadership_term_id,
+                                      std::int32_t follower_member_id)
+{
+    const auto buffer = encode<codecs::StopCatchup>(
+        [&](codecs::StopCatchup& encoder)
+        { encoder.leadershipTermId(leadership_term_id).followerMemberId(follower_member_id); });
     return offer(member_id, buffer);
 }
 

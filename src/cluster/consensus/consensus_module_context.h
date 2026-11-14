@@ -96,6 +96,14 @@ struct ConsensusModuleConfig
     std::string log_channel{"aeron:udp?term-length=64m"};
     std::int32_t log_stream_id{100};
     std::int32_t log_fragment_limit{50};
+    /// `aeron.cluster.log.control.enable` / `aeron.cluster.consensus.control.enable`
+    /// (`ConsensusModule.java:1026-1027`, `:1569`): MDC publications bind the
+    /// sender's control endpoint.
+    bool log_control_enabled{true};
+    bool consensus_control_enabled{true};
+    /// `isLogMdc` (`ConsensusModule.java:2180`): a UDP log channel without an
+    /// endpoint is manually controlled. Computed by `conclude()`.
+    bool log_is_mdc{false};
     std::string consensus_channel{"aeron:udp"};
     std::int32_t consensus_stream_id{108};
     std::string replication_channel{};  // required

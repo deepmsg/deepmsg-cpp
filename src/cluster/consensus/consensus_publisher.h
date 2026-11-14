@@ -31,8 +31,11 @@ using axc::core::Error;
 class ConsensusPublisher final : public election::ConsensusSender
 {
 public:
+    /// `control_endpoint` is this member's consensus endpoint:
+    /// `ClusterMember.setControlEndpoint` binds it with port 0 on every
+    /// publication when `enable_control` is set.
     ConsensusPublisher(axc::core::DeepmsgClient& client, std::string consensus_channel,
-                       std::int32_t consensus_stream_id);
+                       std::int32_t consensus_stream_id, std::string control_endpoint, bool enable_control);
     ~ConsensusPublisher() override;
 
     ConsensusPublisher(const ConsensusPublisher&) = delete;
@@ -73,6 +76,16 @@ public:
                                         std::int64_t log_position, std::int32_t follower_member_id,
                                         std::string_view catchup_endpoint) override;
 
+    /// `challengeResponse` (`ConsensusPublisher.java:558-580`): a follower
+    /// forwards a client's `ChallengeResponse` to the leader.
+    [[nodiscard]] bool challenge_response(std::int32_t member_id, std::int64_t next_correlation_id,
+                                          std::int64_t cluster_session_id,
+                                          std::span<const std::uint8_t> encoded_credentials);
+
+    /// `stopCatchup` (`ConsensusPublisher.java:351-380`).
+    [[nodiscard]] bool stop_catchup(std::int32_t member_id, std::int64_t leadership_term_id,
+                                    std::int32_t follower_member_id);
+
     // ---- the agent's own sends (`:273`, `:383`, `:417`) ----------------
 
     [[nodiscard]] bool commit_position(std::int32_t member_id, std::int64_t leadership_term_id,
@@ -89,6 +102,8 @@ private:
     axc::core::DeepmsgClient* client_;
     std::string consensus_channel_;
     std::int32_t consensus_stream_id_;
+    std::string control_endpoint_;
+    bool enable_control_{true};
     std::map<std::int32_t, axc::core::PubPtr> publications_{};
 };
 

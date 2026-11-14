@@ -1,5 +1,7 @@
 #include "cluster/consensus/egress_publisher.h"
 
+#include <cstdio>
+
 #include "io_aeron_cluster_codecs/AdminRequestType.h"
 #include "io_aeron_cluster_codecs/AdminResponse.h"
 #include "io_aeron_cluster_codecs/AdminResponseCode.h"

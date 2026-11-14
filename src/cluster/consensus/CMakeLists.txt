@@ -16,6 +16,7 @@ axc_add_library(axc_cluster_consensus
         cm_snapshot.cpp
         log_adapter.cpp
         log_replay.cpp
+        recording_replication.cpp
         consensus_publisher.cpp
         consensus_adapter.cpp
         cluster_termination.cpp

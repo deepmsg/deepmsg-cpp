@@ -1,5 +1,7 @@
 #include "cluster/consensus/cluster_session.h"
 
+#include <cstdio>
+
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -134,7 +136,26 @@ void ClusterSession::async_connect(axc::core::DeepmsgClient& client, std::int32_
     const auto key = common::session_counter_key(cluster_id, id_);
     const std::string label = common::session_counter_label(session_info_, cluster_id);
     counter_add_ = client.add_counter(common::CLUSTER_SESSION_TYPE_ID, {key.data(), key.size()}, label);
-    publication_add_ = client.add_publication(response_channel_, response_stream_id_);
+    // `rejoin` is a subscription option: the Java client adds it to the
+    // response channel it sends (AeronCluster.java:1497-1501). The C driver
+    // keeps a publication carrying it permanently unconnected, so strip it.
+    std::string publication_channel{response_channel_};
+    const std::string rejoin = "rejoin=";
+    if (const std::size_t at = publication_channel.find(rejoin);
+        std::string::npos != at &&
+        (0 == at || '|' == publication_channel[at - 1] || '?' == publication_channel[at - 1]))
+    {
+        const std::size_t end = publication_channel.find('|', at);
+        if (std::string::npos == end)
+        {
+            publication_channel.erase(at - 1);
+        }
+        else
+        {
+            publication_channel.erase(at, end - at + 1);
+        }
+    }
+    publication_add_ = client.add_publication(publication_channel, response_stream_id_);
 }
 
 bool ClusterSession::is_response_publication_connected(axc::core::DeepmsgClient& client, std::int64_t now_ns)
@@ -184,7 +205,8 @@ bool ClusterSession::is_response_publication_connected(axc::core::DeepmsgClient&
     }
 
     (void)client;
-    return aeron_publication_is_connected(response_publication_.get());
+    const bool connected = aeron_publication_is_connected(response_publication_.get());
+    return connected;
 }
 
 void ClusterSession::link_ingress_image(std::int64_t image_correlation_id) noexcept

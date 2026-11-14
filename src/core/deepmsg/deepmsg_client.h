@@ -28,6 +28,10 @@ struct ClientConfig
     /// (`aeron_context_set_on_unavailable_counter`).
     aeron_on_unavailable_counter_t on_unavailable_counter{nullptr};
     void* on_unavailable_counter_clientd{nullptr};
+    /// Optional `aeron_context_set_error_handler` callback; the default prints
+    /// and may abort, tests use this to name the starved client.
+    aeron_error_handler_t on_error{nullptr};
+    void* on_error_clientd{nullptr};
 };
 
 /// RAII client over the C Aeron API.

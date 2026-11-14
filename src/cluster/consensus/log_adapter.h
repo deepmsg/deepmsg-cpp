@@ -69,8 +69,14 @@ public:
     /// `disconnect` (`:55-84`): release the image and answer the subscription
     /// registration id (`NULL_VALUE` when there is none).
     [[nodiscard]] std::int64_t disconnect();
+    /// `disconnect(errorHandler, maxLogPosition)` (`:86-93`): release the image
+    /// and pin the position at the cut, so the commit position never runs past
+    /// it. (The reference also waits for the subscription's local sockets; the
+    /// C client exposes no registration id, so the host does that.)
+    void disconnect_to(std::int64_t max_log_position);
 
-    /// `position()` (`:86-94`): the image's position, or 0 without one.
+    /// `position()` (`:86-94`): the image's position, or the position the last
+    /// image was released at.
     [[nodiscard]] std::int64_t position() const;
 
     /// `poll(boundPosition)` (`:96-104`).
@@ -120,6 +126,8 @@ private:
     aeron_image_t* image_{nullptr};
     aeron_subscription_t* subscription_{nullptr};
     axc::core::DeepmsgClient* client_{nullptr};
+    /// `LogAdapter.logPosition` (`:124-131`): the position survives the image.
+    std::int64_t log_position_{0};
     aeron_async_destination_t* async_destination_{nullptr};
     std::optional<Error> error_{};
     std::size_t fragment_limit_;

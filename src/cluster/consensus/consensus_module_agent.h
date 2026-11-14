@@ -352,6 +352,14 @@ public:
     }
     void on_log_replay_error(const Error& error) override;
 
+    /// `ConsensusModuleAgent.onRecordingSignal` (`:2077-2140`): the archive
+    /// client's recording signal consumer.
+    void on_recording_signal(std::int32_t signal, std::int64_t correlation_id, std::int64_t recording_id,
+                             std::int64_t position);
+    /// `aeron_archive_recording_signal_consumer_func_t`, registered on the
+    /// archive context in `connect_archive`.
+    static void on_archive_recording_signal(aeron_archive_recording_signal_t* signal, void* clientd);
+
     // ---- C4d: ConsensusMessageHandler (the ten inbound templates) -----
 
     void on_canvass_position(std::int64_t log_leadership_term_id, std::int64_t log_position,
@@ -377,6 +385,8 @@ public:
     void on_termination_position(std::int64_t leadership_term_id, std::int64_t log_position) override;
     void on_termination_ack(std::int64_t leadership_term_id, std::int64_t log_position,
                             std::int32_t member_id) override;
+    void on_consensus_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
+                                         std::string_view encoded_credentials) override;
     void on_unhandled_template(std::int32_t template_id) override;
 
 private:
@@ -389,6 +399,7 @@ private:
     [[nodiscard]] int slow_tick_work(std::int64_t now_ns) noexcept;
     [[nodiscard]] int consensus_work(std::int64_t timestamp, std::int64_t now_ns) noexcept;
     [[nodiscard]] int poll_archive_error_response() noexcept;
+    [[nodiscard]] int poll_archive_recording_signals() noexcept;
 
     [[nodiscard]] int update_leader_position(std::int64_t now_ns) noexcept;
     void sweep_uncommitted_entries_to(std::int64_t commit_position) noexcept;
@@ -399,10 +410,17 @@ private:
     // ---- C4d: recovery, snapshot and the log recording ---------------
 
     [[nodiscard]] std::expected<void, Error> recover_from_snapshot_and_log();
+    /// The archive's recorded extent for `recording_id`, the source
+    /// `RecordingLog.createRecoveryPlan(Archive, …)` reads.
+    [[nodiscard]] std::optional<common::RecordingLog::RecordingExtent> recording_extent(std::int64_t recording_id);
     [[nodiscard]] std::expected<axc::core::CounterPtr, Error> add_recovery_state_counter(
         const common::RecordingLog::RecoveryPlan& plan);
     [[nodiscard]] std::expected<void, Error> load_snapshot(const common::RecordingLog::Snapshot& snapshot);
-    [[nodiscard]] std::expected<void, Error> start_log_recording(std::string_view channel, std::int32_t stream_id);
+    [[nodiscard]] std::expected<void, Error> start_log_recording(std::string_view channel, std::int32_t stream_id,
+                                                                 bool remote = false);
+    [[nodiscard]] int update_follower_position(std::int64_t now_ns) noexcept;
+    [[nodiscard]] int update_follower_position(std::int64_t now_ns, std::int64_t append_position,
+                                               std::int16_t flags) noexcept;
     [[nodiscard]] std::expected<bool, Error> try_create_append_position(std::int32_t log_session_id);
     [[nodiscard]] std::int64_t recording_position();
     [[nodiscard]] std::expected<void, Error> snapshot_on_service_ack(std::int64_t log_position, std::int64_t timestamp,
@@ -418,6 +436,8 @@ private:
     [[nodiscard]] std::expected<bool, Error> append_action(std::int32_t action, std::int64_t timestamp,
                                                            std::int32_t flags);
     void offer_position_and_previous_state(std::int64_t position, ConsensusModuleState state);
+    [[nodiscard]] election::ElectionContext make_election_context();
+    void stop_existing_catchup_replay(common::ClusterMember& follower) noexcept;
     [[nodiscard]] int check_cluster_control_toggle(std::int64_t now_ns);
     [[nodiscard]] int check_node_control_toggle() noexcept;
     [[nodiscard]] int start_recording_log_validation() noexcept;
@@ -539,6 +559,12 @@ private:
     std::unique_ptr<ConsensusPublisher> consensus_publisher_{};
     std::unique_ptr<ConsensusAdapter> consensus_adapter_{};
     axc::core::SubPtr consensus_subscription_{};
+    // C6a: the follower's log subscription (`Election.java:1366-1383`) and the
+    // retained image handed to `LogAdapter` (released when it is replaced).
+    axc::core::SubPtr log_subscription_{};
+    std::int64_t log_subscription_registration_id_{NULL_VALUE};
+    aeron_image_t* log_image_cache_{nullptr};
+    std::int32_t log_image_cache_session_id_{-1};
     std::unique_ptr<election::Election> election_{};
     std::unique_ptr<LogAdapter> log_adapter_{};
     std::unique_ptr<ClusterTermination> cluster_termination_{};

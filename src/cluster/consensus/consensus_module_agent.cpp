@@ -6,7 +6,9 @@
 
 #include <string>
 #include "aeron_counters.h"
+#include "concurrent/aeron_counters_manager.h"
 
+#include <sched.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -20,11 +22,20 @@
 
 #include <aeronc.h>
 
+// The C client's signal struct omits the correlation id the reference's
+// `RecordingSignalEvent` carries; the poller that dispatched it still holds it.
+// The client's internal header has no `extern "C"` of its own.
+extern "C"
+{
+#include <client/aeron_archive_client.h>
+}
+
 #include "cluster/common/cluster_counters.h"
 #include "cluster/common/cluster_member.h"
 #include "cluster/common/termination_hook.h"
 #include "cluster/consensus/cluster_control.h"
 #include "cluster/consensus/node_control.h"
+#include "cluster/consensus/recording_replication.h"
 #include "cluster/consensus/standby_startup_check.h"
 #include "core/io/fs.h"
 #include "core/time/clock.h"
@@ -86,6 +97,74 @@ template <class H>
         if (axc::core::NanoClock::now() >= deadline)
         {
             return std::unexpected(make_error(ErrorCode::no_capacity, "async counter add timed out"));
+        }
+    }
+}
+
+/// `LogPublisher.addDestination` (`ConsensusModuleAgent.java:1693-1701`): the
+/// async C form, driven to completion on the startup path.
+[[nodiscard]] std::expected<void, Error> add_publication_destination(axc::core::DeepmsgClient& client,
+                                                                     aeron_exclusive_publication_t* publication,
+                                                                     std::string_view destination)
+{
+    const std::string uri{destination};
+    aeron_async_destination_t* async = nullptr;
+    if (0 != aeron_exclusive_publication_async_add_destination(&async, client.handle(), publication, uri.c_str()))
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "async add destination failed"));
+    }
+
+    const std::int64_t deadline = axc::core::NanoClock::now() + ASYNC_ADD_TIMEOUT_NS;
+    while (true)
+    {
+        (void)client.do_work();
+        const int result = aeron_exclusive_publication_async_destination_poll(async);
+        if (result < 0)
+        {
+            return std::unexpected(
+                make_error(ErrorCode::internal_error, std::string{"add destination failed: "} + aeron_errmsg()));
+        }
+        if (result > 0)
+        {
+            return {};
+        }
+        if (axc::core::NanoClock::now() >= deadline)
+        {
+            return std::unexpected(make_error(ErrorCode::no_capacity, "add destination timed out"));
+        }
+    }
+}
+
+/// `Subscription.addDestination(destination)` (`Election.java:1347`,
+/// `:1359`): the async C form, driven to completion on the election path.
+[[nodiscard]] std::expected<void, Error> add_subscription_destination(axc::core::DeepmsgClient& client,
+                                                                      aeron_subscription_t* subscription,
+                                                                      std::string_view destination)
+{
+    const std::string uri{destination};
+    aeron_async_destination_t* async = nullptr;
+    if (0 != aeron_subscription_async_add_destination(&async, client.handle(), subscription, uri.c_str()))
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "async subscription add destination failed"));
+    }
+
+    const std::int64_t deadline = axc::core::NanoClock::now() + ASYNC_ADD_TIMEOUT_NS;
+    while (true)
+    {
+        (void)client.do_work();
+        const int result = aeron_subscription_async_destination_poll(async);
+        if (result < 0)
+        {
+            return std::unexpected(make_error(ErrorCode::internal_error,
+                                              std::string{"subscription add destination failed: "} + aeron_errmsg()));
+        }
+        if (result > 0)
+        {
+            return {};
+        }
+        if (axc::core::NanoClock::now() >= deadline)
+        {
+            return std::unexpected(make_error(ErrorCode::no_capacity, "subscription add destination timed out"));
         }
     }
 }
@@ -361,7 +440,8 @@ std::expected<void, Error> ConsensusModuleAgent::on_start()
     log_adapter_ = std::make_unique<LogAdapter>(*this, config_.log_fragment_limit);
 
     consensus_publisher_ =
-        std::make_unique<ConsensusPublisher>(client_, config_.consensus_channel, config_.consensus_stream_id);
+        std::make_unique<ConsensusPublisher>(client_, config_.consensus_channel, config_.consensus_stream_id,
+                                             this_member_.consensus_endpoint, config_.consensus_control_enabled);
     for (const common::ClusterMember& member : active_members_)
     {
         auto added = consensus_publisher_->add_publication(member);
@@ -395,27 +475,7 @@ std::expected<void, Error> ConsensusModuleAgent::on_start()
     }
     consensus_adapter_ = std::make_unique<ConsensusAdapter>(CONSENSUS_FRAGMENT_LIMIT);
 
-    election::ElectionContext election_context;
-    election_context.node_state_file = &node_state_;
-    election_context.recording_log = &recording_log_;
-    election_context.now_ns = [this]() { return now_ns(); };
-    election_context.epoch_ms = [this]() { return now_ms(); };
-    election_context.time_unit = service::TimeUnit::milliseconds;
-    election_context.file_sync_level = config_.file_sync_level;
-    election_context.appointed_leader_id = config_.appointed_leader_id;
-    election_context.startup_canvass_timeout_ns = config_.startup_canvass_timeout_ns;
-    election_context.leader_heartbeat_timeout_ns = config_.leader_heartbeat_timeout_ns;
-    election_context.leader_heartbeat_interval_ns = config_.leader_heartbeat_interval_ns;
-    election_context.election_timeout_ns = config_.election_timeout_ns;
-    election_context.election_status_interval_ns = config_.election_status_interval_ns;
-    election_context.consensus_stream_id = config_.consensus_stream_id;
-    election_context.log_channel = config_.log_channel;
-    election_context.log_stream_id = config_.log_stream_id;
-    election_context.commit_position = [this]() { return commit_position(); };
-    election_context.random = [this]() { return std::uniform_real_distribution<double>{0.0, 1.0}(random_); };
-    election_context.set_election_state = [this](election::ElectionState new_state)
-    { counter_set(election_state_counter_, static_cast<std::int64_t>(new_state)); };
-    election_context.increment_election_counter = [this]() { counter_increment(election_count_counter_); };
+    election::ElectionContext election_context = make_election_context();
 
     election_ = std::make_unique<election::Election>(true, NULL_VALUE, recovery_plan_.last_leadership_term_id,
                                                      recovery_plan_.last_term_base_log_position, commit_position(),
@@ -464,7 +524,23 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
     ranked_positions_.assign(common::quorum_threshold(static_cast<std::int32_t>(active_members_.size())), 0);
 
     log_publisher_ = std::make_unique<LogPublisher>(config_.log_channel);
-    auto log_publication_add = client_.add_exclusive_publication(config_.log_channel, config_.log_stream_id);
+    std::string initial_log_channel = config_.log_channel;
+    if (config_.log_is_mdc)
+    {
+        // This early publication is replaced by `addLogPublication` once the
+        // election joins the log, but the driver still requires a valid MDC
+        // channel (no endpoint, manual control) when it is added.
+        initial_log_channel.append(std::string::npos == initial_log_channel.find('?') ? "?" : "|");
+        initial_log_channel.append("control-mode=manual");
+        if (config_.log_control_enabled)
+        {
+            if (const auto control = common::replace_port_with_wildcard(this_member_.log_endpoint); control.has_value())
+            {
+                initial_log_channel.append("|control=").append(*control);
+            }
+        }
+    }
+    auto log_publication_add = client_.add_exclusive_publication(initial_log_channel, config_.log_stream_id);
     auto log_publication = await_handle(client_, log_publication_add, ASYNC_ADD_TIMEOUT_NS);
     if (!log_publication)
     {
@@ -755,6 +831,9 @@ std::expected<void, Error> ConsensusModuleAgent::connect_archive()
     (void)aeron_archive_context_set_control_response_stream_id(archive_context_,
                                                                config_.archive_control_response_stream_id);
     (void)aeron_archive_context_set_message_timeout_ns(archive_context_, 5'000'000'000ULL);
+    // `ConsensusModuleAgent.pollArchiveEvents` reads RecordingSignalEvents; the
+    // C client dispatches them through this consumer.
+    (void)aeron_archive_context_set_recording_signal_consumer(archive_context_, &on_archive_recording_signal, this);
 
     if (0 != aeron_archive_connect(&archive_, archive_context_))
     {
@@ -869,15 +948,19 @@ int ConsensusModuleAgent::slow_tick_work(std::int64_t now_ns) noexcept
         work_count += check_cluster_control_toggle(now_ns);
     }
 
-    // `ConsensusModuleAgent.slowTickWork:2431-2460`: the leader runs redirects,
-    // rejections and the pending-session checks before the consensus work.
+    // `ConsensusModuleAgent.slowTickWork:2404-2408`: redirects and rejections
+    // are sent by every member (a follower redirects a client to the leader);
+    // the pending-session and timeout checks are the leader's.
+    if (nullptr != session_manager_)
+    {
+        work_count += session_manager_->send_redirects(leadership_term_id_, leader_member_.id, now_ns);
+        work_count += session_manager_->send_rejections(leadership_term_id_, leader_member_.id, now_ns);
+    }
     if (nullptr != session_manager_ && ClusterRole::leader == role_ && state_ == ConsensusModuleState::active)
     {
-        work_count += session_manager_->send_redirects(leadership_term_id_, config_.member_id, now_ns);
-        work_count += session_manager_->send_rejections(leadership_term_id_, config_.member_id, now_ns);
-        work_count += session_manager_->process_all_pending_sessions(now_ns, config_.member_id, leadership_term_id_);
+        work_count += session_manager_->process_all_pending_sessions(now_ns, leader_member_.id, leadership_term_id_);
         work_count +=
-            session_manager_->check_sessions(now_ns, leadership_term_id_, config_.member_id, ingress_endpoints_);
+            session_manager_->check_sessions(now_ns, leadership_term_id_, leader_member_.id, ingress_endpoints_);
     }
 
     // `ConsensusModuleAgent.slowTickWork:2473-2476`: the node toggle is read
@@ -974,6 +1057,64 @@ int ConsensusModuleAgent::consensus_work(std::int64_t timestamp, std::int64_t no
 
         work_count += update_leader_position(now_ns);
     }
+    else if (ConsensusModuleState::active == state_ || ConsensusModuleState::suspended == state_)
+    {
+        // `ConsensusModuleAgent.consensusWork:2515-2533`: the follower applies
+        // the leader's log, reports its append position and serves ingress
+        // (connect/redirect/keep-alive) but never ingresses messages itself.
+        if (NULL_POSITION != termination_position_ && nullptr != log_adapter_ &&
+            log_adapter_->position() >= termination_position_)
+        {
+            state(ConsensusModuleState::terminating, "terminationPosition");
+            if (0 < config_.service_count && nullptr != service_proxy_)
+            {
+                service_proxy_->termination_position(termination_position_, true);
+            }
+            else
+            {
+                do_termination(nullptr == log_adapter_ ? 0 : log_adapter_->position());
+            }
+        }
+        else
+        {
+            const std::int64_t limit = AERON_NULL_COUNTER_ID != append_position_counter_id_
+                                           ? recording_position()
+                                           : log_recording_stop_position_;
+            int count = 0;
+            if (nullptr != log_adapter_)
+            {
+                auto polled = log_adapter_->poll(std::min(notified_commit_position_, limit));
+                if (!polled)
+                {
+                    report(polled.error());
+                }
+                else
+                {
+                    count = *polled;
+                    work_count += count;
+                }
+                if (0 == count && log_adapter_->is_image_closed())
+                {
+                    // C6b re-enters the election; C4d/C6a report loudly.
+                    enter_election(log_adapter_->is_log_end_of_stream(), "log disconnected from leader");
+                }
+                counter_propose_max(commit_position_counter_, log_adapter_->position());
+            }
+            if (nullptr != ingress_adapter_)
+            {
+                auto polled = ingress_adapter_->poll();
+                if (!polled)
+                {
+                    report(polled.error());
+                }
+                else
+                {
+                    work_count += *polled;
+                }
+            }
+            work_count += update_follower_position(now_ns);
+        }
+    }
 
     if (nullptr != control_adapter_)
     {
@@ -1027,12 +1168,72 @@ int ConsensusModuleAgent::update_leader_position(std::int64_t now_ns) noexcept
                                                              " quorumPosition=" + std::to_string(commit)));
         }
 
+        // `updateLeaderPosition:2936-2937` calls `publishCommitPosition`: every
+        // member learns the commit position on the heartbeat interval.
+        if (nullptr != consensus_publisher_)
+        {
+            for (const common::ClusterMember& member : active_members_)
+            {
+                if (member.id != config_.member_id)
+                {
+                    if (!consensus_publisher_->commit_position(member.id, leadership_term_id_, commit,
+                                                               config_.member_id))
+                    {
+                        report(make_error(ErrorCode::no_capacity, "failed to publish commit position"));
+                    }
+                }
+            }
+        }
         counter_propose_max(commit_position_counter_, commit);
         time_of_last_log_update_ns_ = now_ns;
         sweep_uncommitted_entries_to(commit);
         return 1;
     }
 
+    return 0;
+}
+
+int ConsensusModuleAgent::update_follower_position(std::int64_t now_ns) noexcept
+{
+    // `ConsensusModuleAgent.updateFollowerPosition:2771-2802`.
+    if (nullptr == consensus_publisher_ || leader_member_.id == config_.member_id)
+    {
+        return 0;
+    }
+
+    const std::int64_t recorded_position =
+        AERON_NULL_COUNTER_ID != append_position_counter_id_ ? recording_position() : log_recording_stop_position_;
+    return update_follower_position(now_ns, recorded_position, election::APPEND_POSITION_FLAG_NONE);
+}
+
+int ConsensusModuleAgent::update_follower_position(std::int64_t now_ns, std::int64_t append_position,
+                                                   std::int16_t flags) noexcept
+{
+    if (nullptr == consensus_publisher_ || leader_member_.id == config_.member_id)
+    {
+        return 0;
+    }
+
+    const std::int64_t position = std::max(append_position, last_append_position_);
+    if (position > last_append_position_ ||
+        now_ns >= (last_append_position_send_ns_ + config_.leader_heartbeat_interval_ns))
+    {
+        if (consensus_publisher_->append_position(leader_member_.id, leadership_term_id_, position, config_.member_id,
+                                                  flags))
+        {
+            if (position > last_append_position_)
+            {
+                last_append_position_ = position;
+                this_member_.time_of_last_append_position_ns = now_ns;
+                if (this_member_index_ < active_members_.size())
+                {
+                    active_members_[this_member_index_].time_of_last_append_position_ns = now_ns;
+                }
+            }
+            last_append_position_send_ns_ = now_ns;
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -1200,11 +1401,20 @@ void ConsensusModuleAgent::on_challenge_response(std::int64_t correlation_id, st
     {
         session_manager_->on_challenge_response(correlation_id, cluster_session_id, encoded_credentials);
     }
+    else if (nullptr != consensus_publisher_ && leader_member_.id != config_.member_id &&
+             consensus_publisher_->has_publication(leader_member_.id))
+    {
+        // `ConsensusModuleAgent.onChallengeResponse:870-883`: a follower
+        // forwards the client's response to the leader.
+        if (!consensus_publisher_->challenge_response(leader_member_.id, correlation_id, cluster_session_id,
+                                                      encoded_credentials))
+        {
+            report(make_error(ErrorCode::internal_error, "failed to forward challenge response to leader"));
+        }
+    }
     else
     {
-        // The non-leader path forwards to the leader over the consensus
-        // publication (`ConsensusPublisher.challengeResponse`), which C6 owns.
-        report(make_error(ErrorCode::internal_error, "challenge response for a follower is not transcribed yet (C6)"));
+        report(make_error(ErrorCode::internal_error, "no leader publication to forward the challenge response"));
     }
 }
 
@@ -1341,6 +1551,7 @@ std::expected<void, Error> ConsensusModuleAgent::join_log_as_leader(std::int64_t
         {
             break;
         }
+        (void)poll_archive_error_response();
         (void)client_.do_work();
     }
 
@@ -1692,17 +1903,16 @@ namespace
     return timestamp * 1'000'000;
 }
 
+/// `ConsensusModuleAgent.APPEND_POSITION_FLAG_CATCHUP` (`:126`) and
+/// `ReplayMerge.LIVE_ADD_MAX_WINDOW` (`ReplayMerge.java:54`).
+constexpr std::int16_t APPEND_POSITION_FLAG_CATCHUP = 1;
+constexpr std::int64_t LIVE_ADD_MAX_WINDOW = 32 * 1024 * 1024;
+
 constexpr std::int32_t CLUSTER_ACTION_SUSPEND = 0;
 constexpr std::int32_t CLUSTER_ACTION_RESUME = 1;
 constexpr std::int32_t CLUSTER_ACTION_SNAPSHOT = 2;
 constexpr std::int32_t CLUSTER_ACTION_FLAGS_DEFAULT = 0;
 constexpr std::int32_t CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT = 1;
-
-[[nodiscard]] Error not_transcribed(std::string_view what, std::string_view card)
-{
-    return make_error(ErrorCode::internal_error,
-                      std::string{what} + " is not transcribed yet (" + std::string{card} + ")");
-}
 
 struct ExtentContext
 {
@@ -1724,6 +1934,49 @@ void on_recording_descriptor(aeron_archive_recording_descriptor_t* descriptor, v
         extent.session_id = descriptor->session_id;
         context->extent = extent;
     }
+}
+
+/// Removes one `key=value` parameter from a channel URI (`ChannelUri.remove`,
+/// used by `newLogReplication` for the replication channel's endpoint).
+[[nodiscard]] std::string remove_channel_parameter(std::string_view channel, std::string_view name)
+{
+    const std::size_t query = channel.find('?');
+    if (std::string::npos == query)
+    {
+        return std::string{channel};
+    }
+
+    std::string result{channel.substr(0, query)};
+    result.push_back('?');
+    bool first = true;
+    const std::string_view params = channel.substr(query + 1);
+    std::size_t begin = 0;
+    while (begin <= params.size())
+    {
+        const std::size_t bar = params.find('|', begin);
+        const std::string_view token =
+            std::string_view::npos == bar ? params.substr(begin) : params.substr(begin, bar - begin);
+        const std::size_t equals = token.find('=');
+        if (!token.empty() && (std::string::npos == equals || token.substr(0, equals) != name))
+        {
+            if (!first)
+            {
+                result.push_back('|');
+            }
+            result.append(token);
+            first = false;
+        }
+        if (std::string::npos == bar)
+        {
+            break;
+        }
+        begin = bar + 1;
+    }
+    if (first)
+    {
+        result.pop_back();
+    }
+    return result;
 }
 
 }  // namespace
@@ -1825,22 +2078,25 @@ std::string ConsensusModuleAgent::member_consensus_channel(const common::Cluster
 
 // ---- recovery -------------------------------------------------------------
 
+std::optional<common::RecordingLog::RecordingExtent> ConsensusModuleAgent::recording_extent(std::int64_t recording_id)
+{
+    if (nullptr == archive_)
+    {
+        return std::nullopt;
+    }
+    ExtentContext context{recording_id};
+    std::int32_t count = 0;
+    if (0 != aeron_archive_list_recording(&count, archive_, recording_id, &on_recording_descriptor, &context))
+    {
+        return std::nullopt;
+    }
+    return context.extent;
+}
+
 std::expected<void, Error> ConsensusModuleAgent::recover_from_snapshot_and_log()
 {
     auto extent_source = [this](std::int64_t recording_id) -> std::optional<common::RecordingLog::RecordingExtent>
-    {
-        if (nullptr == archive_)
-        {
-            return std::nullopt;
-        }
-        ExtentContext context{recording_id};
-        std::int32_t count = 0;
-        if (0 != aeron_archive_list_recording(&count, archive_, recording_id, &on_recording_descriptor, &context))
-        {
-            return std::nullopt;
-        }
-        return context.extent;
-    };
+    { return recording_extent(recording_id); };
 
     auto plan = recording_log_.create_recovery_plan(extent_source, config_.service_count, log_recording_id_);
     if (!plan)
@@ -2334,10 +2590,76 @@ std::expected<void, Error> ConsensusModuleAgent::publish_commit_position(std::in
 std::expected<bool, Error> ConsensusModuleAgent::try_join_log_as_follower(aeron_image_t* image, bool is_leader_startup,
                                                                           std::int64_t now_ns)
 {
-    (void)image;
-    (void)is_leader_startup;
-    (void)now_ns;
-    return std::unexpected(not_transcribed("tryJoinLogAsFollower", "C6"));
+    // `ConsensusModuleAgent.tryJoinLogAsFollower:1787-1813`.
+    if (nullptr == image)
+    {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "no log image to join"));
+    }
+
+    aeron_image_constants_t image_constants{};
+    if (0 != aeron_image_constants(image, &image_constants))
+    {
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, std::string{"image constants: "} + aeron_errmsg()));
+    }
+    aeron_subscription_t* subscription = image_constants.subscription;
+    if (nullptr == subscription)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "log image has no subscription"));
+    }
+
+    aeron_subscription_constants_t subscription_constants{};
+    if (0 != aeron_subscription_constants(subscription, &subscription_constants))
+    {
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, std::string{"subscription constants: "} + aeron_errmsg()));
+    }
+
+    if (NULL_VALUE == log_recording_subscription_id_)
+    {
+        // The archive records the **same channel string** as the CM's log
+        // subscription: the driver shares the receiver (and its destination)
+        // only for an identical channel, so the recording sees the same image.
+        auto recorded = start_log_recording(subscription_constants.channel, subscription_constants.stream_id,
+                                            /*remote=*/true);
+        if (!recorded)
+        {
+            return std::unexpected(recorded.error());
+        }
+    }
+
+    auto created = try_create_append_position(image_constants.session_id);
+    if (!created)
+    {
+        return std::unexpected(created.error());
+    }
+    if (!*created)
+    {
+        return false;
+    }
+
+    log_adapter_->image(image);
+    // Ownership of the retained image moved to the adapter; the cache must not
+    // release it later.
+    log_image_cache_ = nullptr;
+    log_image_cache_session_id_ = image_constants.session_id;
+
+    last_append_position_ = image_constants.join_position;
+    this_member_.time_of_last_append_position_ns = now_ns;
+    if (this_member_index_ < active_members_.size())
+    {
+        active_members_[this_member_index_].time_of_last_append_position_ns = now_ns;
+    }
+
+    auto ready =
+        await_services_ready(subscription_constants.channel, subscription_constants.stream_id,
+                             image_constants.session_id, image_constants.join_position,
+                             std::numeric_limits<std::int64_t>::max(), is_leader_startup, service::Role::follower);
+    if (!ready)
+    {
+        return std::unexpected(ready.error());
+    }
+    return true;
 }
 
 std::expected<std::int32_t, Error> ConsensusModuleAgent::add_log_publication(std::int64_t append_position)
@@ -2349,9 +2671,25 @@ std::expected<std::int32_t, Error> ConsensusModuleAgent::add_log_publication(std
     std::string channel = config_.log_channel;
     channel.push_back(std::string::npos == channel.find('?') ? '?' : '|');
     channel.append("alias=log|tags=").append(log_publication_tag_);
+
+    const bool is_udp = 0 == channel.rfind("aeron:udp", 0);
+    if (is_udp && config_.log_is_mdc)
+    {
+        // `:1666-1672`: MDC publications are manually controlled, and the
+        // sender's own control endpoint must be bound or the receivers'
+        // status/NAK never comes back.
+        channel.append("|control-mode=manual");
+        if (config_.log_control_enabled)
+        {
+            if (const auto control = common::replace_port_with_wildcard(this_member_.log_endpoint); control.has_value())
+            {
+                channel.append("|control=").append(*control);
+            }
+        }
+    }
     // `addLogPublication:1672`: a single member's publication counts its spies
     // as connected, or the spy link the services join through never sees it.
-    if (1 == active_members_.size() && 0 != config_.log_channel.rfind("aeron:ipc", 0))
+    if (1 == active_members_.size() && is_udp)
     {
         channel.append("|ssc=true");
     }
@@ -2379,6 +2717,12 @@ std::expected<std::int32_t, Error> ConsensusModuleAgent::add_log_publication(std
             channel.append("|term-length=").append(std::to_string(term_length));
         }
     }
+    else
+    {
+        // `ensureConsistentInitialTermId`: every member's first publication
+        // starts at the same term geometry.
+        channel.append("|init-term-id=0|term-id=0|term-offset=0");
+    }
 
     auto add = client_.add_exclusive_publication(channel, config_.log_stream_id);
     auto publication = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
@@ -2392,6 +2736,24 @@ std::expected<std::int32_t, Error> ConsensusModuleAgent::add_log_publication(std
     {
         session_id = constants.session_id;
     }
+
+    if (config_.log_is_mdc)
+    {
+        for (const common::ClusterMember& member : active_members_)
+        {
+            if (member.id != config_.member_id && !member.log_endpoint.empty())
+            {
+                auto added = add_publication_destination(
+                    client_, publication->get(),
+                    common::create_destination_uri(config_.log_channel, member.log_endpoint));
+                if (!added)
+                {
+                    report(added.error());
+                }
+            }
+        }
+    }
+
     log_publisher_->publication(std::move(*publication));
     return session_id;
 }
@@ -2412,20 +2774,70 @@ std::expected<std::unique_ptr<election::RecordingReplication>, Error> ConsensusM
     std::string_view leader_archive_endpoint, std::optional<std::string> response_archive_endpoint,
     std::int64_t leader_recording_id, std::int64_t stop_position, std::int64_t now_ns)
 {
-    (void)leader_archive_endpoint;
-    (void)response_archive_endpoint;
-    (void)leader_recording_id;
-    (void)stop_position;
-    (void)now_ns;
-    return std::unexpected(not_transcribed("newLogReplication", "C6"));
+    // `ConsensusModuleAgent.newLogReplication:2947-2989`.
+    if (nullptr == archive_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "log replication without an archive"));
+    }
+
+    std::string replication_channel = config_.replication_channel;
+    std::optional<std::string> src_response_channel;
+    if (response_archive_endpoint.has_value() && !response_archive_endpoint->empty())
+    {
+        // `ChannelUri`: drop the replication endpoint, take it from the control
+        // responder instead, and say so on the channel.
+        replication_channel = remove_channel_parameter(replication_channel, "endpoint");
+        replication_channel.push_back(std::string::npos == replication_channel.find('?') ? '?' : '|');
+        replication_channel.append("control=").append(*response_archive_endpoint);
+        replication_channel.append("|control-mode=response");
+        src_response_channel = replication_channel;
+    }
+
+    const std::string source_archive_channel =
+        common::create_destination_uri(config_.leader_archive_control_channel, leader_archive_endpoint);
+    auto replication = std::make_unique<RecordingReplication>(
+        client_, archive_, archive_id_, leader_recording_id, source_archive_channel,
+        config_.archive_local_control_stream_id, replication_channel, log_recording_id_, stop_position,
+        src_response_channel, static_cast<std::int32_t>(client_.next_correlation_id()),
+        config_.leader_heartbeat_timeout_ns, config_.leader_heartbeat_interval_ns, now_ns);
+    if (replication->failed())
+    {
+        return std::unexpected(replication->error());
+    }
+    return replication;
 }
 
 std::expected<void, Error> ConsensusModuleAgent::truncate_log_entry(std::int64_t leadership_term_id,
                                                                     std::int64_t log_position)
 {
-    (void)leadership_term_id;
-    (void)log_position;
-    return std::unexpected(not_transcribed("truncateLogEntry", "C6"));
+    // `ConsensusModuleAgent.truncateLogEntry:1884-1894`.
+    if (nullptr != archive_ && NULL_VALUE != log_recording_id_)
+    {
+        std::int64_t count = 0;
+        if (0 != aeron_archive_truncate_recording(&count, archive_, log_recording_id_, log_position))
+        {
+            return std::unexpected(
+                make_error(ErrorCode::protocol_error, std::string{"archive truncate failed: "} + aeron_errmsg()));
+        }
+    }
+
+    if (NULL_VALUE != leadership_term_id)
+    {
+        auto committed = recording_log_.commit_log_position(leadership_term_id, log_position);
+        if (!committed)
+        {
+            return std::unexpected(committed.error());
+        }
+    }
+
+    // `logAdapter.disconnect(errorHandler, logPosition)`: the adapter pins its
+    // position at the cut so the commit position cannot step past it.
+    if (nullptr != log_adapter_)
+    {
+        log_adapter_->disconnect_to(log_position);
+    }
+    log_recording_stop_position_ = log_position;
+    return {};
 }
 
 std::expected<bool, Error> ConsensusModuleAgent::append_new_leadership_term_event(std::int64_t now_ns)
@@ -2460,37 +2872,141 @@ std::expected<std::int64_t, Error> ConsensusModuleAgent::prepare_for_new_leaders
 
 std::expected<void, Error> ConsensusModuleAgent::catchup_initiated(std::int64_t now_ns)
 {
-    (void)now_ns;
-    return std::unexpected(not_transcribed("catchupInitiated", "C6"));
+    // `ConsensusModuleAgent.catchupInitiated:1986-1990`.
+    last_append_position_send_ns_ = now_ns;
+    this_member_.time_of_last_append_position_ns = now_ns;
+    if (this_member_index_ < active_members_.size())
+    {
+        active_members_[this_member_index_].time_of_last_append_position_ns = now_ns;
+    }
+    return {};
 }
 
 std::expected<int, Error> ConsensusModuleAgent::catchup_poll(std::int64_t limit_position, std::int64_t now_ns)
 {
-    (void)limit_position;
-    (void)now_ns;
-    return std::unexpected(not_transcribed("catchupPoll", "C6"));
+    // `ConsensusModuleAgent.catchupPoll:1992-2037`.
+    int work_count = 0;
+    if (ConsensusModuleState::active == state_ || ConsensusModuleState::suspended == state_)
+    {
+        if (AERON_NULL_COUNTER_ID == append_position_counter_id_)
+        {
+            return std::unexpected(make_error(
+                ErrorCode::internal_error, "unexpected recording stop during catchup: position=" +
+                                               std::to_string(nullptr == log_adapter_ ? 0 : log_adapter_->position())));
+        }
+
+        const std::int64_t current_append_position = recording_position();
+        int fragments = 0;
+        if (nullptr != log_adapter_)
+        {
+            auto polled = log_adapter_->poll(std::min(current_append_position, limit_position));
+            if (!polled)
+            {
+                return std::unexpected(polled.error());
+            }
+            fragments = *polled;
+            work_count += fragments;
+            if (0 == fragments && log_adapter_->is_image_closed())
+            {
+                return std::unexpected(make_error(
+                    ErrorCode::internal_error,
+                    "unexpected image close during catchup: position=" + std::to_string(log_adapter_->position())));
+            }
+        }
+
+        work_count += update_follower_position(now_ns, current_append_position, APPEND_POSITION_FLAG_CATCHUP);
+        if (nullptr != log_adapter_)
+        {
+            counter_propose_max(commit_position_counter_, log_adapter_->position());
+        }
+    }
+
+    if (ConsensusModuleState::active == state_ &&
+        now_ns > (this_member_.time_of_last_append_position_ns + config_.leader_heartbeat_timeout_ns))
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error,
+                                          "no catchup progress: commitPosition=" + std::to_string(commit_position()) +
+                                              " limitPosition=" + std::to_string(limit_position) +
+                                              " lastAppendPosition=" + std::to_string(last_append_position_)));
+    }
+
+    if (nullptr != control_adapter_)
+    {
+        auto polled = control_adapter_->poll();
+        if (!polled)
+        {
+            report(polled.error());
+        }
+        else
+        {
+            work_count += *polled;
+        }
+    }
+    return work_count;
 }
 
 bool ConsensusModuleAgent::is_catchup_near_live(std::int64_t position)
 {
-    (void)position;
-    return false;
+    // `ConsensusModuleAgent.isCatchupNearLive:2039-2051`.
+    if (nullptr == log_adapter_ || nullptr == log_adapter_->image())
+    {
+        return false;
+    }
+    aeron_image_constants_t constants{};
+    if (0 != aeron_image_constants(log_adapter_->image(), &constants))
+    {
+        return false;
+    }
+    const std::int64_t local_position = aeron_image_position(log_adapter_->image());
+    const std::int64_t window =
+        std::min(static_cast<std::int64_t>(constants.term_buffer_length) >> 2, LIVE_ADD_MAX_WINDOW);
+    return local_position >= (position - window);
 }
 
 std::expected<void, Error> ConsensusModuleAgent::track_catchup_completion(common::ClusterMember& member,
                                                                           std::int64_t leadership_term_id,
                                                                           std::int16_t append_position_flags)
 {
-    (void)member;
-    (void)leadership_term_id;
-    (void)append_position_flags;
-    return std::unexpected(not_transcribed("trackCatchupCompletion", "C6"));
+    // `ConsensusModuleAgent.trackCatchupCompletion:1962-1984`.
+    if (NULL_VALUE != member.catchup_replay_session_id || 0 != (APPEND_POSITION_FLAG_CATCHUP & append_position_flags))
+    {
+        if (nullptr != log_publisher_ && member.log_position >= log_publisher_->position())
+        {
+            if (NULL_VALUE != member.catchup_replay_correlation_id && nullptr != archive_)
+            {
+                if (0 == aeron_archive_stop_replay(archive_, member.catchup_replay_session_id))
+                {
+                    member.catchup_replay_correlation_id = NULL_VALUE;
+                }
+            }
+            if (nullptr != consensus_publisher_ &&
+                consensus_publisher_->stop_catchup(member.id, leadership_term_id, member.id))
+            {
+                member.catchup_replay_session_id = NULL_VALUE;
+            }
+        }
+    }
+    return {};
 }
 
 std::expected<void, Error> ConsensusModuleAgent::stop_all_catchups()
 {
-    // `Election.init` calls this unconditionally; a single member has no
-    // catchup replays to stop, so the reference's loop body is empty here.
+    // `ConsensusModuleAgent.stopAllCatchups:2053-2072`.
+    for (common::ClusterMember& member : active_members_)
+    {
+        if (NULL_VALUE != member.catchup_replay_session_id)
+        {
+            if (NULL_VALUE != member.catchup_replay_correlation_id && nullptr != archive_)
+            {
+                if (0 != aeron_archive_stop_replay(archive_, member.catchup_replay_session_id))
+                {
+                    report(make_error(ErrorCode::internal_error, "replay already stopped for catchup"));
+                }
+            }
+            member.catchup_replay_session_id = NULL_VALUE;
+            member.catchup_replay_correlation_id = NULL_VALUE;
+        }
+    }
     return {};
 }
 
@@ -2508,8 +3024,45 @@ std::expected<void, Error> ConsensusModuleAgent::set_catchup_log_destination(std
 
 std::expected<void, Error> ConsensusModuleAgent::await_local_sockets_closed(std::int64_t registration_id)
 {
-    (void)registration_id;
-    return std::unexpected(not_transcribed("awaitLocalSocketsClosed", "C6"));
+    // `ConsensusModuleAgent.awaitLocalSocketsClosed:3006-3018`: a UDP port
+    // cannot be rebound until the driver has released the old image's sockets.
+    // The C client has no `LocalSocketAddressStatus` helper, so the counters
+    // (type 14) are scanned directly.
+    constexpr std::int32_t LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID = 14;
+    auto* reader = client_.counters_reader();
+    const std::int64_t deadline = axc::core::NanoClock::now() + 10'000'000'000;
+    while (true)
+    {
+        int addresses = 0;
+        const std::int32_t max_id = aeron_counters_reader_max_counter_id(reader);
+        for (std::int32_t id = 0; id < max_id; ++id)
+        {
+            std::int32_t state = 0;
+            if (0 != aeron_counters_reader_counter_state(reader, id, &state) || AERON_COUNTER_RECORD_ALLOCATED != state)
+            {
+                continue;
+            }
+            std::int32_t type_id = 0;
+            std::int64_t counter_registration_id = 0;
+            if (0 == aeron_counters_reader_counter_type_id(reader, id, &type_id) &&
+                LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID == type_id &&
+                0 == aeron_counters_reader_counter_registration_id(reader, id, &counter_registration_id) &&
+                counter_registration_id == registration_id)
+            {
+                ++addresses;
+            }
+        }
+        if (0 == addresses)
+        {
+            return {};
+        }
+        (void)client_.do_work();
+        (void)::sched_yield();
+        if (axc::core::NanoClock::now() >= deadline)
+        {
+            return std::unexpected(make_error(ErrorCode::timed_out, "local sockets still open for registration id"));
+        }
+    }
 }
 
 std::expected<void, Error> ConsensusModuleAgent::election_complete(std::int64_t leadership_term_id,
@@ -2538,9 +3091,14 @@ std::expected<void, Error> ConsensusModuleAgent::election_complete(std::int64_t 
     // activated for both roles (1.54.0; C4d only did the leader's ClusterControl).
     node_control_activate(node_control_toggle_counter_);
 
-    auto plan =
-        recording_log_.create_recovery_plan([](std::int64_t) -> std::optional<common::RecordingLog::RecordingExtent>
-                                            { return std::nullopt; }, config_.service_count, log_recording_id_);
+    // `ConsensusModuleAgent.electionComplete:1939`: the plan is rebuilt from
+    // the recording log against the archive's extents at every election. The
+    // refreshed `recoveryPlan.log()` is what makes the next leader's log
+    // publication continue at its append position (and so extend the follower's
+    // recording) instead of starting a fresh one at 0.
+    auto plan = recording_log_.create_recovery_plan(
+        [this](std::int64_t recording_id) -> std::optional<common::RecordingLog::RecordingExtent>
+        { return recording_extent(recording_id); }, config_.service_count, log_recording_id_);
     if (plan)
     {
         recovery_plan_ = std::move(*plan);
@@ -2582,7 +3140,57 @@ std::expected<int, Error> ConsensusModuleAgent::poll_archive_events()
     {
         return 0;
     }
-    return poll_archive_error_response();
+    int work_count = poll_archive_recording_signals();
+    work_count += poll_archive_error_response();
+    return work_count;
+}
+
+int ConsensusModuleAgent::poll_archive_recording_signals() noexcept
+{
+    // `ConsensusModuleAgent.pollArchiveEvents:2077-2140`: each signal event
+    // counts as work; the consumer above routes it.
+    std::int32_t count = 0;
+    if (0 != aeron_archive_poll_for_recording_signals(&count, archive_))
+    {
+        report(make_error(ErrorCode::protocol_error,
+                          std::string{"archive recording signal poll failed: "} + aeron_errmsg()));
+        return 0;
+    }
+    return count;
+}
+
+void ConsensusModuleAgent::on_archive_recording_signal(aeron_archive_recording_signal_t* signal, void* clientd)
+{
+    auto* self = static_cast<ConsensusModuleAgent*>(clientd);
+    if (nullptr == signal || nullptr == self)
+    {
+        return;
+    }
+    auto* poller = aeron_archive_control_response_poller(self->archive_);
+    const std::int64_t correlation_id = nullptr != poller ? poller->correlation_id : NULL_VALUE;
+    self->on_recording_signal(signal->recording_signal_code, correlation_id, signal->recording_id, signal->position);
+}
+
+void ConsensusModuleAgent::on_recording_signal(std::int32_t signal, std::int64_t correlation_id,
+                                               std::int64_t recording_id, std::int64_t position)
+{
+    // `ConsensusModuleAgent.pollArchiveEvents:2098-2123`.
+    if (AERON_ARCHIVE_CLIENT_RECORDING_SIGNAL_STOP == signal && recording_id == log_recording_id_)
+    {
+        log_recording_stop_position_ = position;
+
+        if (nullptr == election_ && ConsensusModuleState::active == state_)
+        {
+            const bool is_eos = nullptr != log_adapter_ && log_adapter_->is_log_end_of_stream_at(position);
+            enter_election(is_eos, "log recording stopped");
+            return;
+        }
+    }
+
+    if (nullptr != election_)
+    {
+        election_->on_recording_signal(correlation_id, recording_id, position, signal);
+    }
 }
 
 bool ConsensusModuleAgent::member_has_publication(std::int32_t member_id) const
@@ -2606,48 +3214,181 @@ std::expected<void, Error> ConsensusModuleAgent::try_add_member_publication(std:
 
 std::expected<std::int64_t, Error> ConsensusModuleAgent::add_log_subscription(std::int32_t log_session_id)
 {
-    (void)log_session_id;
-    return std::unexpected(not_transcribed("addLogSubscription", "C6"));
+    // `Election.addFollowerSubscription` (`Election.java:1366-1383`): each
+    // Election builds its own subscription, so a previous term's one is
+    // replaced. The reference's old Subscription falls out of scope with its
+    // Election; this agent keeps at most one, so it is closed here.
+    if (log_subscription_)
+    {
+        auto removed = remove_log_subscription(log_subscription_registration_id_);
+        if (!removed)
+        {
+            return std::unexpected(removed.error());
+        }
+    }
+
+    const std::string tags =
+        std::to_string(client_.next_correlation_id()) + "," + std::to_string(client_.next_correlation_id());
+    std::string channel = "aeron:udp?tags=" + tags;
+    channel.append("|control-mode=manual|session-id=").append(std::to_string(log_session_id));
+    channel.append("|group=true|rejoin=false|alias=log-cm");
+    for (const std::string_view parameter : {"socket-rcvbuf-length", "receiver-window-length"})
+    {
+        const std::string key{parameter};
+        const std::size_t query = config_.log_channel.find('?');
+        if (std::string::npos != query)
+        {
+            const std::string settings = config_.log_channel.substr(query + 1);
+            const std::size_t at = settings.find(key + "=");
+            if (std::string::npos != at && (0 == at || '|' == settings[at - 1]))
+            {
+                const std::size_t end = settings.find('|', at);
+                channel.push_back('|');
+                channel.append(settings.substr(at, std::string::npos == end ? std::string::npos : end - at));
+            }
+        }
+    }
+
+    auto add = client_.add_subscription(channel, config_.log_stream_id);
+    auto subscription = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
+    if (!subscription)
+    {
+        return std::unexpected(subscription.error());
+    }
+    log_subscription_ = std::move(*subscription);
+
+    aeron_subscription_constants_t constants{};
+    if (0 != aeron_subscription_constants(log_subscription_.get(), &constants))
+    {
+        log_subscription_.reset();
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, std::string{"subscription constants: "} + aeron_errmsg()));
+    }
+
+    log_subscription_registration_id_ = constants.registration_id;
+    log_adapter_->subscription(log_subscription_.get());
+    log_adapter_->client(&client_);
+    return log_subscription_registration_id_;
 }
 
 std::expected<void, Error> ConsensusModuleAgent::remove_log_subscription(std::int64_t registration_id)
 {
-    (void)registration_id;
-    return std::unexpected(not_transcribed("removeLogSubscription", "C6"));
+    // `CloseHelper.close(logSubscription)` (`Election.java:674-676`).
+    if (!log_subscription_ || registration_id != log_subscription_registration_id_)
+    {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "unknown log subscription registration id"));
+    }
+    log_adapter_->image(nullptr);
+    if (nullptr != log_image_cache_)
+    {
+        (void)aeron_image_release(log_image_cache_);
+        log_image_cache_ = nullptr;
+        log_image_cache_session_id_ = -1;
+    }
+    log_adapter_->subscription(nullptr);
+    log_adapter_->client(nullptr);
+    log_subscription_.reset();
+    log_subscription_registration_id_ = NULL_VALUE;
+    return {};
 }
 
 std::expected<void, Error> ConsensusModuleAgent::add_log_destination(std::int64_t registration_id,
                                                                      std::string_view destination)
 {
-    (void)registration_id;
-    (void)destination;
-    return std::unexpected(not_transcribed("addLogDestination", "C6"));
+    if (!log_subscription_ || registration_id != log_subscription_registration_id_)
+    {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "unknown log subscription registration id"));
+    }
+    auto result = add_subscription_destination(client_, log_subscription_.get(), destination);
+    if (!result)
+    {
+    }
+    else
+    {
+    }
+    return result;
 }
 
 std::optional<std::string> ConsensusModuleAgent::log_subscription_resolved_endpoint(std::int64_t registration_id) const
 {
-    (void)registration_id;
-    return std::nullopt;
+    if (!log_subscription_ || registration_id != log_subscription_registration_id_)
+    {
+        return std::nullopt;
+    }
+    std::array<char, 256> address{};
+    // `-1 on error, 0 if address not found, 1 if address is found` (`aeronc.h:2085`).
+    const int result = aeron_subscription_resolved_endpoint(log_subscription_.get(), address.data(), address.size());
+    if (result <= 0)
+    {
+        return std::nullopt;
+    }
+    return std::string{address.data()};
 }
 
 bool ConsensusModuleAgent::log_subscription_channel_errored(std::int64_t registration_id) const
 {
-    (void)registration_id;
-    return false;
+    return log_subscription_ && registration_id == log_subscription_registration_id_ &&
+           AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ERRORED == aeron_subscription_channel_status(log_subscription_.get());
 }
 
 std::string_view ConsensusModuleAgent::log_subscription_channel(std::int64_t registration_id) const
 {
-    (void)registration_id;
-    return {};
+    if (!log_subscription_ || registration_id != log_subscription_registration_id_)
+    {
+        return {};
+    }
+    aeron_subscription_constants_t constants{};
+    if (0 != aeron_subscription_constants(log_subscription_.get(), &constants) || nullptr == constants.channel)
+    {
+        return {};
+    }
+    return constants.channel;
 }
 
 std::optional<election::LogImage> ConsensusModuleAgent::log_image_by_session(std::int64_t registration_id,
                                                                              std::int32_t session_id)
 {
-    (void)registration_id;
-    (void)session_id;
-    return std::nullopt;
+    // `Election.java:1062` / `:1138`: the image pinned to the leader's log
+    // session and its join position. The retained image is cached until
+    // `tryJoinLogAsFollower` hands it to the adapter (or the subscription is
+    // removed), so repeated election passes cannot leak a refcount.
+    if (!log_subscription_ || registration_id != log_subscription_registration_id_)
+    {
+        return std::nullopt;
+    }
+
+    if (nullptr != log_image_cache_ && log_image_cache_session_id_ == session_id &&
+        !aeron_image_is_closed(log_image_cache_))
+    {
+        aeron_image_constants_t constants{};
+        if (0 == aeron_image_constants(log_image_cache_, &constants))
+        {
+            return election::LogImage{log_image_cache_, constants.join_position};
+        }
+        return std::nullopt;
+    }
+
+    if (nullptr != log_image_cache_)
+    {
+        (void)aeron_image_release(log_image_cache_);
+        log_image_cache_ = nullptr;
+        log_image_cache_session_id_ = -1;
+    }
+
+    aeron_image_t* image = aeron_subscription_image_by_session_id(log_subscription_.get(), session_id);
+    if (nullptr == image)
+    {
+        return std::nullopt;
+    }
+    aeron_image_constants_t constants{};
+    if (0 != aeron_image_constants(image, &constants))
+    {
+        (void)aeron_image_release(image);
+        return std::nullopt;
+    }
+    log_image_cache_ = image;
+    log_image_cache_session_id_ = session_id;
+    return election::LogImage{image, constants.join_position};
 }
 
 // ---- control toggles and termination -------------------------------------
@@ -2979,10 +3720,84 @@ void ConsensusModuleAgent::run_termination_hooks(bool expected, const Error& err
                                                       cause, [this](const Error& hook_error) { report(hook_error); });
 }
 
+election::ElectionContext ConsensusModuleAgent::make_election_context()
+{
+    election::ElectionContext election_context;
+    election_context.node_state_file = &node_state_;
+    election_context.recording_log = &recording_log_;
+    election_context.now_ns = [this]() { return now_ns(); };
+    election_context.epoch_ms = [this]() { return now_ms(); };
+    election_context.time_unit = service::TimeUnit::milliseconds;
+    election_context.file_sync_level = config_.file_sync_level;
+    election_context.appointed_leader_id = config_.appointed_leader_id;
+    election_context.startup_canvass_timeout_ns = config_.startup_canvass_timeout_ns;
+    election_context.leader_heartbeat_timeout_ns = config_.leader_heartbeat_timeout_ns;
+    election_context.leader_heartbeat_interval_ns = config_.leader_heartbeat_interval_ns;
+    election_context.election_timeout_ns = config_.election_timeout_ns;
+    election_context.election_status_interval_ns = config_.election_status_interval_ns;
+    election_context.consensus_stream_id = config_.consensus_stream_id;
+    election_context.log_channel = config_.log_channel;
+    election_context.log_stream_id = config_.log_stream_id;
+    election_context.log_is_mdc = config_.log_is_mdc;
+    election_context.commit_position = [this]() { return commit_position(); };
+    election_context.random = [this]() { return std::uniform_real_distribution<double>{0.0, 1.0}(random_); };
+    election_context.set_election_state = [this](election::ElectionState new_state)
+    { counter_set(election_state_counter_, static_cast<std::int64_t>(new_state)); };
+    election_context.increment_election_counter = [this]() { counter_increment(election_count_counter_); };
+
+    return election_context;
+}
+
+void ConsensusModuleAgent::stop_existing_catchup_replay(common::ClusterMember& follower) noexcept
+{
+    // `ConsensusModuleAgent.stopExistingCatchupReplay:3495-3510`.
+    if (NULL_VALUE != follower.catchup_replay_session_id)
+    {
+        if (NULL_VALUE != follower.catchup_replay_correlation_id && nullptr != archive_)
+        {
+            if (0 != aeron_archive_stop_replay(archive_, follower.catchup_replay_session_id))
+            {
+                report(make_error(ErrorCode::internal_error, "replay already stopped for catchup"));
+            }
+        }
+        follower.catchup_replay_session_id = NULL_VALUE;
+        follower.catchup_replay_correlation_id = NULL_VALUE;
+    }
+}
+
 void ConsensusModuleAgent::enter_election(bool is_log_end_of_stream, std::string_view reason)
 {
-    (void)is_log_end_of_stream;
-    report(make_error(ErrorCode::internal_error, std::string{"enter election: "} + std::string{reason}));
+    // `ConsensusModuleAgent.enterElection:3077-3112`.
+    if (nullptr != election_)
+    {
+        report(make_error(ErrorCode::internal_error, "election already in progress"));
+        return;
+    }
+
+    role(ClusterRole::follower);
+
+    const std::int64_t term = leadership_term_id_;
+    const common::RecordingLog::Entry* term_entry = recording_log_.find_term_entry(term);
+    const std::int64_t term_base_log_position =
+        nullptr != term_entry ? term_entry->term_base_log_position : recovery_plan_.last_term_base_log_position;
+    const std::int64_t appended_position =
+        AERON_NULL_COUNTER_ID != append_position_counter_id_
+            ? recording_position()
+            : std::max(recovery_plan_.appended_log_position, log_recording_stop_position_);
+    const std::int64_t commit = commit_position();
+
+    report(make_error(ErrorCode::internal_error, std::string{reason}));
+
+    election_ = std::make_unique<election::Election>(
+        false, is_log_end_of_stream ? leader_member_.id : static_cast<std::int32_t>(NULL_VALUE), term,
+        term_base_log_position, commit, appended_position, active_members_, this_member_, *consensus_publisher_, *this,
+        make_election_context());
+
+    auto worked = election_->do_work(now_ns());
+    if (!worked)
+    {
+        report(worked.error());
+    }
 }
 
 void ConsensusModuleAgent::do_termination(std::int64_t log_position)
@@ -3234,15 +4049,17 @@ std::expected<void, Error> ConsensusModuleAgent::snapshot_state(SnapshotPublicat
 
 // ---- the log recording ----------------------------------------------------
 
-std::expected<void, Error> ConsensusModuleAgent::start_log_recording(std::string_view channel, std::int32_t stream_id)
+std::expected<void, Error> ConsensusModuleAgent::start_log_recording(std::string_view channel, std::int32_t stream_id,
+                                                                     bool remote)
 {
+    const auto source_location = remote ? AERON_ARCHIVE_SOURCE_LOCATION_REMOTE : AERON_ARCHIVE_SOURCE_LOCATION_LOCAL;
     const std::int64_t last_recording_id = recording_log_.find_last_term_recording_id();
     std::int64_t subscription_id = NULL_VALUE;
     int recording_result = 0;
     if (NULL_VALUE == last_recording_id)
     {
         recording_result = aeron_archive_start_recording(&subscription_id, archive_, std::string{channel}.c_str(),
-                                                         stream_id, AERON_ARCHIVE_SOURCE_LOCATION_LOCAL, true);
+                                                         stream_id, source_location, true);
         if (0 != recording_result)
         {
             return std::unexpected(
@@ -3253,7 +4070,7 @@ std::expected<void, Error> ConsensusModuleAgent::start_log_recording(std::string
     {
         recording_result =
             aeron_archive_extend_recording(&subscription_id, archive_, last_recording_id, std::string{channel}.c_str(),
-                                           stream_id, AERON_ARCHIVE_SOURCE_LOCATION_LOCAL, true);
+                                           stream_id, source_location, true);
         if (0 != recording_result)
         {
             return std::unexpected(
@@ -3290,6 +4107,15 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
                                                std::int32_t protocol_version)
 {
     (void)protocol_version;
+    if (!member_has_publication(follower_member_id))
+    {
+        auto added = try_add_member_publication(follower_member_id);
+        if (!added)
+        {
+            report(added.error());
+        }
+    }
+
     if (nullptr != election_)
     {
         auto handled = election_->on_canvass_position(log_leadership_term_id, log_position, leadership_term_id,
@@ -3297,6 +4123,42 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
         if (!handled)
         {
             report(handled.error());
+        }
+    }
+    else if (ClusterRole::leader == role_)
+    {
+        // `ConsensusModuleAgent.onCanvassPosition:918-960`: a leader whose
+        // election is closed answers a canvass with the current term, which is
+        // how a restarted follower rejoins without a leader change.
+        common::ClusterMember* follower = common::find_member(active_members_, follower_member_id);
+        if (nullptr != follower && log_leadership_term_id <= leadership_term_id_)
+        {
+            update_member_log_position(*follower, log_leadership_term_id, log_position);
+            stop_existing_catchup_replay(*follower);
+
+            const common::RecordingLog::Entry* current_term_entry = recording_log_.find_term_entry(leadership_term_id_);
+            const std::int64_t term_base_log_position = nullptr != current_term_entry
+                                                            ? current_term_entry->term_base_log_position
+                                                            : recovery_plan_.last_term_base_log_position;
+            std::int64_t next_log_leadership_term_id = NULL_VALUE;
+            std::int64_t next_term_base_log_position = NULL_POSITION;
+            std::int64_t next_log_position = NULL_POSITION;
+            if (log_leadership_term_id < leadership_term_id_)
+            {
+                const common::RecordingLog::Entry* next = recording_log_.find_term_entry(log_leadership_term_id + 1);
+                next_log_leadership_term_id = nullptr != next ? next->leadership_term_id : leadership_term_id_;
+                next_term_base_log_position = nullptr != next ? next->term_base_log_position : term_base_log_position;
+                next_log_position = nullptr != next ? next->log_position : NULL_POSITION;
+            }
+
+            if (nullptr != log_publisher_)
+            {
+                (void)consensus_publisher_->new_leadership_term(
+                    follower->id, log_leadership_term_id, next_log_leadership_term_id, next_term_base_log_position,
+                    next_log_position, leadership_term_id_, term_base_log_position, log_publisher_->position(),
+                    commit_position(), log_recording_id_, now_ms(), config_.member_id, log_publisher_->session_id(), 1,
+                    false);
+            }
         }
     }
 }
@@ -3314,6 +4176,13 @@ void ConsensusModuleAgent::on_request_vote(std::int64_t log_leadership_term_id, 
         {
             report(handled.error());
         }
+    }
+    else if (candidate_term_id > leadership_term_id_)
+    {
+        // `ConsensusModuleAgent.onRequestVote:974-979`: a leader (or follower)
+        // that is behind steps into a new election.
+        enter_election(false, "unexpected vote request: this.leadershipTermId=" + std::to_string(leadership_term_id_) +
+                                  " candidateTermId=" + std::to_string(candidate_term_id));
     }
 }
 
@@ -3355,6 +4224,9 @@ void ConsensusModuleAgent::on_new_leadership_term(
 void ConsensusModuleAgent::on_append_position(std::int64_t leadership_term_id, std::int64_t log_position,
                                               std::int32_t follower_member_id, std::int16_t flags)
 {
+    // `ConsensusModuleAgent.onAppendPosition:1078-1098`: during an election the
+    // Election tracks the ballot; in steady state the leader tracks the
+    // follower's position itself (this is what makes quorum/commit advance).
     if (nullptr != election_)
     {
         auto handled = election_->on_append_position(leadership_term_id, log_position, follower_member_id, flags);
@@ -3363,12 +4235,31 @@ void ConsensusModuleAgent::on_append_position(std::int64_t leadership_term_id, s
             report(handled.error());
         }
     }
+    else if (leadership_term_id <= leadership_term_id_ && ClusterRole::leader == role_)
+    {
+        common::ClusterMember* follower = common::find_member(active_members_, follower_member_id);
+        if (nullptr != follower)
+        {
+            update_member_log_position(*follower, leadership_term_id, log_position);
+            auto tracked = track_catchup_completion(*follower, leadership_term_id, flags);
+            if (!tracked)
+            {
+                report(tracked.error());
+            }
+        }
+    }
 }
 
 void ConsensusModuleAgent::on_commit_position(std::int64_t leadership_term_id, std::int64_t log_position,
                                               std::int32_t leader_member_id)
 {
-    (void)leader_member_id;
+    // `ConsensusModuleAgent.onCommitPosition:1108-1132`.
+    const std::int64_t now = now_ns();
+    if (leadership_term_id >= leadership_term_id_)
+    {
+        time_of_last_leader_update_ns_ = now;
+    }
+
     if (nullptr != election_)
     {
         auto handled = election_->on_commit_position(leadership_term_id, log_position, leader_member_id);
@@ -3377,22 +4268,68 @@ void ConsensusModuleAgent::on_commit_position(std::int64_t leadership_term_id, s
             report(handled.error());
         }
     }
+    else if (leadership_term_id == leadership_term_id_ && leader_member_.id == leader_member_id &&
+             ClusterRole::follower == role_)
+    {
+        notified_commit_position_ = std::max(notified_commit_position_, log_position);
+        time_of_last_log_update_ns_ = now;
+    }
 }
 
 void ConsensusModuleAgent::on_catchup_position(std::int64_t leadership_term_id, std::int64_t log_position,
                                                std::int32_t follower_member_id, std::string_view catchup_endpoint)
 {
-    (void)log_position;
-    (void)follower_member_id;
-    (void)catchup_endpoint;
-    report(not_transcribed("onCatchupPosition", "C6"));
+    // `ConsensusModuleAgent.onCatchupPosition:1147-1170`.
+    if (leadership_term_id > leadership_term_id_ || ClusterRole::leader != role_ || nullptr == archive_ ||
+        nullptr == log_publisher_)
+    {
+        return;
+    }
+
+    common::ClusterMember* follower = common::find_member(active_members_, follower_member_id);
+    if (nullptr == follower || NULL_VALUE != follower->catchup_replay_session_id)
+    {
+        return;
+    }
+
+    std::string channel = config_.follower_catchup_channel;
+    channel.push_back(std::string::npos == channel.find('?') ? '?' : '|');
+    channel.append("endpoint=").append(catchup_endpoint);
+    channel.append("|session-id=").append(std::to_string(log_publisher_->session_id()));
+    channel.append("|linger=0|eos=false|alias=catchup-followerId-").append(std::to_string(follower->id));
+
+    aeron_archive_replay_params_t params{};
+    (void)aeron_archive_replay_params_init(&params);
+    params.position = log_position;
+    params.length = std::numeric_limits<std::int64_t>::max();
+
+    std::int64_t replay_session_id = NULL_VALUE;
+    if (0 != aeron_archive_start_replay(&replay_session_id, archive_, log_recording_id_, channel.c_str(),
+                                        config_.log_stream_id, &params))
+    {
+        report(make_error(ErrorCode::internal_error,
+                          std::string{"catchup replay failed: "} + std::string{aeron_errmsg()}));
+        return;
+    }
+
+    follower->catchup_replay_session_id = replay_session_id;
+    // The C archive client has no `lastCorrelationId`; the value only gates
+    // the stop, which uses the session id, so a non-null marker is enough.
+    follower->catchup_replay_correlation_id = 0;
 }
 
 void ConsensusModuleAgent::on_stop_catchup(std::int64_t leadership_term_id, std::int32_t follower_member_id)
 {
-    (void)leadership_term_id;
-    (void)follower_member_id;
-    report(not_transcribed("onStopCatchup", "C6"));
+    // `ConsensusModuleAgent.onStopCatchup:1170-1181`.
+    if (leadership_term_id == leadership_term_id_ && follower_member_id == config_.member_id &&
+        !catchup_log_destination_.empty())
+    {
+        if (nullptr != log_adapter_)
+        {
+            (void)log_adapter_->async_remove_destination(catchup_log_destination_);
+        }
+        catchup_log_destination_.clear();
+    }
 }
 
 void ConsensusModuleAgent::on_termination_position(std::int64_t leadership_term_id, std::int64_t log_position)
@@ -3422,6 +4359,20 @@ void ConsensusModuleAgent::on_termination_ack(std::int64_t leadership_term_id, s
     {
         (void)recording_log_.commit_log_position(leadership_term_id_, termination_position_);
         close_and_terminate();
+    }
+}
+
+void ConsensusModuleAgent::on_consensus_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
+                                                           std::string_view encoded_credentials)
+{
+    // `ConsensusModuleAgent.onConsensusChallengeResponse:883-887`. The
+    // reference keeps backup sessions in their own pending list; C6b has none,
+    // so the user-session list serves both (C9 adds the split).
+    if (nullptr != session_manager_)
+    {
+        session_manager_->on_challenge_response(
+            correlation_id, cluster_session_id,
+            {reinterpret_cast<const std::uint8_t*>(encoded_credentials.data()), encoded_credentials.size()});
     }
 }
 

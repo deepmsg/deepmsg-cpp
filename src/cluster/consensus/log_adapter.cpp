@@ -1,5 +1,6 @@
 #include "cluster/consensus/log_adapter.h"
 
+#include <algorithm>
 #include <string>
 
 #include "io_aeron_cluster_codecs/ClusterActionRequest.h"
@@ -41,6 +42,7 @@ LogAdapter::~LogAdapter()
 
 std::int64_t LogAdapter::disconnect()
 {
+    log_position_ = position();
     if (nullptr != subscription_ && nullptr != image_)
     {
         (void)aeron_subscription_image_release(subscription_, image_);
@@ -52,9 +54,15 @@ std::int64_t LogAdapter::disconnect()
     return NULL_VALUE;
 }
 
+void LogAdapter::disconnect_to(std::int64_t max_log_position)
+{
+    (void)disconnect();
+    log_position_ = std::min(log_position_, max_log_position);
+}
+
 std::int64_t LogAdapter::position() const
 {
-    return nullptr == image_ ? 0 : aeron_image_position(image_);
+    return nullptr == image_ ? log_position_ : aeron_image_position(image_);
 }
 
 void LogAdapter::image(aeron_image_t* image)
