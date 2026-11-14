@@ -31,6 +31,11 @@ axc_add_library(axc_driver
         media/dpdk/stack/frame.cpp
         media/dpdk/stack/ports.cpp
         media/dpdk/stack/fake_port.cpp
+        media/dpdk/stack/neighbour.cpp
+        media/dpdk/stack/arp.cpp
+        media/dpdk/stack/demux.cpp
+        media/dpdk/stack/stack.cpp
+        media/dpdk/stack/transport.cpp
     DEPS
         axc_core
         aeron_driver_static)
