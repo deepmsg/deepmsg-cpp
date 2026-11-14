@@ -209,6 +209,10 @@ public:
         return response_detail_;
     }
 
+    /// `ClusterSession.loadSnapshotState` (`ClusterSession.java:139-160`).
+    void load_snapshot_state(std::int64_t correlation_id, std::int64_t opened_log_position,
+                             std::int64_t time_of_last_activity_ns, codecs::CloseReason::Value close_reason);
+
     /// `ClusterSession.closing(CloseReason)`.
     void closing(codecs::CloseReason::Value close_reason);
 

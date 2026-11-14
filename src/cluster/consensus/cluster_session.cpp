@@ -98,6 +98,24 @@ void ClusterSession::open(std::int64_t opened_log_position)
     state(SessionState::open, "opened");
 }
 
+void ClusterSession::load_snapshot_state(std::int64_t correlation_id, std::int64_t opened_log_position,
+                                         std::int64_t time_of_last_activity_ns, codecs::CloseReason::Value close_reason)
+{
+    opened_log_position_ = opened_log_position;
+    time_of_last_activity_ns_ = time_of_last_activity_ns;
+    correlation_id_ = correlation_id;
+    close_reason_ = close_reason;
+
+    if (codecs::CloseReason::NULL_VALUE != close_reason)
+    {
+        state(SessionState::closing, "closing");
+    }
+    else
+    {
+        state(SessionState::open, "opened");
+    }
+}
+
 void ClusterSession::reject(codecs::EventCode::Value code, std::string response_detail)
 {
     event_code_ = code;

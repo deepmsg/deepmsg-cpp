@@ -63,6 +63,8 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc1_client_interop_test.cpp
         cluster/consensus_module_interop_test.cpp
         cluster/service_control_interop_test.cpp
+        cluster/snapshot_recovery_interop_test.cpp
+        cluster/publication_starting_position_interop_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS

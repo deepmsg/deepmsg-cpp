@@ -39,6 +39,10 @@ constexpr std::string_view LEADER_ARCHIVE_CONTROL_CHANNEL_PROP_NAME = "aeron.clu
 constexpr std::string_view CONTROL_CHANNEL_PROP_NAME = "aeron.cluster.control.channel";
 constexpr std::string_view SERVICE_STREAM_ID_PROP_NAME = "aeron.cluster.service.stream.id";
 constexpr std::string_view CONSENSUS_MODULE_STREAM_ID_PROP_NAME = "aeron.cluster.consensus.module.stream.id";
+constexpr std::string_view SNAPSHOT_CHANNEL_PROP_NAME = "aeron.cluster.snapshot.channel";
+constexpr std::string_view SNAPSHOT_STREAM_ID_PROP_NAME = "aeron.cluster.snapshot.stream.id";
+constexpr std::string_view REPLAY_CHANNEL_PROP_NAME = "aeron.cluster.replay.channel";
+constexpr std::string_view REPLAY_STREAM_ID_PROP_NAME = "aeron.cluster.replay.stream.id";
 constexpr std::string_view CLUSTER_DIR_PROP_NAME = "aeron.cluster.dir";
 constexpr std::string_view SERVICES_DIR_PROP_NAME = "aeron.cluster.services.dir";
 constexpr std::string_view MARK_FILE_DIR_PROP_NAME = "aeron.cluster.mark.file.dir";
@@ -271,6 +275,8 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
                 {CONSENSUS_STREAM_ID_PROP_NAME, &config.consensus_stream_id},
                 {SERVICE_STREAM_ID_PROP_NAME, &config.service_stream_id},
                 {CONSENSUS_MODULE_STREAM_ID_PROP_NAME, &config.consensus_module_stream_id},
+                {SNAPSHOT_STREAM_ID_PROP_NAME, &config.snapshot_stream_id},
+                {REPLAY_STREAM_ID_PROP_NAME, &config.replay_stream_id},
                 {SERVICE_COUNT_PROP_NAME, &config.service_count},
                 {MAX_SESSIONS_PROP_NAME, &config.max_concurrent_sessions},
                 {FILE_SYNC_LEVEL_PROP_NAME, &config.file_sync_level},
@@ -327,6 +333,8 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
     config.leader_archive_control_channel =
         get_string(properties, LEADER_ARCHIVE_CONTROL_CHANNEL_PROP_NAME, config.leader_archive_control_channel);
     config.control_channel = get_string(properties, CONTROL_CHANNEL_PROP_NAME, config.control_channel);
+    config.snapshot_channel = get_string(properties, SNAPSHOT_CHANNEL_PROP_NAME, config.snapshot_channel);
+    config.replay_channel = get_string(properties, REPLAY_CHANNEL_PROP_NAME, config.replay_channel);
     config.cluster_dir = get_string(properties, CLUSTER_DIR_PROP_NAME, config.cluster_dir);
     config.services_dir = get_string(properties, SERVICES_DIR_PROP_NAME, {});
     if (const auto mark_file_dir = properties.get(MARK_FILE_DIR_PROP_NAME); mark_file_dir.has_value())

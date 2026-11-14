@@ -13,6 +13,12 @@ axc_add_library(axc_cluster_consensus
         service_proxy.cpp
         pending_service_message_tracker.cpp
         consensus_module_adapter.cpp
+        cm_snapshot.cpp
+        log_adapter.cpp
+        log_replay.cpp
+        consensus_publisher.cpp
+        consensus_adapter.cpp
+        cluster_termination.cpp
         module.cpp
     DEPS
         axc_cluster_common
