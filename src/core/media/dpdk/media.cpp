@@ -4,14 +4,22 @@
 #include <algorithm>
 #include <tuple>
 
+#include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
 
 #if defined(AXC_WITH_DPDK)
 #include "core/media/dpdk/bindings.h"
@@ -29,6 +37,14 @@ namespace
 {
 
 constexpr std::string_view PROPERTY_PREFIX{"deepmsg.dpdk."};
+
+#if defined(AXC_WITH_DPDK)
+/// How long `open_media` waits for the port's link before it refuses to open.
+/// A 10GBASE-T link was measured at ~20 s after the port starts (Rust track
+/// T4); here the first read after start was down and the link came up ~8 s
+/// later. A media opened before it is up drops its first frames in silence.
+constexpr int LINK_TIMEOUT_SECONDS = 30;
+#endif
 
 constexpr std::string_view KNOWN_PROPERTIES[] = {
     "deepmsg.dpdk.enabled",         "deepmsg.dpdk.eal.args",       "deepmsg.dpdk.port",
@@ -258,7 +274,109 @@ constexpr std::string_view KNOWN_PROPERTIES[] = {
 }
 #endif
 
+/// The process's own CPUs as a DPDK lcore argument: `--lcores=0@(0,1,2)`.
+///
+/// EAL otherwise builds a lcore for every CPU it can see. A process that was
+/// given a subset of them (taskset, a cgroup) would get a main lcore outside
+/// that subset and fail to start; with one lcore allowed on the process's own
+/// CPUs it stays inside them (Rust track D0,
+/// `analysis/dpdk/deepmsg-dpdk-d0-record.md`).
+[[nodiscard]] std::expected<std::string, Error> default_lcores_argument() noexcept
+{
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (0 != ::pthread_getaffinity_np(::pthread_self(), sizeof(set), &set))
+    {
+        std::string message{"pthread_getaffinity_np: "};
+        message += std::strerror(errno);
+        return std::unexpected(make_error(ErrorCode::internal_error, message));
+    }
+
+    std::string argument{"--lcores=0@("};
+    bool first = true;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+    {
+        if (0 == CPU_ISSET(cpu, &set))
+        {
+            continue;
+        }
+        if (!first)
+        {
+            argument.push_back(',');
+        }
+        argument += std::to_string(cpu);
+        first = false;
+    }
+    argument.push_back(')');
+    return argument;
+}
+
+#if defined(AXC_WITH_DPDK)
+[[nodiscard]] std::string ipv4_prefix_text(const Ipv4Prefix& prefix) noexcept
+{
+    std::string text;
+    for (int shift = 24; shift >= 0; shift -= 8)
+    {
+        text += std::to_string((prefix.address >> shift) & 0xffu);
+        if (0 != shift)
+        {
+            text.push_back('.');
+        }
+    }
+    text.push_back('/');
+    text += std::to_string(prefix.prefix_length);
+    return text;
+}
+#endif
+
 }  // namespace
+
+std::expected<std::vector<std::string>, Error> eal_arguments(const Settings& settings) noexcept
+{
+    std::vector<std::string> arguments{"deepmsg-dpdk"};
+
+    std::string_view remaining = settings.eal_args;
+    while (!remaining.empty())
+    {
+        const std::size_t start = remaining.find_first_not_of(" \t");
+        if (std::string_view::npos == start)
+        {
+            break;
+        }
+        remaining.remove_prefix(start);
+        const std::size_t end = remaining.find_first_of(" \t");
+        arguments.emplace_back(remaining.substr(0, end));
+        remaining = std::string_view::npos == end ? std::string_view{} : remaining.substr(end);
+    }
+
+    bool no_telemetry = false;
+    for (const auto& argument : arguments)
+    {
+        if ("-l" == argument || argument.starts_with("--lcore"))
+        {
+            return std::unexpected(
+                config_error("deepmsg.dpdk.eal.args",
+                             "--lcores is chosen by the media from the process's own cpuset; do not give it"));
+        }
+        if ("--no-telemetry" == argument)
+        {
+            no_telemetry = true;
+        }
+    }
+
+    if (!no_telemetry)
+    {
+        arguments.emplace_back("--no-telemetry");
+    }
+
+    auto lcores = default_lcores_argument();
+    if (!lcores)
+    {
+        return std::unexpected(lcores.error());
+    }
+    arguments.emplace_back(std::move(*lcores));
+    return arguments;
+}
 
 struct Media::Impl
 {
@@ -510,7 +628,13 @@ std::expected<void, Error> Media::close() noexcept
         return {};
     }
     closed_ = true;
+    const bool was_open = nullptr != impl_;
     impl_.reset();
+    if (was_open)
+    {
+        std::fputs("dpdk media closed\n", stdout);
+        std::fflush(stdout);
+    }
 #if defined(AXC_WITH_DPDK)
     if (eal_started_)
     {
@@ -537,25 +661,28 @@ std::expected<Media, Error> open_media(const Settings& settings) noexcept
         return std::unexpected(config_error("deepmsg.dpdk.ipv4.address", "required when the DPDK media is enabled"));
     }
 
-    std::vector<std::string> eal_args{"deepmsg-dpdk"};
-    std::string_view remaining = settings.eal_args;
-    while (!remaining.empty())
+    auto eal_args = eal_arguments(settings);
+    if (!eal_args)
     {
-        const std::size_t start = remaining.find_first_not_of(" \t");
-        if (std::string_view::npos == start)
-        {
-            break;
-        }
-        remaining.remove_prefix(start);
-        const std::size_t end = remaining.find_first_of(" \t");
-        eal_args.emplace_back(remaining.substr(0, end));
-        remaining = std::string_view::npos == end ? std::string_view{} : remaining.substr(end);
+        return std::unexpected(eal_args.error());
     }
 
-    auto eal = Eal::init(eal_args);
+    // EAL pins the main thread to its main lcore; the launcher's own affinity
+    // is put back after init (`plan-dpdk-media.md` §4.7).
+    if (auto saved = Eal::save_affinity(); !saved)
+    {
+        return std::unexpected(saved.error());
+    }
+    auto eal = Eal::init(*eal_args);
+    auto restored = Eal::restore_affinity();
     if (!eal)
     {
         return std::unexpected(eal.error());
+    }
+    if (!restored)
+    {
+        std::ignore = Eal::cleanup();
+        return std::unexpected(restored.error());
     }
 
     auto pool =
@@ -640,6 +767,31 @@ std::expected<Media, Error> open_media(const Settings& settings) noexcept
         return fail(started.error());
     }
 
+    // A 10GBASE-T link comes up tens of seconds after the port is started
+    // (Rust track T4 measured ~20 s). Sending before it is up loses frames
+    // without an error, so open waits for it, bounded.
+    std::optional<PortLink> link;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(LINK_TIMEOUT_SECONDS);
+    for (;;)
+    {
+        auto current = port_owner->link();
+        if (!current)
+        {
+            return fail(current.error());
+        }
+        link = *current;
+        if (link->up)
+        {
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            return fail(config_error("deepmsg.dpdk.port", "the DPDK port's link did not come up within " +
+                                                              std::to_string(LINK_TIMEOUT_SECONDS) + " s"));
+        }
+        ::usleep(10000);
+    }
+
     stack::StackParams params;
     params.address = settings.ipv4_address->address;
     params.prefix_length = settings.ipv4_address->prefix_length;
@@ -665,6 +817,18 @@ std::expected<Media, Error> open_media(const Settings& settings) noexcept
     auto receiver_adapter = std::make_unique<DpdkPort>(impl->port, impl->pool, 0, receiver_queue, tx_checksums);
     impl->stack = std::make_unique<stack::Stack>(params, std::move(rx_adapter), std::move(sender_adapter),
                                                  std::move(receiver_adapter));
+
+    // The one line that answers "is this driver on the media, and on which
+    // port?" — stdout, because the reference's harnesses read stderr as a
+    // failure channel. A media that is configured but not open says nothing,
+    // which is why every criterion that leans on this line also asserts the
+    // frames themselves.
+    const std::string port_name = impl->port.name();
+    const std::string address_text = ipv4_prefix_text(*settings.ipv4_address);
+    std::fprintf(stdout, "dpdk media on %s (%s), address %s, mtu %u, link up (%u Mb/s)\n", port_name.c_str(),
+                 info->driver.c_str(), address_text.c_str(), static_cast<unsigned>(*mtu),
+                 static_cast<unsigned>(link->speed_mbps));
+    std::fflush(stdout);
 
     Media media;
     media.impl_ = std::move(impl);

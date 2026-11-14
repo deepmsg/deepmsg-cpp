@@ -17,12 +17,15 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <span>
 #include <string>
 #include <vector>
 
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <fcntl.h>
 
 #include "core/config/property_source.h"
 #include "core/driver/embedded_driver.h"
@@ -375,6 +378,81 @@ TEST(DpdkCounters, TheCountersChildProcess)
     ASSERT_EQ(child, ::waitpid(child, &status, 0));
     EXPECT_TRUE(WIFEXITED(status));
     EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
+namespace
+{
+
+constexpr const char* MEDIA_LINE_PATH = "/tmp/axc-dpdk-media-line.txt";
+constexpr const char* MEDIA_LINE_PCAP = "/tmp/axc-dpdk-media-line.pcap";
+
+}  // namespace
+
+TEST(DpdkMediaChild, TheMediaSaysWhichPortItOpened)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)std::remove(MEDIA_LINE_PCAP);
+
+    axc::core::media::dpdk::Settings settings;
+    settings.enabled = true;
+    settings.eal_args = std::string{"--no-huge --no-shconf --vdev=net_pcap0,tx_pcap="} + MEDIA_LINE_PCAP;
+    settings.ipv4_address = axc::core::media::dpdk::Ipv4Prefix{0x0a0a0001, 24};
+    settings.rx_descriptors = 256;
+    settings.tx_descriptors = 256;
+    settings.mempool_size = 1023;
+    settings.mempool_cache = 128;
+
+    auto media = axc::core::media::dpdk::open_media(settings);
+    ASSERT_TRUE(media.has_value()) << media.error().message.view();
+    EXPECT_TRUE(media->close().has_value());
+    (void)std::remove(MEDIA_LINE_PCAP);
+}
+
+// "Configured" is not "on the media": the line that names the port is what a
+// reading of stdout can check, and it is on stdout because the reference's
+// harnesses read stderr as a failure channel. An empty stderr proves nothing.
+TEST(DpdkMedia, TheMediaLineIsOnStdout)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    (void)std::remove(MEDIA_LINE_PATH);
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+
+    if (0 == child)
+    {
+        const int output = ::open(MEDIA_LINE_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (0 > output || 0 > ::dup2(output, STDOUT_FILENO))
+        {
+            ::_exit(127);
+        }
+        (void)::close(output);
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkMediaChild.TheMediaSaysWhichPortItOpened",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(0, WEXITSTATUS(status)) << "the child failed; what it wrote is in " << MEDIA_LINE_PATH;
+
+    std::ifstream input{MEDIA_LINE_PATH};
+    ASSERT_TRUE(input);
+    const std::string output{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+
+    EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0 (net_pcap), address 10.10.0.1/24, mtu "))
+        << output;
+    EXPECT_NE(std::string::npos, output.find("dpdk media closed")) << output;
+    (void)std::remove(MEDIA_LINE_PATH);
 }
 
 #endif  // AXC_WITH_DPDK
