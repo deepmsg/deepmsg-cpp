@@ -4,7 +4,8 @@
 io.aeron.archive.ArchivingMediaDriver	deepmsg-archive-server --embedded-driver
 io.aeron.archive.Archive	deepmsg-archive-server
 io.aeron.MediaDriver	aeronmd
-io.aeron.cluster.ClusteredMediaDriver	deepmsg-cluster-node
+io.aeron.cluster.ClusteredMediaDriver	deepmsg-cluster-node --embedded-driver
+io.aeron.cluster.ClusteredArchive	deepmsg-cluster-node
 io.aeron.cluster.ConsensusModule	deepmsg-consensus-module
 io.aeron.cluster.service.ClusteredServiceContainer	deepmsg-clustered-service-container
 io.aeron.cluster.ClusterBackup	deepmsg-cluster-backup

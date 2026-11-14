@@ -20,6 +20,10 @@ struct ClientConfig
 {
     std::string_view dir;
     bool use_conductor_agent_invoker{true};
+    /// `aeron.client.name` (`CommonContext.CLIENT_NAME_PROP_NAME`): the CM and
+    /// container set it to their agent/service name so the heartbeat counter's
+    /// label names the process, as the reference's `shouldSetClientName` checks.
+    std::string_view client_name{};
     /// The C API requires this on the context, before `aeron_init`
     /// (`aeron_context_set_on_unavailable_counter`).
     aeron_on_unavailable_counter_t on_unavailable_counter{nullptr};
