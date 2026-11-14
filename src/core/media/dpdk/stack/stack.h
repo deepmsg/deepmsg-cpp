@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "core/media/dpdk/stack/frame.h"
@@ -26,7 +27,15 @@
 #include "core/media/dpdk/stack/spin_lock.h"
 #include "core/media/dpdk/stack/stack_params.h"
 
-namespace axc::core::media::dpdk::stack
+namespace axc::core::media::dpdk
+{
+
+namespace demux
+{
+struct Deferred;
+}
+
+namespace stack
 {
 
 /// The counters a stack keeps, named rather than numbered. The numbers are the
@@ -147,10 +156,25 @@ private:
     StackCounters counters_;
     std::unique_ptr<packet_io::RxPort> rx_;
     std::unique_ptr<packet_io::TxPort> sender_tx_;
+
+    // A pass's scratch, owned by the stack and reused: `pump` runs on every
+    // poller pass, so three fresh vectors per pass would put the allocator on
+    // the receive path. `deferred_` is the answers a pass has to send once the
+    // receive callback has returned ([`pump`] cannot send from inside it);
+    // `kept_frames_` is what a port's `rx_burst` hands back for transports
+    // whose frames must wait — the DPDK path delivers in the callback and
+    // leaves it empty; `answer_buffer_` is one frame's worth of bytes for an
+    // ARP or ICMP answer. A delivered datagram still copies its payload into
+    // its transport's ring; zero-copy is not in this slice.
+    std::vector<demux::Deferred> deferred_;
+    std::vector<std::pair<ports::Binding, packet_io::ReadyFrame>> kept_frames_;
+    std::vector<std::uint8_t> answer_buffer_;
     std::unique_ptr<packet_io::TxPort> receiver_tx_;
     std::atomic<std::uint16_t> identification_{0};
     std::atomic<std::int64_t> manual_now_{0};
     bool manual_clock_{false};
 };
 
-}  // namespace axc::core::media::dpdk::stack
+}  // namespace stack
+
+}  // namespace axc::core::media::dpdk

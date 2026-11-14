@@ -25,7 +25,9 @@ struct StackParams
     Mac mac{};
     /// The next hop for destinations off this link, if one was configured.
     std::optional<std::uint32_t> gateway;
-    /// The largest frame this port will send or accept.
+    /// The port's MTU: what the IPv4 packet may add up to, headers included.
+    /// The Ethernet header is not part of it — a frame on the wire is this
+    /// plus `frame::ETHERNET_HEADER_LENGTH`.
     std::size_t mtu{1408};
     /// How many bytes of datagrams the transport believes it can hold.
     std::size_t receive_window{1u << 20};
@@ -39,7 +41,8 @@ struct StackParams
     std::vector<std::pair<std::uint32_t, Mac>> static_neighbours;
 
     /// The largest datagram this port can carry: its MTU less the IPv4 and UDP
-    /// headers.
+    /// headers. The Ethernet header is not in the MTU, so it is not subtracted
+    /// here either (a 1500-byte port answers 1472).
     [[nodiscard]] constexpr std::size_t largest_datagram() const noexcept
     {
         constexpr std::size_t overhead = 20 + 8;

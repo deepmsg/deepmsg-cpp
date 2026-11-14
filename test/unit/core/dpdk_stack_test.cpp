@@ -46,9 +46,13 @@ StackParams params(std::uint32_t address, Mac mac)
 
 std::unique_ptr<Stack> make_stack(Wire& wire, Side side, StackParams settings)
 {
-    auto rx = std::make_unique<FakePort>(wire.port(side, settings.mac, settings.mtu));
-    auto sender = std::make_unique<FakePort>(wire.port(side, settings.mac, settings.mtu));
-    auto receiver = std::make_unique<FakePort>(wire.port(side, settings.mac, settings.mtu));
+    // A real port's capacity is a frame's: the MTU plus the Ethernet header it
+    // does not count. The wire is handed the frame capacity and the stack the
+    // MTU, which is the same split a NIC makes.
+    const std::size_t frame_capacity = settings.mtu + axc::core::media::dpdk::frame::ETHERNET_HEADER_LENGTH;
+    auto rx = std::make_unique<FakePort>(wire.port(side, settings.mac, frame_capacity));
+    auto sender = std::make_unique<FakePort>(wire.port(side, settings.mac, frame_capacity));
+    auto receiver = std::make_unique<FakePort>(wire.port(side, settings.mac, frame_capacity));
     return std::make_unique<Stack>(settings, std::move(rx), std::move(sender), std::move(receiver));
 }
 
@@ -237,6 +241,49 @@ TEST(Stack, ATransportSendsAndReceives)
     EXPECT_EQ(1, buffer[3]);
     EXPECT_EQ(5000, sender.local_port());
     EXPECT_EQ(OWN, sender.local_address());
+}
+
+TEST(Stack, TheLargestDatagramLeavesAndOneByteMoreDoesNot)
+{
+    Wire wire;
+    auto settings_a = params(OWN, MAC_A);
+    settings_a.static_neighbours.emplace_back(PEER, MAC_B);
+    auto a = make_stack(wire, Side::a, settings_a);
+    auto b = make_stack(wire, Side::b, params(PEER, MAC_B));
+
+    const auto binding_a = a->bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    const auto binding_b = b->bind(PEER, 5001, std::nullopt, endpoint(PEER, 5001));
+    ASSERT_TRUE(binding_a.has_value() && binding_b.has_value());
+
+    // The MTU counts IPv4 and UDP but not Ethernet: 1500 - 28.
+    ASSERT_EQ(1472u, a->params().largest_datagram());
+
+    const std::vector<std::uint8_t> largest(1472, 0x5a);
+    EXPECT_EQ(1472u, a->send(*binding_a, endpoint(PEER, 5001), largest));
+    EXPECT_EQ(1u, b->pump());
+
+    std::vector<std::uint8_t> received(largest.size() + 1);
+    EXPECT_EQ(1472u, b->receive(*binding_b, received));
+
+    // One byte more is refused before a frame is built.
+    const std::vector<std::uint8_t> too_large(1473, 0x5a);
+    EXPECT_EQ(0u, a->send(*binding_a, endpoint(PEER, 5001), too_large));
+    EXPECT_EQ(0u, b->pump());
+
+    // The frame bound itself is the MTU plus the Ethernet header: a full-size
+    // echo request has to be answered, and its answer is 1514 bytes.
+    const std::vector<std::uint8_t> icmp_payload(1472, 'p');
+    const axc::core::media::dpdk::frame::IcmpEcho request{axc::core::media::dpdk::frame::ICMP_ECHO_REQUEST, 0x1234, 9,
+                                                          icmp_payload};
+    const Ipv4Write from_peer{MAC_A, MAC_B, PEER, OWN, 4};
+    std::vector<std::uint8_t> frame_bytes(1472 + 42);
+    const auto written = axc::core::media::dpdk::frame::write_icmp_echo(
+        frame_bytes, from_peer, request, axc::core::media::dpdk::frame::ICMP_ECHO_REQUEST);
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(1514u, *written);
+    wire.send(Side::b, std::span<const std::uint8_t>{frame_bytes}.first(*written));
+    EXPECT_EQ(1u, a->pump());
+    EXPECT_EQ(1u, wire.take(Side::b, 10).size());
 }
 
 }  // namespace
