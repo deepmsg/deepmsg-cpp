@@ -153,6 +153,10 @@ public:
     /// `updateTimeOfLastActivity` (`:1098-1105`).
     void update_time_of_last_activity();
 
+    /// `timeoutOnUnavailableImage` (`:1121-1132`): an ingress image that went
+    /// away closes every open session that was linked to it.
+    void timeout_on_unavailable_image(std::int64_t image_correlation_id) noexcept;
+
     /// `snapshotSessions` (`:1107-1119`): OPEN and CLOSING sessions only.
     [[nodiscard]] std::expected<void, Error> snapshot_sessions(ConsensusModuleSnapshotTaker& snapshot_taker);
 

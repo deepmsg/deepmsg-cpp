@@ -37,6 +37,7 @@ extern "C"
 #include "cluster/consensus/log_publisher.h"
 #include "cluster/consensus/log_replay.h"
 #include "cluster/consensus/pending_service_message_tracker.h"
+#include "cluster/consensus/recording_log_validator.h"
 #include "cluster/consensus/service_ack.h"
 #include "cluster/consensus/service_proxy.h"
 #include "cluster/consensus/session_manager.h"
@@ -218,6 +219,14 @@ public:
     [[nodiscard]] bool is_started() const noexcept
     {
         return started_;
+    }
+
+    /// Test seam: `RecoveryState` closes its counter when recovery completes
+    /// (`ConsensusModuleAgent:3523`), so the key it handed the container is
+    /// copied while it is alive. C4d's M4 asserts the service recording id.
+    [[nodiscard]] std::span<const std::uint8_t> last_recovery_state_key_for_test() const noexcept
+    {
+        return last_recovery_state_key_;
     }
 
     // ---- C4d: ElectionHost (`election_host.h`) -------------------------
@@ -410,6 +419,11 @@ private:
                                                            std::int32_t flags);
     void offer_position_and_previous_state(std::int64_t position, ConsensusModuleState state);
     [[nodiscard]] int check_cluster_control_toggle(std::int64_t now_ns);
+    [[nodiscard]] int check_node_control_toggle() noexcept;
+    [[nodiscard]] int start_recording_log_validation() noexcept;
+    [[nodiscard]] std::expected<void, Error> connect_validator_archive();
+    void close_validator_archive() noexcept;
+    [[nodiscard]] RecordingLogValidator::Lookup lookup_recording(std::int64_t recording_id, Error& error) noexcept;
     void enter_election(bool is_log_end_of_stream, std::string_view reason);
     void do_termination(std::int64_t log_position);
     void close_and_terminate();
@@ -417,6 +431,16 @@ private:
     void try_stop_log_recording();
     void connect_ingress();
     std::int64_t get_last_appended_position();
+
+    // ---- C4e: node control, termination hooks and unavailable callbacks --
+
+    void run_termination_hooks(bool expected, const Error& error) noexcept;
+    static void unavailable_counter_trampoline(void* clientd, aeron_counters_reader_t* reader,
+                                               std::int64_t registration_id, std::int32_t counter_id) noexcept;
+    void on_unavailable_counter(std::int64_t registration_id, std::int32_t counter_id) noexcept;
+    static void unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription,
+                                             aeron_image_t* image) noexcept;
+    void on_unavailable_ingress_image(aeron_subscription_t* subscription, aeron_image_t* image) noexcept;
 
     // ---- C4d: small conversions and helpers --------------------------
 
@@ -468,7 +492,7 @@ private:
     // C4b: sessions, ingress, log and egress. Declaration order matters:
     // the session manager refers to the publishers, so it is destroyed first.
     DefaultAuthenticator authenticator_{};
-    AllowAllAuthorisationService authorisation_service_{};
+    std::unique_ptr<AuthorisationService> authorisation_service_{};
     std::unique_ptr<LogPublisher> log_publisher_{};
     std::unique_ptr<EgressPublisher> egress_publisher_{};
     std::unique_ptr<IngressAdapter> ingress_adapter_{};
@@ -518,6 +542,12 @@ private:
     std::unique_ptr<election::Election> election_{};
     std::unique_ptr<LogAdapter> log_adapter_{};
     std::unique_ptr<ClusterTermination> cluster_termination_{};
+    // `RecordingLogValidator.newInstance` opens its own archive
+    // (`RecordingLogValidator.java:47-55`), so the pair lives beside the
+    // validator and closes with it.
+    std::unique_ptr<RecordingLogValidator> recording_log_validator_{};
+    aeron_archive_context_t* validator_archive_context_{nullptr};
+    aeron_archive_t* validator_archive_{nullptr};
     common::RecordingLog::RecoveryPlan recovery_plan_{};
     std::int64_t log_recording_id_{NULL_VALUE};
     std::int64_t log_recording_subscription_id_{NULL_VALUE};
@@ -535,7 +565,9 @@ private:
     std::deque<std::pair<std::int64_t, ConsensusModuleState>> uncommitted_previous_state_{};
     bool is_node_startup_{true};
     bool election_reset_pending_{false};
+    bool termination_hooks_run_{false};
     std::int64_t notified_commit_position_{0};
+    std::vector<std::uint8_t> last_recovery_state_key_{};
     std::mt19937_64 random_{std::random_device{}()};
 };
 

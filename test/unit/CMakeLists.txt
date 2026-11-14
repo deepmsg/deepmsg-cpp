@@ -137,6 +137,9 @@ axc_add_executable(axc_cluster_consensus_unit_tests
         cluster/consensus/consensus_module_adapter_test.cpp
         cluster/consensus/cm_snapshot_test.cpp
         cluster/consensus/cluster_termination_test.cpp
+        cluster/consensus/control_toggle_test.cpp
+        cluster/consensus/termination_hook_test.cpp
+        cluster/consensus/recording_log_validator_test.cpp
     DEPS
         axc_cluster_consensus
         axc_core

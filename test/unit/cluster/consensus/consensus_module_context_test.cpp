@@ -15,6 +15,7 @@ namespace
 {
 
 using axc::core::PropertySource;
+using deepmsg::cluster::consensus::AuthorisationServiceKind;
 using deepmsg::cluster::consensus::consensus_module_config_from_properties;
 using deepmsg::cluster::consensus::consensus_module_thread_name;
 using deepmsg::cluster::consensus::ConsensusModuleConfig;
@@ -260,6 +261,50 @@ TEST_F(ConsensusModuleContextTest, concludeCreatesTheClusterAndMarkFileDirectori
     EXPECT_TRUE(std::filesystem::is_directory(directory_ + "/cluster"));
     EXPECT_TRUE(std::filesystem::is_directory(directory_ + "/mark"));
     EXPECT_EQ(directory_ + "/mark/cluster-mark.dat", config.mark_file_path());
+}
+
+TEST_F(ConsensusModuleContextTest, concludeDefaultsToTheBackupAndStandbyAuthorisationService)
+{
+    auto config = valid_config();
+    ASSERT_TRUE(config.conclude());
+    EXPECT_EQ(AuthorisationServiceKind::allow_backup_and_standby, config.authorisation_service_kind);
+}
+
+TEST_F(ConsensusModuleContextTest, concludeAcceptsTheTwoAuthorisationTokens)
+{
+    auto allow = valid_config();
+    allow.authorisation_service_supplier = "ALLOW_ALL";
+    ASSERT_TRUE(allow.conclude());
+    EXPECT_EQ(AuthorisationServiceKind::allow_all, allow.authorisation_service_kind);
+
+    auto deny = valid_config();
+    deny.authorisation_service_supplier = "DENY_ALL";
+    ASSERT_TRUE(deny.conclude());
+    EXPECT_EQ(AuthorisationServiceKind::deny_all, deny.authorisation_service_kind);
+}
+
+TEST_F(ConsensusModuleContextTest, concludeRejectsACustomAuthorisationClass)
+{
+    auto config = valid_config();
+    config.authorisation_service_supplier = "com.example.MyAuthorisationService";
+
+    auto concluded = config.conclude();
+    ASSERT_FALSE(concluded);
+    EXPECT_NE(std::string::npos, std::string{concluded.error().message.view()}.find("cannot be loaded"));
+}
+
+TEST_F(ConsensusModuleContextTest, configFromPropertiesReadsTheAuthorisationSupplier)
+{
+    PropertySource properties;
+    properties.set("aeron.cluster.dir", directory_ + "/cluster");
+    properties.set("aeron.cluster.members", MEMBERS);
+    properties.set("aeron.cluster.ingress.channel", "aeron:ipc");
+    properties.set("aeron.cluster.replication.channel", "aeron:udp");
+    properties.set("aeron.cluster.authorisation.service.supplier", "DENY_ALL");
+
+    auto config = consensus_module_config_from_properties(properties);
+    ASSERT_TRUE(config) << config.error().message.view();
+    EXPECT_EQ(AuthorisationServiceKind::deny_all, config->authorisation_service_kind);
 }
 
 }  // namespace

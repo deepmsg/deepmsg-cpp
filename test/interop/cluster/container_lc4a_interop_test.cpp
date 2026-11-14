@@ -348,6 +348,17 @@ protected:
         config.error_buffer_length = 1024 * 1024;
         config.idle_strategy = "org.agrona.concurrent.BackoffIdleStrategy";
         config.app_version = 1;
+        // C4e: `runTerminationHooks` (`CSA:1302-1315`) on the shutdown path.
+        config.extended_termination_hook = [this](const deepmsg::cluster::common::TerminationCause&)
+        { extended_hook_calls_.fetch_add(1); };
+        config.termination_hook = [this]()
+        {
+            if (1 == extended_hook_calls_.load(std::memory_order_acquire))
+            {
+                extended_then_termination_.store(1, std::memory_order_release);
+            }
+            termination_hook_calls_.fetch_add(1);
+        };
 
         agent_ = std::make_unique<ClusteredServiceAgent<EchoTimerService>>(config, EchoTimerService{});
         auto idle = axc::core::IdleStrategy::by_agrona_name("org.agrona.concurrent.BackoffIdleStrategy");
@@ -418,6 +429,9 @@ protected:
     axc::interop::ChildProcess java_{};
     bool java_running_{false};
     axc::core::NoOpErrorHandler errors_{};
+    std::atomic<int> extended_hook_calls_{0};
+    std::atomic<int> termination_hook_calls_{0};
+    std::atomic<int> extended_then_termination_{0};
     std::unique_ptr<ClusteredServiceAgent<EchoTimerService>> agent_{};
     std::unique_ptr<axc::core::AgentRunner<ClusteredServiceAgent<EchoTimerService>>> runner_{};
     bool runner_active_{false};
@@ -444,6 +458,27 @@ TEST_F(ContainerInteropTest, aJavaClusterAndClientEchoThroughOurContainer)
         EXPECT_NE(std::string::npos, timers.find("CANCELLED 2")) << "round " << round << ": " << timers;
         EXPECT_NE(std::string::npos, timers.find("TIMER 3")) << "round " << round << ": " << timers;
     }
+}
+
+// C4e: `ClusteredServiceAgentTest.shouldRunTerminationHooksWhenTerminating`
+// (`1.54.0`), on the shutdown path the C++ container has.
+TEST_F(ContainerInteropTest, terminationHooksRunExtendedThenTermination)
+{
+    start_java_node();
+    start_container();
+
+    agent_->request_shutdown();
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (termination_hook_calls_.load(std::memory_order_acquire) == 0 && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_EQ(1, extended_hook_calls_.load(std::memory_order_acquire));
+    EXPECT_EQ(1, termination_hook_calls_.load(std::memory_order_acquire));
+    EXPECT_EQ(1, extended_then_termination_.load(std::memory_order_acquire))
+        << "the extended hook must run before the termination hook";
 }
 
 }  // namespace

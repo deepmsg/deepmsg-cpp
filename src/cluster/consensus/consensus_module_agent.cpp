@@ -22,9 +22,15 @@
 
 #include "cluster/common/cluster_counters.h"
 #include "cluster/common/cluster_member.h"
+#include "cluster/common/termination_hook.h"
+#include "cluster/consensus/cluster_control.h"
+#include "cluster/consensus/node_control.h"
 #include "cluster/consensus/standby_startup_check.h"
 #include "core/io/fs.h"
 #include "core/time/clock.h"
+#include "io_aeron_cluster_codecs/AdminRequest.h"
+#include "io_aeron_cluster_codecs/AdminRequestType.h"
+#include "io_aeron_cluster_codecs/AdminResponseCode.h"
 
 namespace deepmsg::cluster::consensus
 {
@@ -36,6 +42,11 @@ using axc::core::make_error;
 
 constexpr std::string_view VERSION = "1.54.0";
 constexpr std::string_view GIT_SHA = "454da1e4e6";
+
+/// `aeron_archive_client_map_archive_to_client_error_code(ARCHIVE_ERROR_CODE_UNKNOWN_RECORDING)`
+/// (`aeron_archive_client.c:2701-2709`): archive code 5 becomes 205, and
+/// `AERON_SET_ERR` stores the negated value.
+constexpr std::int32_t ARCHIVE_CLIENT_ERROR_UNKNOWN_RECORDING = -205;
 constexpr std::int64_t ASYNC_ADD_TIMEOUT_NS = 5'000'000'000;
 
 /// `SystemUtil.formatDuration`: whole seconds, milliseconds, microseconds,
@@ -113,6 +124,21 @@ void counter_increment(const axc::core::CounterPtr& counter) noexcept
     }
 }
 
+/// `AdminRequestType.toString()` for the two values the decoder can produce;
+/// the SBE decoder rejects anything else (`AdminRequestType.get` throws).
+[[nodiscard]] std::string admin_request_type_name(std::int32_t request_type)
+{
+    switch (request_type)
+    {
+        case common::codecs::AdminRequestType::SNAPSHOT:
+            return "SNAPSHOT";
+        case common::codecs::AdminRequestType::NULL_VALUE:
+            return "NULL_VAL";
+        default:
+            return std::to_string(request_type);
+    }
+}
+
 void counter_propose_max(const axc::core::CounterPtr& counter, std::int64_t value) noexcept
 {
     if (!counter)
@@ -158,9 +184,28 @@ void counter_propose_max(const axc::core::CounterPtr& counter, std::int64_t valu
     return {};
 }
 
+/// `Configuration.authorisationServiceSupplier().get()` (`CM:1350-1365`): the
+/// raw property was resolved in `conclude()`, so this only builds the object.
+[[nodiscard]] std::unique_ptr<AuthorisationService> make_authorisation_service(AuthorisationServiceKind kind)
+{
+    switch (kind)
+    {
+        case AuthorisationServiceKind::allow_all:
+            return std::make_unique<AllowAllAuthorisationService>();
+        case AuthorisationServiceKind::deny_all:
+            return std::make_unique<DenyAllAuthorisationService>();
+        case AuthorisationServiceKind::allow_backup_and_standby:
+            break;
+    }
+    return std::make_unique<AllowBackupAndStandbyAuthorisationService>();
+}
+
 }  // namespace
 
-ConsensusModuleAgent::ConsensusModuleAgent(ConsensusModuleConfig config) : config_(std::move(config)) {}
+ConsensusModuleAgent::ConsensusModuleAgent(ConsensusModuleConfig config)
+    : config_(std::move(config)), authorisation_service_(make_authorisation_service(config_.authorisation_service_kind))
+{
+}
 
 ConsensusModuleAgent::~ConsensusModuleAgent() noexcept
 {
@@ -208,6 +253,10 @@ std::expected<void, Error> ConsensusModuleAgent::on_start()
     axc::core::ClientConfig client_config;
     client_config.dir = config_.aeron_dir;
     client_config.use_conductor_agent_invoker = true;
+    // `ConsensusModuleAgent.onStart:395`: a service client that disappears is
+    // noticed through the counter handler, not by polling.
+    client_config.on_unavailable_counter = &ConsensusModuleAgent::unavailable_counter_trampoline;
+    client_config.on_unavailable_counter_clientd = this;
 
     auto client = axc::core::DeepmsgClient::connect(client_config);
     if (!client)
@@ -420,7 +469,13 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
     }
     log_publisher_->publication(std::move(*log_publication));
 
-    auto ingress_add = client_.add_subscription(config_.ingress_channel, config_.ingress_stream_id);
+    // `ConsensusModuleAgent.connectIngress:3422/3428`: both ingress
+    // subscriptions carry the unavailable-image handler.
+    axc::core::ImageHandlers ingress_handlers{};
+    ingress_handlers.on_unavailable = &ConsensusModuleAgent::unavailable_image_trampoline;
+    ingress_handlers.on_unavailable_clientd = this;
+
+    auto ingress_add = client_.add_subscription(config_.ingress_channel, config_.ingress_stream_id, ingress_handlers);
     auto ingress = await_handle(client_, ingress_add, ASYNC_ADD_TIMEOUT_NS);
     if (!ingress)
     {
@@ -430,7 +485,7 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
 
     if (config_.ingress_ipc_allowed)
     {
-        auto ipc_add = client_.add_subscription("aeron:ipc", config_.ingress_stream_id);
+        auto ipc_add = client_.add_subscription("aeron:ipc", config_.ingress_stream_id, ingress_handlers);
         auto ipc = await_handle(client_, ipc_add, ASYNC_ADD_TIMEOUT_NS);
         if (!ipc)
         {
@@ -451,7 +506,7 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
     session_config.service_count = config_.service_count;
 
     session_manager_ = std::make_unique<SessionManager>(
-        session_config, client_, *log_publisher_, *egress_publisher_, authenticator_, authorisation_service_,
+        session_config, client_, *log_publisher_, *egress_publisher_, authenticator_, *authorisation_service_,
         [this]() { return now_ns(); }, [this]() { return now_ms(); },
         [this]() { counter_increment(timed_out_client_counter_); }, [this](const Error& error) { report(error); });
     return {};
@@ -822,6 +877,24 @@ int ConsensusModuleAgent::slow_tick_work(std::int64_t now_ns) noexcept
             session_manager_->check_sessions(now_ns, leadership_term_id_, config_.member_id, ingress_endpoints_);
     }
 
+    // `ConsensusModuleAgent.slowTickWork:2473-2476`: the node toggle is read
+    // for both roles once ACTIVE and no election is running.
+    if (nullptr == election_ && ConsensusModuleState::active == state_)
+    {
+        work_count += check_node_control_toggle();
+    }
+
+    // `ConsensusModuleAgent.slowTickWork:2493-2505`.
+    if (nullptr != recording_log_validator_)
+    {
+        work_count += recording_log_validator_->poll();
+        if (recording_log_validator_->is_complete())
+        {
+            recording_log_validator_.reset();
+            close_validator_archive();
+        }
+    }
+
     return work_count;
 }
 
@@ -1136,11 +1209,49 @@ void ConsensusModuleAgent::on_admin_request(std::int64_t leadership_term_id, std
                                             std::int64_t correlation_id, std::int32_t request_type,
                                             std::span<const std::uint8_t> /*payload*/)
 {
-    (void)leadership_term_id;
-    (void)cluster_session_id;
-    (void)correlation_id;
-    report(make_error(ErrorCode::internal_error,
-                      "admin request type=" + std::to_string(request_type) + " is not transcribed yet (C4e)"));
+    // `ConsensusModuleAgent.onAdminRequest:780-822`, in the reference's order.
+    if (ClusterRole::leader != role_ || leadership_term_id != leadership_term_id_)
+    {
+        return;
+    }
+
+    ClusterSession* session =
+        nullptr == session_manager_ ? nullptr : session_manager_->find_by_session_id(cluster_session_id);
+    if (nullptr == session || !session->is_open() || nullptr == egress_publisher_ || nullptr == authorisation_service_)
+    {
+        return;
+    }
+
+    const auto request = static_cast<common::codecs::AdminRequestType::Value>(request_type);
+    if (!authorisation_service_->is_authorised(common::SBE_SCHEMA_ID, common::codecs::AdminRequest::SBE_TEMPLATE_ID,
+                                               request_type, session->encoded_principal()))
+    {
+        const std::string message =
+            "Execution of the " + admin_request_type_name(request_type) + " request was not authorised";
+        (void)egress_publisher_->send_admin_response(*session, correlation_id, request,
+                                                     common::codecs::AdminResponseCode::UNAUTHORISED_ACCESS, message);
+        return;
+    }
+
+    if (common::codecs::AdminRequestType::SNAPSHOT == request_type)
+    {
+        if (cluster_control_toggle(control_toggle_counter_, ClusterControlState::snapshot))
+        {
+            (void)egress_publisher_->send_admin_response(*session, correlation_id, request,
+                                                         common::codecs::AdminResponseCode::OK, "");
+        }
+        else
+        {
+            (void)egress_publisher_->send_admin_response(
+                *session, correlation_id, request, common::codecs::AdminResponseCode::ERROR,
+                "Failed to switch ClusterControl to the ToggleState.SNAPSHOT state");
+        }
+        return;
+    }
+
+    (void)egress_publisher_->send_admin_response(*session, correlation_id, request,
+                                                 common::codecs::AdminResponseCode::ERROR,
+                                                 "Unknown request type: " + admin_request_type_name(request_type));
 }
 
 void ConsensusModuleAgent::on_extension_message(std::int32_t schema_id, std::int32_t template_id,
@@ -1478,6 +1589,9 @@ void ConsensusModuleAgent::close_resources() noexcept
 
     log_publisher_.reset();
 
+    recording_log_validator_.reset();
+    close_validator_archive();
+
     if (nullptr != archive_)
     {
         (void)aeron_archive_close(archive_);
@@ -1574,14 +1688,6 @@ namespace
 {
     return timestamp * 1'000'000;
 }
-
-constexpr std::int32_t CONTROL_NEUTRAL = 1;
-constexpr std::int32_t CONTROL_SUSPEND = 2;
-constexpr std::int32_t CONTROL_RESUME = 3;
-constexpr std::int32_t CONTROL_SNAPSHOT = 4;
-constexpr std::int32_t CONTROL_SHUTDOWN = 5;
-constexpr std::int32_t CONTROL_ABORT = 6;
-constexpr std::int32_t CONTROL_STANDBY_SNAPSHOT = 7;
 
 constexpr std::int32_t CLUSTER_ACTION_SUSPEND = 0;
 constexpr std::int32_t CLUSTER_ACTION_RESUME = 1;
@@ -1812,7 +1918,31 @@ std::expected<axc::core::CounterPtr, Error> ConsensusModuleAgent::add_recovery_s
     {
         return std::unexpected(add.error());
     }
-    return await_handle(client_, *add, ASYNC_ADD_TIMEOUT_NS);
+
+    auto counter = await_handle(client_, *add, ASYNC_ADD_TIMEOUT_NS);
+    if (!counter)
+    {
+        return std::unexpected(counter.error());
+    }
+
+    // The counter lives only for the recovery (`try (Counter ignore = ...)` at
+    // `ConsensusModuleAgent:3523`); copy the key for the C4d M4 assertion.
+    last_recovery_state_key_.clear();
+    aeron_counter_constants_t counter_constants{};
+    if (0 == aeron_counter_constants(counter->get(), &counter_constants))
+    {
+        std::uint8_t* key = nullptr;
+        if (0 == aeron_counters_reader_metadata_key(client_.counters_reader(), counter_constants.counter_id, &key) &&
+            nullptr != key)
+        {
+            const std::size_t service_count = plan.snapshots.empty() ? 0 : config_.service_count;
+            const std::size_t length = common::RecoveryState::SNAPSHOT_RECORDING_IDS_OFFSET +
+                                       (static_cast<std::size_t>(service_count) * sizeof(std::int64_t));
+            last_recovery_state_key_.assign(key, key + length);
+        }
+    }
+
+    return counter;
 }
 
 std::expected<void, Error> ConsensusModuleAgent::load_snapshot(const common::RecordingLog::Snapshot& snapshot)
@@ -2310,6 +2440,9 @@ std::expected<std::int64_t, Error> ConsensusModuleAgent::prepare_for_new_leaders
 {
     (void)now_ns;
     role(ClusterRole::follower);
+    // `ConsensusModuleAgent.prepareForNewLeadership:1382`: no toggle action is
+    // accepted until the election completes.
+    cluster_control_deactivate(control_toggle_counter_);
     try_stop_log_recording();
     if (NULL_VALUE != log_recording_id_)
     {
@@ -2389,7 +2522,7 @@ std::expected<void, Error> ConsensusModuleAgent::election_complete(std::int64_t 
         {
             timer_service_->current_time(now_ms());
         }
-        counter_set(control_toggle_counter_, CONTROL_NEUTRAL);
+        cluster_control_activate(control_toggle_counter_);
         session_manager_->prepare_sessions_for_new_term(election_ != nullptr && election_->is_leader_startup());
     }
     else
@@ -2398,6 +2531,9 @@ std::expected<void, Error> ConsensusModuleAgent::election_complete(std::int64_t 
         last_append_position_send_ns_ = now_ns;
         local_log_channel_.clear();
     }
+    // `ConsensusModuleAgent.electionComplete:1939`: the node toggle is
+    // activated for both roles (1.54.0; C4d only did the leader's ClusterControl).
+    node_control_activate(node_control_toggle_counter_);
 
     auto plan =
         recording_log_.create_recovery_plan([](std::int64_t) -> std::optional<common::RecordingLog::RecordingExtent>
@@ -2531,18 +2667,19 @@ void ConsensusModuleAgent::offer_position_and_previous_state(std::int64_t positi
 int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
 {
     (void)now_ns;
-    const auto toggle_value = [this]()
+    const auto toggled_state = cluster_control_state(cluster_control_value(control_toggle_counter_));
+    if (!toggled_state)
     {
-        return static_cast<std::int32_t>(read_counter_value(common::find_cluster_counter(
-            client_.counters_reader(), common::CLUSTER_CONTROL_TOGGLE_TYPE_ID, config_.cluster_id)));
-    };
+        report(toggled_state.error());
+        return 0;
+    }
     const auto appended_ok = [](const std::expected<bool, Error>& result) { return result.has_value() && *result; };
 
     if (ConsensusModuleState::active == state_)
     {
-        switch (toggle_value())
+        switch (*toggled_state)
         {
-            case CONTROL_SUSPEND:
+            case ClusterControlState::suspend:
             {
                 if (appended_ok(append_action(CLUSTER_ACTION_SUSPEND, now_ms(), CLUSTER_ACTION_FLAGS_DEFAULT)))
                 {
@@ -2551,7 +2688,7 @@ int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
                 }
                 return 1;
             }
-            case CONTROL_SNAPSHOT:
+            case ClusterControlState::snapshot:
             {
                 const bool appended =
                     appended_ok(append_action(CLUSTER_ACTION_SNAPSHOT, now_ms(), CLUSTER_ACTION_FLAGS_DEFAULT));
@@ -2562,16 +2699,16 @@ int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
                 }
                 return 1;
             }
-            case CONTROL_STANDBY_SNAPSHOT:
+            case ClusterControlState::standby_snapshot:
             {
                 if (appended_ok(
                         append_action(CLUSTER_ACTION_SNAPSHOT, now_ms(), CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT)))
                 {
-                    counter_set(control_toggle_counter_, CONTROL_NEUTRAL);
+                    cluster_control_reset(control_toggle_counter_);
                 }
                 return 1;
             }
-            case CONTROL_SHUTDOWN:
+            case ClusterControlState::shutdown:
             {
                 if (appended_ok(append_action(CLUSTER_ACTION_SNAPSHOT, now_ms(), CLUSTER_ACTION_FLAGS_DEFAULT)))
                 {
@@ -2587,7 +2724,7 @@ int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
                 }
                 return 1;
             }
-            case CONTROL_ABORT:
+            case ClusterControlState::abort:
             {
                 const std::int64_t position = log_publisher_->position();
                 cluster_termination_ = std::make_unique<ClusterTermination>(now_ns + config_.termination_timeout_ns);
@@ -2611,17 +2748,232 @@ int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
         }
     }
 
-    if (ConsensusModuleState::suspended == state_ && CONTROL_RESUME == toggle_value())
+    if (ConsensusModuleState::suspended == state_ && ClusterControlState::resume == *toggled_state)
     {
         if (appended_ok(append_action(CLUSTER_ACTION_RESUME, now_ms(), CLUSTER_ACTION_FLAGS_DEFAULT)))
         {
             offer_position_and_previous_state(log_publisher_->position(), state_);
             state(ConsensusModuleState::active, "ClusterControl.RESUME");
-            counter_set(control_toggle_counter_, CONTROL_NEUTRAL);
+            cluster_control_reset(control_toggle_counter_);
         }
         return 1;
     }
     return 0;
+}
+
+int ConsensusModuleAgent::check_node_control_toggle() noexcept
+{
+    const auto toggled_state = node_control_state(node_control_value(node_control_toggle_counter_));
+    if (!toggled_state)
+    {
+        report(toggled_state.error());
+        return 0;
+    }
+
+    switch (*toggled_state)
+    {
+        case NodeControlState::replicate_standby_snapshot:
+        {
+            // Q6 keeps the `StandbySnapshotReplicator` shell: the card's DoD is
+            // reset plus a counted error, never a silent no-op.
+            node_control_reset(node_control_toggle_counter_);
+            report(make_error(ErrorCode::internal_error, "StandbySnapshotReplicator is not transcribed yet (Q6)"));
+            return 1;
+        }
+        case NodeControlState::validate_recording_log:
+            return start_recording_log_validation();
+        default:
+            return 0;
+    }
+}
+
+int ConsensusModuleAgent::start_recording_log_validation() noexcept
+{
+    // `checkNodeControlToggle:2710-2722`: create the validator lazily, reset
+    // the toggle immediately, and let the slow tick poll it to completion.
+    if (nullptr == recording_log_validator_)
+    {
+        auto connected = connect_validator_archive();
+        if (!connected)
+        {
+            report(connected.error());
+            node_control_reset(node_control_toggle_counter_);
+            return 1;
+        }
+
+        recording_log_validator_ = std::make_unique<RecordingLogValidator>(
+            config_.member_id, recording_log_, [this](std::int64_t recording_id, Error& error)
+            { return lookup_recording(recording_id, error); }, [this](const Error& error) { report(error); });
+    }
+
+    node_control_reset(node_control_toggle_counter_);
+    return 1;
+}
+
+std::expected<void, Error> ConsensusModuleAgent::connect_validator_archive()
+{
+    if (nullptr != validator_archive_)
+    {
+        return {};
+    }
+
+    if (0 != aeron_archive_context_init(&validator_archive_context_))
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "aeron_archive_context_init failed"));
+    }
+
+    // `RecordingLogValidator.newInstance` clones the CM's archive context
+    // (`:47-55`): same Aeron client, its own control session.
+    (void)aeron_archive_context_set_aeron(validator_archive_context_, client_.handle());
+    (void)aeron_archive_context_set_owns_aeron_client(validator_archive_context_, false);
+    (void)aeron_archive_context_set_control_request_channel(validator_archive_context_,
+                                                            config_.archive_local_control_channel.c_str());
+    (void)aeron_archive_context_set_control_request_stream_id(validator_archive_context_,
+                                                              config_.archive_local_control_stream_id);
+    (void)aeron_archive_context_set_control_response_channel(validator_archive_context_,
+                                                             config_.archive_local_control_channel.c_str());
+    (void)aeron_archive_context_set_control_response_stream_id(validator_archive_context_,
+                                                               config_.archive_control_response_stream_id);
+    (void)aeron_archive_context_set_message_timeout_ns(validator_archive_context_, 5'000'000'000ULL);
+
+    if (0 != aeron_archive_connect(&validator_archive_, validator_archive_context_))
+    {
+        const std::string message = aeron_errmsg();
+        (void)aeron_archive_context_close(validator_archive_context_);
+        validator_archive_context_ = nullptr;
+        return std::unexpected(
+            make_error(ErrorCode::protocol_error, "validator archive connection failed: " + message));
+    }
+
+    return {};
+}
+
+void ConsensusModuleAgent::close_validator_archive() noexcept
+{
+    if (nullptr != validator_archive_)
+    {
+        (void)aeron_archive_close(validator_archive_);
+        validator_archive_ = nullptr;
+    }
+    if (nullptr != validator_archive_context_)
+    {
+        (void)aeron_archive_context_close(validator_archive_context_);
+        validator_archive_context_ = nullptr;
+    }
+}
+
+RecordingLogValidator::Lookup ConsensusModuleAgent::lookup_recording(std::int64_t recording_id, Error& error) noexcept
+{
+    if (nullptr == validator_archive_)
+    {
+        error = make_error(ErrorCode::internal_error, "validator archive is not connected");
+        return RecordingLogValidator::Lookup::error;
+    }
+
+    std::int64_t start_position = NULL_POSITION;
+    if (0 == aeron_archive_get_start_position(&start_position, validator_archive_, recording_id))
+    {
+        return RecordingLogValidator::Lookup::known;
+    }
+
+    if (ARCHIVE_CLIENT_ERROR_UNKNOWN_RECORDING == aeron_errcode())
+    {
+        return RecordingLogValidator::Lookup::unknown;
+    }
+
+    error = make_error(ErrorCode::io_error,
+                       "get start position for recordingId=" + std::to_string(recording_id) +
+                           " failed: " + std::string{aeron_errmsg()},
+                       aeron_errcode());
+    return RecordingLogValidator::Lookup::error;
+}
+
+void ConsensusModuleAgent::unavailable_counter_trampoline(void* clientd, aeron_counters_reader_t* reader,
+                                                          std::int64_t registration_id,
+                                                          std::int32_t counter_id) noexcept
+{
+    (void)reader;
+    static_cast<ConsensusModuleAgent*>(clientd)->on_unavailable_counter(registration_id, counter_id);
+}
+
+void ConsensusModuleAgent::on_unavailable_counter(std::int64_t registration_id, std::int32_t counter_id) noexcept
+{
+    // `ConsensusModuleAgent.onUnavailableCounter:3284-3300`.
+    if (ConsensusModuleState::terminating == state_ || ConsensusModuleState::quitting == state_)
+    {
+        return;
+    }
+
+    for (std::size_t i = 0; i < service_client_ids_.size(); i++)
+    {
+        if (registration_id == service_client_ids_[i])
+        {
+            const std::string message = "Aeron client in service closed unexpectedly: serviceId=" + std::to_string(i);
+            report(make_error(ErrorCode::internal_error, message));
+            state(ConsensusModuleState::closed, message.c_str());
+            return;
+        }
+    }
+
+    // The reference compares the append-position counter's registration id;
+    // this implementation remembers the counter id (C4d), so that is what it
+    // can compare here.
+    if (AERON_NULL_COUNTER_ID != append_position_counter_id_ && counter_id == append_position_counter_id_)
+    {
+        append_position_counter_id_ = AERON_NULL_COUNTER_ID;
+    }
+}
+
+void ConsensusModuleAgent::unavailable_image_trampoline(void* clientd, aeron_subscription_t* subscription,
+                                                        aeron_image_t* image) noexcept
+{
+    static_cast<ConsensusModuleAgent*>(clientd)->on_unavailable_ingress_image(subscription, image);
+}
+
+void ConsensusModuleAgent::on_unavailable_ingress_image(aeron_subscription_t* subscription,
+                                                        aeron_image_t* image) noexcept
+{
+    // `ConsensusModuleAgent.onUnavailableIngressImage:3273-3282`.
+    aeron_image_constants_t image_constants{};
+    if (0 != aeron_image_constants(image, &image_constants))
+    {
+        report(make_error(ErrorCode::internal_error,
+                          std::string{"image constants failed: "} + std::string{aeron_errmsg()}));
+        return;
+    }
+
+    if (ClusterRole::leader == role_ && ConsensusModuleState::active == state_ && nullptr != session_manager_)
+    {
+        session_manager_->timeout_on_unavailable_image(image_constants.correlation_id);
+    }
+
+    bool is_ipc = false;
+    aeron_subscription_constants_t subscription_constants{};
+    if (0 == aeron_subscription_constants(subscription, &subscription_constants) &&
+        nullptr != subscription_constants.channel)
+    {
+        is_ipc = 0 == std::string_view{subscription_constants.channel}.rfind("aeron:ipc", 0);
+    }
+
+    if (nullptr != ingress_adapter_)
+    {
+        ingress_adapter_->free_session_buffer(image_constants.session_id, is_ipc);
+    }
+}
+
+void ConsensusModuleAgent::run_termination_hooks(bool expected, const Error& error) noexcept
+{
+    if (termination_hooks_run_)
+    {
+        return;
+    }
+    termination_hooks_run_ = true;
+
+    // `ConsensusModuleAgent.runTerminationHooks:3457-3470`: the extended hook
+    // gets the cause, the termination hook takes none; each failure is counted.
+    const common::TerminationCause cause{expected, error};
+    ::deepmsg::cluster::common::run_termination_hooks(config_.extended_termination_hook, config_.termination_hook,
+                                                      cause, [this](const Error& hook_error) { report(hook_error); });
 }
 
 void ConsensusModuleAgent::enter_election(bool is_log_end_of_stream, std::string_view reason)
@@ -2655,6 +3007,9 @@ void ConsensusModuleAgent::close_and_terminate()
 {
     try_stop_log_recording();
     state(ConsensusModuleState::closed, "expected termination");
+    // `closeAndTerminate:3308-3322` throws `ClusterTerminationException(true)`;
+    // `doWork`'s catch runs the hooks before the exception leaves the agent.
+    run_termination_hooks(true, Error{});
     // The reference throws `ClusterTerminationException(true)` and the runner
     // then calls `onClose` (`ConsensusModuleAgent.java:3318-3322`), which sends
     // the CLOSED events and signals the mark file. Leave `closed_` for
@@ -2752,7 +3107,7 @@ std::expected<void, Error> ConsensusModuleAgent::snapshot_on_service_ack(std::in
         state(ConsensusModuleState::active, "snapshot complete");
         if (ClusterRole::leader == cluster_role())
         {
-            counter_set(control_toggle_counter_, CONTROL_NEUTRAL);
+            cluster_control_reset(control_toggle_counter_);
         }
     }
     return taken;

@@ -4,6 +4,11 @@
 #include <span>
 #include <string_view>
 
+#include "cluster/common/cluster_codecs.h"
+#include "io_aeron_cluster_codecs/BackupQuery.h"
+#include "io_aeron_cluster_codecs/HeartbeatRequest.h"
+#include "io_aeron_cluster_codecs/StandbySnapshot.h"
+
 namespace deepmsg::cluster::consensus
 {
 
@@ -87,6 +92,35 @@ public:
                                      std::span<const std::uint8_t> /*encoded_principal*/) const override
     {
         return true;
+    }
+};
+
+/// `AuthorisationService.DENY_ALL`.
+class DenyAllAuthorisationService final : public AuthorisationService
+{
+public:
+    [[nodiscard]] bool is_authorised(std::int32_t /*protocol_id*/, std::int32_t /*action_id*/, std::int32_t /*type*/,
+                                     std::span<const std::uint8_t> /*encoded_principal*/) const override
+    {
+        return false;
+    }
+};
+
+/// `AllowBackupAndStandbyAuthorisationService`
+/// (`AllowBackupAndStandbyAuthorisationService.java:44-53`): the cluster
+/// schema's BackupQuery, HeartbeatRequest and StandbySnapshot only. This is
+/// the reference's default, so an admin SNAPSHOT request is not authorised
+/// unless the operator configures `ALLOW_ALL`.
+class AllowBackupAndStandbyAuthorisationService final : public AuthorisationService
+{
+public:
+    [[nodiscard]] bool is_authorised(std::int32_t protocol_id, std::int32_t action_id, std::int32_t /*type*/,
+                                     std::span<const std::uint8_t> /*encoded_principal*/) const override
+    {
+        return common::SBE_SCHEMA_ID == protocol_id &&
+               (common::codecs::BackupQuery::SBE_TEMPLATE_ID == action_id ||
+                common::codecs::HeartbeatRequest::SBE_TEMPLATE_ID == action_id ||
+                common::codecs::StandbySnapshot::SBE_TEMPLATE_ID == action_id);
     }
 };
 

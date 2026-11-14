@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 
+#include "cluster/common/termination_hook.h"
 #include "core/config/property_source.h"
 #include "core/error/error.h"
 
@@ -51,6 +52,11 @@ struct ServiceContainerConfig
     std::int32_t archive_control_response_stream_id{0};
     std::int64_t snapshot_duration_threshold_ns{1'000'000'000};
     std::int64_t cycle_threshold_ns{100'000'000};
+
+    // `ClusteredServiceContainer.Context.extendedTerminationHook()` and
+    // `terminationHook()` (`ClusteredServiceContainer.java:1849-1900`).
+    common::ExtendedTerminationHook extended_termination_hook{};
+    common::TerminationHook termination_hook{};
 
     /// Where this container's own mark file lives
     /// (`ClusterMarkFile.markFilenameForService`).

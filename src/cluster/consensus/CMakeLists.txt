@@ -19,6 +19,7 @@ axc_add_library(axc_cluster_consensus
         consensus_publisher.cpp
         consensus_adapter.cpp
         cluster_termination.cpp
+        recording_log_validator.cpp
         module.cpp
     DEPS
         axc_cluster_common
