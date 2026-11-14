@@ -836,6 +836,40 @@ TEST(ClusterClientTest, aDisconnectedSessionClosesAfterTheNewLeaderTimeout)
         *session.client, [&] { return session.cluster->ingress_publication().is_connected() == connected; }, timeout);
 }
 
+/// Wait until the ingress publication will refuse a write.
+///
+/// The reference's mock returns NOT_CONNECTED the moment the test asks it to
+/// (`AeronClusterTest.java:219` `makeIngressPublicationReturn`). A real driver
+/// gets there in two steps: the unlink clears `is_connected` at once, but an
+/// offer only returns NOT_CONNECTED from the back-pressure path
+/// (`aeron_publication.h` `aeron_publication_back_pressure_status`), and that
+/// needs the position limit to come down onto the producer's position -- one
+/// more driver duty cycle. A test that offers between the two steps writes
+/// successfully and reads as "connected"; that is the reading that went red on
+/// a loaded runner. Wait for the second step, not just the first.
+[[nodiscard]] bool wait_for_ingress_writes_to_stop(Session& session,
+                                                   std::chrono::milliseconds timeout = std::chrono::seconds(5))
+{
+    return pump_until(
+        *session.client,
+        [&]
+        {
+            const auto& publication = session.cluster->ingress_publication();
+            if (nullptr != publication.exclusive())
+            {
+                return aeron_exclusive_publication_position_limit(publication.exclusive()) <=
+                       aeron_exclusive_publication_position(publication.exclusive());
+            }
+            if (nullptr != publication.concurrent())
+            {
+                return aeron_publication_position_limit(publication.concurrent()) <=
+                       aeron_publication_position(publication.concurrent());
+            }
+            return true;
+        },
+        timeout);
+}
+
 [[nodiscard]] ClientConfig failover_config(TestClock& clock)
 {
     ClientConfig config = ipc_config();
@@ -960,6 +994,7 @@ TEST(ClusterClientTest, shouldCloseItselfWhenDisconnectedForLongerThanNewLeaderT
 
         fake.close_ingress_subscription();
         ASSERT_TRUE(wait_for_ingress_connection(*session, false));
+        ASSERT_TRUE(wait_for_ingress_writes_to_stop(*session));
 
         const std::uint8_t payload[] = {'a', 'p', 'p'};
         if (with_app_messages)
@@ -1004,6 +1039,7 @@ TEST(ClusterClientTest, shouldCloseItselfWhenUnableToSendMessageForLongerThanNew
 
         fake.close_ingress_subscription();
         ASSERT_TRUE(wait_for_ingress_connection(*session, false));
+        ASSERT_TRUE(wait_for_ingress_writes_to_stop(*session));
 
         const std::uint8_t payload[] = {'a', 'p', 'p'};
         if (with_app_messages)
