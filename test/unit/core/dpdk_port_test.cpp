@@ -68,7 +68,10 @@ TEST(DpdkPortChild, TheEalOpensAVirtualPortAndSendsAFrame)
         auto pool = axc::core::media::dpdk::Mempool::create("axc-test-pool", 1023, 128, 2048, -1);
         ASSERT_TRUE(pool.has_value()) << pool.error().message.view();
 
-        auto port = axc::core::media::dpdk::Port::open(0);
+        // By name, not by index: a host with a probeable NIC puts it in front of
+        // the vdev (GitHub's Azure runners probe `net_mana` as port 0), and this
+        // case is about the pcap port, wherever it lands.
+        auto port = axc::core::media::dpdk::Port::open_by_name("net_pcap0");
         ASSERT_TRUE(port.has_value()) << port.error().message.view();
 
         const auto info = port->info();
@@ -188,6 +191,7 @@ TEST(DpdkMediaChild, TheStackReceivesAndSendsOnAPcapPort)
     settings.enabled = true;
     settings.eal_args = std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,rx_pcap="} + MEDIA_RX_PATH +
                         ",tx_pcap=" + MEDIA_TX_PATH;
+    settings.port = std::string{"net_pcap0"};
     settings.ipv4_address = axc::core::media::dpdk::Ipv4Prefix{0x0a0a0001, 24};
     settings.static_neighbours = "10.10.0.2=02:00:00:00:00:02";
     settings.rx_descriptors = 256;
@@ -303,6 +307,7 @@ TEST(DpdkCountersChild, TheDpdkCountersAreInTheCnc)
     properties.set("deepmsg.dpdk.enabled", "true");
     properties.set("deepmsg.dpdk.eal.args",
                    "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-counters.pcap");
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
     properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
 
@@ -400,6 +405,7 @@ TEST(DpdkMediaChild, TheMediaSaysWhichPortItOpened)
     axc::core::media::dpdk::Settings settings;
     settings.enabled = true;
     settings.eal_args = std::string{"--no-huge --no-shconf --vdev=net_pcap0,tx_pcap="} + MEDIA_LINE_PCAP;
+    settings.port = std::string{"net_pcap0"};
     settings.ipv4_address = axc::core::media::dpdk::Ipv4Prefix{0x0a0a0001, 24};
     settings.rx_descriptors = 256;
     settings.tx_descriptors = 256;
