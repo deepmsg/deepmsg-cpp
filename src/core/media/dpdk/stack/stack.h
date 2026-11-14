@@ -99,7 +99,8 @@ public:
 
     /// Copy the next datagram for `binding` into `buffer`; answers its length,
     /// or zero when none is waiting.
-    std::size_t receive(const ports::Binding& binding, std::span<std::uint8_t> buffer);
+    std::size_t receive(const ports::Binding& binding, std::span<std::uint8_t> buffer,
+                        ports::Ipv4Endpoint* source = nullptr);
 
     [[nodiscard]] std::uint16_t next_identification() noexcept;
     [[nodiscard]] std::int64_t now_ns() const noexcept;
@@ -108,7 +109,7 @@ public:
     // Used by the demultiplexer.
     void count_a_discard(frame::Discard discard) noexcept;
     void count_unclaimed(std::span<const std::uint8_t> payload) noexcept;
-    bool deliver(const ports::Binding& binding, std::span<const std::uint8_t> payload);
+    bool deliver(const ports::Binding& binding, ports::Ipv4Endpoint source, std::span<const std::uint8_t> payload);
 
     [[nodiscard]] packet_io::TxPort& sender_tx() noexcept
     {
@@ -120,9 +121,15 @@ public:
     }
 
 private:
+    struct Datagram
+    {
+        ports::Ipv4Endpoint source{};
+        packet_io::ReadyFrame frame;
+    };
+
     struct Ring
     {
-        std::deque<packet_io::ReadyFrame> frames;
+        std::deque<Datagram> frames;
         std::uint32_t generation{0};
         std::size_t capacity{0};
         SpinLock lock;

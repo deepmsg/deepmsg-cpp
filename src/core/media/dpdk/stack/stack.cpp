@@ -251,7 +251,7 @@ std::size_t Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint desti
     return payload.size();
 }
 
-std::size_t Stack::receive(const ports::Binding& binding, std::span<std::uint8_t> buffer)
+std::size_t Stack::receive(const ports::Binding& binding, std::span<std::uint8_t> buffer, ports::Ipv4Endpoint* source)
 {
     Ring& ring = rings_[binding.slot];
     SpinGuard guard{ring.lock};
@@ -260,7 +260,12 @@ std::size_t Stack::receive(const ports::Binding& binding, std::span<std::uint8_t
         return 0;
     }
 
-    const auto bytes = ring.frames.front().as_bytes();
+    const Datagram& datagram = ring.frames.front();
+    if (nullptr != source)
+    {
+        *source = datagram.source;
+    }
+    const auto bytes = datagram.frame.as_bytes();
     const std::size_t copied = std::min(buffer.size(), bytes.size());
     std::copy(bytes.data(), bytes.data() + copied, buffer.begin());
     ring.frames.pop_front();
@@ -316,7 +321,7 @@ void Stack::count_unclaimed(std::span<const std::uint8_t> payload) noexcept
     counters_.rx_receiver_discard.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool Stack::deliver(const ports::Binding& binding, std::span<const std::uint8_t> payload)
+bool Stack::deliver(const ports::Binding& binding, ports::Ipv4Endpoint source, std::span<const std::uint8_t> payload)
 {
     Ring& ring = rings_[binding.slot];
     SpinGuard guard{ring.lock};
@@ -325,7 +330,8 @@ bool Stack::deliver(const ports::Binding& binding, std::span<const std::uint8_t>
         counters_.queue_drop.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    ring.frames.emplace_back(packet_io::ReadyFrame{std::vector<std::uint8_t>(payload.begin(), payload.end())});
+    ring.frames.push_back(
+        Datagram{source, packet_io::ReadyFrame{std::vector<std::uint8_t>(payload.begin(), payload.end())}});
     return true;
 }
 

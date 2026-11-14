@@ -128,18 +128,16 @@ TEST(DpdkMediaConfig, BadValuesAreRefused)
 
 TEST(DpdkMediaConfig, EnabledIsRefusedInABuildWithoutDpdk)
 {
+#if defined(AXC_WITH_DPDK)
+    GTEST_SKIP() << "a DPDK build opens the media here; this criterion is for a build without it";
+#else
     PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
     properties.set("deepmsg.dpdk.ipv4.address", "10.0.0.1/24");
 
     const auto media = install_if_configured(nullptr, properties);
     ASSERT_FALSE(media.has_value());
-
-    const std::string message = message_of(media.error());
-#if defined(AXC_WITH_DPDK)
-    EXPECT_NE(std::string::npos, message.find("bindings"));
-#else
-    EXPECT_NE(std::string::npos, message.find("AXC_WITH_DPDK=ON"));
+    EXPECT_NE(std::string::npos, message_of(media.error()).find("AXC_WITH_DPDK=ON"));
 #endif
 }
 

@@ -46,9 +46,10 @@ std::expected<Port, Error> Port::open_by_name(std::string_view name) noexcept
     return Port{static_cast<unsigned>(index)};
 }
 
-Port::Port(Port&& other) noexcept : index_{other.index_}, open_{other.open_}
+Port::Port(Port&& other) noexcept : index_{other.index_}, open_{other.open_}, started_{other.started_}
 {
     other.open_ = false;
+    other.started_ = false;
 }
 
 Port& Port::operator=(Port&& other) noexcept

@@ -14,6 +14,7 @@
 #include <vector>
 
 #if defined(AXC_WITH_DPDK)
+#include "core/media/dpdk/bindings.h"
 #include "core/media/dpdk/dpdk_port.h"
 #include "core/media/dpdk/eal.h"
 #include "core/media/dpdk/mempool.h"
@@ -680,8 +681,23 @@ std::expected<Media, Error> install_if_configured(aeron_driver_context_t* contex
     }
 
 #if defined(AXC_WITH_DPDK)
-    return std::unexpected(
-        make_error(ErrorCode::config_error, "deepmsg.dpdk.enabled=true: the DPDK bindings are not wired yet (P4b)"));
+    auto media = open_media(*settings);
+    if (!media)
+    {
+        return std::unexpected(media.error());
+    }
+    auto* target = media->stack();
+    if (nullptr == target)
+    {
+        std::ignore = media->close();
+        return std::unexpected(make_error(ErrorCode::internal_error, "the DPDK stack is missing"));
+    }
+    if (auto installed = bindings::install(context, *target); !installed)
+    {
+        std::ignore = media->close();
+        return std::unexpected(installed.error());
+    }
+    return media;
 #else
     return std::unexpected(make_error(ErrorCode::config_error,
                                       "deepmsg.dpdk.enabled=true but this build has no DPDK media; "
