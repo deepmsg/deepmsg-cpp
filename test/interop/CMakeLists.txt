@@ -26,18 +26,21 @@ axc_add_executable(axc_archive_interop_tests
         archive/reference_java_client_test.cpp
         archive/content_parity_test.cpp
         archive/archive_tool_ro_interop_test.cpp
+        archive/dpdk_archive_interop_test.cpp
         fixture/c_driver.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
         axc_archive_server
         axc_core
+        axc_driver
         GTest::gtest_main)
 
 target_include_directories(axc_archive_interop_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_compile_definitions(axc_archive_interop_tests PRIVATE
-    "AXC_ARCHIVE_SERVER_BIN=\"${PROJECT_BINARY_DIR}/apps/deepmsg-archive-server/deepmsg-archive-server\"")
+    "AXC_ARCHIVE_SERVER_BIN=\"${PROJECT_BINARY_DIR}/apps/deepmsg-archive-server/deepmsg-archive-server\""
+    "AXC_MEDIA_DRIVER_BIN=\"${PROJECT_BINARY_DIR}/apps/deepmsg-media-driver/deepmsg-media-driver\"")
 
 # The reference `aeron-all` jar is a build product of the pinned submodule
 # (`./gradlew :aeron-all:assemble`), not a checked-in artifact; a missing jar

@@ -243,6 +243,26 @@ TEST(Stack, ATransportSendsAndReceives)
     EXPECT_EQ(OWN, sender.local_address());
 }
 
+TEST(Stack, ADatagramToThisStacksOwnAddressLoopsInsideIt)
+{
+    Wire wire;
+    auto a = make_stack(wire, Side::a, params(OWN, MAC_A));
+
+    const auto sender = a->bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    const auto receiver = a->bind(OWN, 5001, std::nullopt, endpoint(OWN, 5001));
+    ASSERT_TRUE(sender.has_value() && receiver.has_value());
+
+    const std::array<std::uint8_t, 4> payload{7, 6, 5, 4};
+    EXPECT_EQ(4u, a->send(*sender, endpoint(OWN, 5001), payload));
+
+    // Nothing went on the wire: the receiver's ring already has it.
+    EXPECT_TRUE(wire.take(Side::a, 10).empty());
+
+    std::array<std::uint8_t, 8> received{};
+    EXPECT_EQ(4u, a->receive(*receiver, received));
+    EXPECT_EQ(payload, (std::array<std::uint8_t, 4>{received[0], received[1], received[2], received[3]}));
+}
+
 TEST(Stack, TheLargestDatagramLeavesAndOneByteMoreDoesNot)
 {
     Wire wire;
