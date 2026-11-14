@@ -956,6 +956,9 @@ std::expected<void, Error> ClusteredServiceAgent<S>::on_start()
     axc::core::ClientConfig client_config;
     client_config.dir = config_.aeron_dir;
     client_config.use_conductor_agent_invoker = true;
+    // `ClusteredServiceContainer.Context.serviceName()`: the heartbeat
+    // counter's label names the container (`shouldSetClientName`).
+    client_config.client_name = config_.service_name;
     auto client = axc::core::DeepmsgClient::connect(client_config);
     if (!client)
     {

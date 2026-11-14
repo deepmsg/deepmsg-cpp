@@ -253,6 +253,9 @@ std::expected<void, Error> ConsensusModuleAgent::on_start()
     axc::core::ClientConfig client_config;
     client_config.dir = config_.aeron_dir;
     client_config.use_conductor_agent_invoker = true;
+    // `ConsensusModule.Context.conclude` gives the agent its role name; the
+    // reference's `shouldSetClientName` reads it from the heartbeat counter.
+    client_config.client_name = config_.agent_role_name;
     // `ConsensusModuleAgent.onStart:395`: a service client that disappears is
     // noticed through the counter handler, not by polling.
     client_config.on_unavailable_counter = &ConsensusModuleAgent::unavailable_counter_trampoline;

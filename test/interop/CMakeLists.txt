@@ -65,6 +65,8 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/service_control_interop_test.cpp
         cluster/snapshot_recovery_interop_test.cpp
         cluster/publication_starting_position_interop_test.cpp
+        cluster/xc2_single_node_test.cpp
+        cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
@@ -92,11 +94,13 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
     "AXC_CONTAINER_BINARY=\"$<TARGET_FILE:deepmsg-clustered-service-container>\""
+    "AXC_CLUSTER_NODE_BIN=\"$<TARGET_FILE:deepmsg-cluster-node>\""
+    "AXC_CONSENSUS_MODULE_BIN=\"$<TARGET_FILE:deepmsg-consensus-module>\""
     "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
     "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\"")
 
-add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container echo_service_dynamic
-    deepmsg-cluster-client-smoke)
+add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container deepmsg-cluster-node
+    deepmsg-consensus-module echo_service_dynamic deepmsg-cluster-client-smoke)
 
 # The tool under test is an executable of its own; build it with the suite.
 add_dependencies(axc_archive_interop_tests archive-tool-ro)

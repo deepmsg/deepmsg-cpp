@@ -13,3 +13,4 @@ FetchContent_MakeAvailable(googletest)
 
 add_subdirectory(unit)
 add_subdirectory(interop)
+add_subdirectory(alloc)
