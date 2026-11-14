@@ -28,6 +28,7 @@ axc_add_library(axc_driver
     SOURCES
         driver/embedded_driver.cpp
         media/dpdk/media.cpp
+        media/dpdk/stack/frame.cpp
     DEPS
         axc_core
         aeron_driver_static)
