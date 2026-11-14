@@ -16,6 +16,9 @@ axc_add_executable(axc_unit_tests
         core/duty_cycle_tracker_test.cpp
         core/dpdk_media_config_test.cpp
         core/dpdk_frame_test.cpp
+        core/dpdk_ports_test.cpp
+        core/dpdk_packet_io_test.cpp
+        core/dpdk_fake_port_test.cpp
     DEPS
         axc_core
         axc_driver
