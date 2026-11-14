@@ -66,6 +66,8 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/snapshot_recovery_interop_test.cpp
         cluster/publication_starting_position_interop_test.cpp
         cluster/xc2_single_node_test.cpp
+        cluster/xc2_three_nodes_test.cpp
+        cluster/xc2_follower_path_test.cpp
         cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
@@ -96,6 +98,7 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_CONTAINER_BINARY=\"$<TARGET_FILE:deepmsg-clustered-service-container>\""
     "AXC_CLUSTER_NODE_BIN=\"$<TARGET_FILE:deepmsg-cluster-node>\""
     "AXC_CONSENSUS_MODULE_BIN=\"$<TARGET_FILE:deepmsg-consensus-module>\""
+    "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\""
     "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
     "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\"")
 

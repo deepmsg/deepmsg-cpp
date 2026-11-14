@@ -54,6 +54,10 @@ public:
     virtual void on_termination_position(std::int64_t leadership_term_id, std::int64_t log_position) = 0;
     virtual void on_termination_ack(std::int64_t leadership_term_id, std::int64_t log_position,
                                     std::int32_t member_id) = 0;
+    /// `ChallengeResponse` (`ConsensusAdapter.java:243`): a follower forwards a
+    /// user session's answer to the leader (`onConsensusChallengeResponse`).
+    virtual void on_consensus_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
+                                                 std::string_view encoded_credentials) = 0;
     /// `BackupQuery` (`ConsensusAdapter.java:250`), C9's.
     virtual void on_unhandled_template(std::int32_t template_id) = 0;
 };

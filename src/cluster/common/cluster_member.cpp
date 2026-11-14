@@ -261,6 +261,54 @@ std::expected<ClusterMember, Error> determine_member(const ClusterMembers& membe
     return *member;
 }
 
+std::optional<std::string> replace_port_with_wildcard(std::string_view endpoint) noexcept
+{
+    const std::size_t colon = endpoint.rfind(':');
+    if (std::string_view::npos == colon)
+    {
+        return std::nullopt;
+    }
+    return std::string{endpoint.substr(0, colon + 1)} + "0";
+}
+
+std::string create_destination_uri(std::string_view channel, std::string_view remote_endpoint)
+{
+    constexpr std::string_view AERON_PREFIX = "aeron:";
+    std::string_view media = channel;
+    const std::size_t prefix = channel.find(AERON_PREFIX);
+    if (std::string_view::npos != prefix)
+    {
+        media = channel.substr(prefix + AERON_PREFIX.size());
+    }
+    std::string_view params{};
+    const std::size_t question = media.find('?');
+    if (std::string_view::npos != question)
+    {
+        params = media.substr(question + 1);
+        media = media.substr(0, question);
+    }
+
+    std::string result = "aeron:" + std::string{media} + "?endpoint=" + std::string{remote_endpoint};
+    std::size_t begin = 0;
+    while (begin < params.size())
+    {
+        const std::size_t bar = params.find('|', begin);
+        const std::string_view token =
+            std::string_view::npos == bar ? params.substr(begin) : params.substr(begin, bar - begin);
+        const std::size_t equals = token.find('=');
+        if (std::string_view::npos != equals && token.substr(0, equals) == "interface")
+        {
+            result += "|interface=" + std::string{token.substr(equals + 1)};
+        }
+        if (std::string_view::npos == bar)
+        {
+            break;
+        }
+        begin = bar + 1;
+    }
+    return result;
+}
+
 bool are_same_endpoints(const ClusterMember& lhs, const ClusterMember& rhs) noexcept
 {
     return lhs.ingress_endpoint == rhs.ingress_endpoint && lhs.consensus_endpoint == rhs.consensus_endpoint &&

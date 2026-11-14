@@ -63,7 +63,7 @@ public:
 };
 
 /// `RecordingReplication` (`RecordingReplication.java`): catching up a follower
-/// from another archive. Driven through its recording signals; C4b owns the
+/// from another archive. Driven through its recording signals; C6b owns the
 /// implementation.
 class RecordingReplication
 {
@@ -72,8 +72,10 @@ public:
 
     virtual void on_signal(std::int64_t correlation_id, std::int64_t recording_id, std::int64_t position,
                            std::int32_t signal) = 0;
-    /// `RecordingReplication.poll(long)` (`Election.java:925`).
-    virtual void poll(std::int64_t now_ns) = 0;
+    /// `RecordingReplication.poll(long)` (`Election.java:925`). The reference
+    /// throws out of `poll` when the replication cannot progress; the error is
+    /// returned so it ends this `doWork` pass the same way.
+    [[nodiscard]] virtual std::expected<int, Error> poll(std::int64_t now_ns) = 0;
     /// `hasReplicationEnded()` (`Election.java:927`).
     [[nodiscard]] virtual bool has_replication_ended() const = 0;
     /// `hasStopped()` (`Election.java:927`).

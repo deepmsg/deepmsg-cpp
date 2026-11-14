@@ -1,5 +1,7 @@
 #include "cluster/consensus/session_manager.h"
 
+#include <cstdio>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

@@ -29,6 +29,8 @@ constexpr std::string_view INGRESS_IPC_ALLOWED_PROP_NAME = "aeron.cluster.ingres
 constexpr std::string_view EGRESS_CHANNEL_PROP_NAME = "aeron.cluster.egress.channel";
 constexpr std::string_view EGRESS_STREAM_ID_PROP_NAME = "aeron.cluster.egress.stream.id";
 constexpr std::string_view LOG_CHANNEL_PROP_NAME = "aeron.cluster.log.channel";
+constexpr std::string_view LOG_CONTROL_ENABLE_PROP_NAME = "aeron.cluster.log.control.enable";
+constexpr std::string_view CONSENSUS_CONTROL_ENABLE_PROP_NAME = "aeron.cluster.consensus.control.enable";
 constexpr std::string_view LOG_STREAM_ID_PROP_NAME = "aeron.cluster.log.stream.id";
 constexpr std::string_view LOG_FRAGMENT_LIMIT_PROP_NAME = "aeron.cluster.log.fragment.limit";
 constexpr std::string_view CONSENSUS_CHANNEL_PROP_NAME = "aeron.cluster.consensus.channel";
@@ -328,6 +330,9 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
     config.egress_channel = get_string(properties, EGRESS_CHANNEL_PROP_NAME, {});
     config.log_channel = get_string(properties, LOG_CHANNEL_PROP_NAME, config.log_channel);
     config.consensus_channel = get_string(properties, CONSENSUS_CHANNEL_PROP_NAME, config.consensus_channel);
+    config.log_control_enabled = parse_bool(properties, LOG_CONTROL_ENABLE_PROP_NAME, config.log_control_enabled);
+    config.consensus_control_enabled =
+        parse_bool(properties, CONSENSUS_CONTROL_ENABLE_PROP_NAME, config.consensus_control_enabled);
     config.replication_channel = get_string(properties, REPLICATION_CHANNEL_PROP_NAME, {});
     config.follower_catchup_channel =
         get_string(properties, FOLLOWER_CATCHUP_CHANNEL_PROP_NAME, config.follower_catchup_channel);
@@ -546,6 +551,10 @@ std::expected<void, Error> ConsensusModuleConfig::conclude()
     {
         return std::unexpected(make_error(ErrorCode::config_error, "local archive control must be IPC"));
     }
+
+    // `isLogMdc = channelUri.isUdp() && null == get(ENDPOINT)`
+    // (`ConsensusModule.java:2180`).
+    log_is_mdc = 0 == log_channel.rfind("aeron:udp", 0) && !channel_has_param(log_channel, "endpoint");
 
     // `clusterId * 100 + 100 + AeronArchive.Configuration.controlResponseStreamId()`
     // (`ConsensusModule.java:2105-2111`).

@@ -247,6 +247,9 @@ namespace detail
 {
     const std::size_t pipe = channel.find('|');
     const std::string base{channel.substr(0, pipe)};
+    // A channel without a query string needs `?` before its first parameter;
+    // `aeron:ipc|alias=…` is rejected by the driver as an invalid URI.
+    const char first_separator = std::string::npos == base.find('?') ? '?' : '|';
     std::string result = base;
 
     bool replaced = false;
@@ -279,7 +282,7 @@ namespace detail
 
     if (!replaced)
     {
-        result.push_back('|');
+        result.push_back(first_separator);
         result.append("alias=");
         result.append(alias);
     }

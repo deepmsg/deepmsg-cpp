@@ -85,6 +85,15 @@ using ClusterMembers = std::vector<ClusterMember>;
                                                                    std::int32_t member_id,
                                                                    std::string_view member_endpoints);
 
+/// `ChannelUri.replacePortWithWildcard` (`ChannelUri.java:664-678`): the same
+/// host with port 0, used by the MDC control endpoint
+/// (`ClusterMember.setControlEndpoint`).
+[[nodiscard]] std::optional<std::string> replace_port_with_wildcard(std::string_view endpoint) noexcept;
+
+/// `ChannelUri.createDestinationUri(channel, endpoint)` (`ChannelUri.java:589-601`):
+/// the channel's media with `endpoint=` and any `interface=` carried over.
+[[nodiscard]] std::string create_destination_uri(std::string_view channel, std::string_view remote_endpoint);
+
 [[nodiscard]] bool are_same_endpoints(const ClusterMember& lhs, const ClusterMember& rhs) noexcept;
 [[nodiscard]] std::expected<void, Error> validate_member_endpoints(const ClusterMember& member,
                                                                    std::string_view member_endpoints);

@@ -3,6 +3,7 @@
 #include "io_aeron_cluster_codecs/AppendPosition.h"
 #include "io_aeron_cluster_codecs/CanvassPosition.h"
 #include "io_aeron_cluster_codecs/CatchupPosition.h"
+#include "io_aeron_cluster_codecs/ChallengeResponse.h"
 #include "io_aeron_cluster_codecs/CommitPosition.h"
 #include "io_aeron_cluster_codecs/NewLeadershipTerm.h"
 #include "io_aeron_cluster_codecs/RequestVote.h"
@@ -148,6 +149,13 @@ std::expected<void, Error> ConsensusAdapter::dispatch(std::span<const std::uint8
         {
             auto m = wrap_body<codecs::TerminationAck>(message, *header);
             handler_->on_termination_ack(m.leadershipTermId(), m.logPosition(), m.memberId());
+            return {};
+        }
+        case codecs::ChallengeResponse::SBE_TEMPLATE_ID:
+        {
+            auto m = wrap_body<codecs::ChallengeResponse>(message, *header);
+            handler_->on_consensus_challenge_response(m.correlationId(), m.clusterSessionId(),
+                                                      m.getEncodedCredentialsAsStringView());
             return {};
         }
         default:
