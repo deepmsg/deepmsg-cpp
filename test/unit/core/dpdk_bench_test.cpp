@@ -20,10 +20,12 @@
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +37,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -301,6 +304,10 @@ public:
     {
         return port_;
     }
+    [[nodiscard]] int descriptor() const noexcept
+    {
+        return fd_;
+    }
 
     [[nodiscard]] bool receive(std::array<std::uint8_t, PAYLOAD_LENGTH>& payload)
     {
@@ -380,6 +387,299 @@ TEST(DpdkBench, TheRealPortCarriesBothWays)
 TEST(DpdkBench, TheRealPortCarriesBothWaysWithAStaticNeighbour)
 {
     the_real_port_carries_both_ways(true);
+}
+
+namespace
+{
+
+constexpr std::size_t RTT_PAYLOAD = 64;
+constexpr std::uint16_t RTT_LOCAL_PORT = 41000;
+
+/// The arm the child runs: a kernel socket at the media's address, or the
+/// media itself. The peer is the same kernel socket in both.
+enum class Arm
+{
+    kernel,
+    media
+};
+
+[[nodiscard]] std::optional<Arm> arm_from_environment()
+{
+    const char* arm = std::getenv("AXC_DPDK_BENCH_ARM");
+    if (nullptr == arm)
+    {
+        return std::nullopt;
+    }
+    if (0 == std::strcmp(arm, "kernel"))
+    {
+        return Arm::kernel;
+    }
+    if (0 == std::strcmp(arm, "media"))
+    {
+        return Arm::media;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::size_t sample_count()
+{
+    const char* count = std::getenv("AXC_DPDK_BENCH_N");
+    return nullptr == count ? 20'000 : static_cast<std::size_t>(std::strtoul(count, nullptr, 10));
+}
+
+[[nodiscard]] std::uint16_t port_of_settings()
+{
+    return RTT_LOCAL_PORT;
+}
+
+int run_arm_side(Arm arm, const BenchSettings& settings, std::uint16_t peer_port, std::size_t count)
+{
+    const std::uint32_t peer = ipv4_of(settings.peer);
+    const std::uint32_t local = ipv4_of(settings.local);
+    std::vector<std::int64_t> samples;
+    samples.reserve(count);
+
+    if (Arm::kernel == arm)
+    {
+        const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (socket_fd < 0)
+        {
+            std::fprintf(stderr, "kernel arm: socket: %s\n", std::strerror(errno));
+            return 1;
+        }
+        sockaddr_in bind_address{};
+        bind_address.sin_family = AF_INET;
+        bind_address.sin_addr.s_addr = htonl(local);
+        bind_address.sin_port = htons(port_of_settings());
+        if (0 != ::bind(socket_fd, reinterpret_cast<const sockaddr*>(&bind_address), sizeof(bind_address)))
+        {
+            std::fprintf(stderr, "kernel arm: bind: %s\n", std::strerror(errno));
+            return 1;
+        }
+        timeval timeout{};
+        timeout.tv_sec = 5;
+        (void)::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        sockaddr_in destination{};
+        destination.sin_family = AF_INET;
+        destination.sin_addr.s_addr = htonl(peer);
+        destination.sin_port = htons(peer_port);
+
+        std::array<std::uint8_t, RTT_PAYLOAD> message{};
+        std::array<std::uint8_t, RTT_PAYLOAD> reply{};
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            std::memcpy(message.data(), &index, sizeof(index));
+            const auto begin = std::chrono::steady_clock::now();
+            if (RTT_PAYLOAD != static_cast<std::size_t>(::sendto(socket_fd, message.data(), message.size(), 0,
+                                                                 reinterpret_cast<const sockaddr*>(&destination),
+                                                                 sizeof(destination))))
+            {
+                std::fprintf(stderr, "kernel arm: sendto at %zu\n", index);
+                return 1;
+            }
+            const ssize_t got = ::recv(socket_fd, reply.data(), reply.size(), 0);
+            const auto end = std::chrono::steady_clock::now();
+            if (RTT_PAYLOAD != static_cast<std::size_t>(got))
+            {
+                std::fprintf(stderr, "kernel arm: the peer answered %zd bytes at %zu\n", got, index);
+                return 1;
+            }
+            samples.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());
+        }
+        ::close(socket_fd);
+    }
+    else
+    {
+        PropertySource properties;
+        properties.set("deepmsg.dpdk.enabled", "true");
+        properties.set("deepmsg.dpdk.eal.args", std::string{"-a "} + settings.pci);
+        properties.set("deepmsg.dpdk.port", settings.pci);
+        properties.set("deepmsg.dpdk.ipv4.address", settings.local);
+        if (!settings.peer_mac.empty())
+        {
+            properties.set("deepmsg.dpdk.static.neighbours", settings.peer + "=" + settings.peer_mac);
+        }
+        auto media = axc::core::media::dpdk::open_media(properties);
+        if (!media)
+        {
+            std::fprintf(stderr, "media arm: %s\n", std::string{media.error().message.view()}.c_str());
+            return 1;
+        }
+        auto* stack = media->stack();
+        if (nullptr == stack)
+        {
+            return 1;
+        }
+        const auto binding = stack->bind(local, port_of_settings(), std::nullopt, {local, port_of_settings()});
+        if (!binding)
+        {
+            std::fprintf(stderr, "media arm: bind failed\n");
+            return 1;
+        }
+
+        std::array<std::uint8_t, RTT_PAYLOAD> message{};
+        std::array<std::uint8_t, RTT_PAYLOAD + 64> reply{};
+        const auto per_message = std::chrono::seconds(5);
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            std::memcpy(message.data(), &index, sizeof(index));
+            const auto begin = std::chrono::steady_clock::now();
+            const auto deadline = begin + per_message;
+            std::size_t sent = 0;
+            while (RTT_PAYLOAD != sent && std::chrono::steady_clock::now() < deadline)
+            {
+                sent = stack->send(*binding, {peer, peer_port}, message);
+                if (RTT_PAYLOAD != sent)
+                {
+                    (void)stack->pump();
+                }
+            }
+            if (RTT_PAYLOAD != sent)
+            {
+                std::fprintf(stderr, "media arm: never sent at %zu\n", index);
+                return 1;
+            }
+            std::size_t received = 0;
+            while (RTT_PAYLOAD != received && std::chrono::steady_clock::now() < deadline)
+            {
+                (void)stack->pump();
+                received = stack->receive(*binding, reply);
+            }
+            const auto end = std::chrono::steady_clock::now();
+            if (RTT_PAYLOAD != received)
+            {
+                std::fprintf(stderr, "media arm: no answer at %zu\n", index);
+                return 1;
+            }
+            samples.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());
+        }
+        if (auto closed = media->close(); !closed)
+        {
+            return 1;
+        }
+    }
+
+    std::sort(samples.begin(), samples.end());
+    if (samples.empty())
+    {
+        return 1;
+    }
+    const auto at = [&samples](std::size_t percent)
+    { return samples[std::min(samples.size() - 1, samples.size() * percent / 100)]; };
+    const auto p50 = at(50);
+    const auto p99 = at(99);
+    const auto p999 = samples[std::min(samples.size() - 1, samples.size() * 999 / 1000)];
+    std::printf("RTT arm=%s n=%zu p50_ns=%lld p99_ns=%lld p999_ns=%lld second_per_message=%.9f\n",
+                Arm::kernel == arm ? "kernel" : "media", samples.size(), static_cast<long long>(p50),
+                static_cast<long long>(p99), static_cast<long long>(p999), static_cast<double>(p50) / 1e9);
+    std::fflush(stdout);
+    return 0;
+}
+
+/// The peer, in its own network namespace so the kernel cannot short-circuit
+/// the datagram locally. It echoes each datagram back to where it came from.
+void echo_forever(const PeerSocket& peer)
+{
+    timeval timeout{};
+    timeout.tv_usec = 100'000;
+    (void)::setsockopt(peer.descriptor(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    std::array<std::uint8_t, RTT_PAYLOAD> buffer{};
+    for (;;)
+    {
+        sockaddr_in from{};
+        socklen_t from_length = sizeof(from);
+        const ssize_t got = ::recvfrom(peer.descriptor(), buffer.data(), buffer.size(), 0,
+                                       reinterpret_cast<sockaddr*>(&from), &from_length);
+        if (got <= 0)
+        {
+            continue;
+        }
+        (void)::sendto(peer.descriptor(), buffer.data(), static_cast<std::size_t>(got), 0,
+                       reinterpret_cast<const sockaddr*>(&from), from_length);
+    }
+}
+
+/// Join the peer's network namespace, when one is named. The runner creates
+/// it (`ip netns add ...`, the peer interface moved into it); without a name
+/// the peer stays in this one.
+[[nodiscard]] bool join_peer_namespace()
+{
+    const char* name = std::getenv("AXC_DPDK_BENCH_PEER_NETNS");
+    if (nullptr == name || '\0' == *name)
+    {
+        return true;
+    }
+    const std::string path = std::string{"/var/run/netns/"} + name;
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+    {
+        std::fprintf(stderr, "netns %s: %s\n", path.c_str(), std::strerror(errno));
+        return false;
+    }
+    const bool joined = 0 == ::setns(fd, CLONE_NEWNET);
+    ::close(fd);
+    if (!joined)
+    {
+        std::fprintf(stderr, "setns(%s): %s\n", path.c_str(), std::strerror(errno));
+    }
+    return joined;
+}
+
+}  // namespace
+
+TEST(DpdkBench, RoundTripLatency)
+{
+    if (!arm_from_environment())
+    {
+        GTEST_SKIP() << "set AXC_DPDK_BENCH_ARM=kernel|media (and PCI/LOCAL/PEER)";
+    }
+    const auto settings = bench_settings();
+    if (!settings)
+    {
+        GTEST_SKIP() << "set AXC_DPDK_BENCH_PCI, AXC_DPDK_BENCH_LOCAL and AXC_DPDK_BENCH_PEER";
+    }
+
+    // The peer runs in its own process (and, when named, its own namespace):
+    // two addresses on one host would otherwise be delivered by the kernel's
+    // local route, which is not the wire this arm is meant to measure.
+    int handshake[2] = {-1, -1};
+    ASSERT_EQ(0, ::pipe(handshake));
+    const pid_t peer = ::fork();
+    ASSERT_GE(peer, 0);
+    if (0 == peer)
+    {
+        (void)::close(handshake[0]);
+        if (!join_peer_namespace())
+        {
+            ::_exit(127);
+        }
+        PeerSocket socket;
+        if (!socket.ok())
+        {
+            ::_exit(127);
+        }
+        const std::uint16_t port = socket.port();
+        if (sizeof(port) != ::write(handshake[1], &port, sizeof(port)))
+        {
+            ::_exit(127);
+        }
+        (void)::close(handshake[1]);
+        echo_forever(socket);
+        ::_exit(0);
+    }
+
+    (void)::close(handshake[1]);
+    std::uint16_t peer_port = 0;
+    ASSERT_EQ(sizeof(peer_port), ::read(handshake[0], &peer_port, sizeof(peer_port)));
+    (void)::close(handshake[0]);
+
+    const int result = run_arm_side(*arm_from_environment(), *settings, peer_port, sample_count());
+    ::kill(peer, SIGTERM);
+    int status = 0;
+    ASSERT_EQ(peer, ::waitpid(peer, &status, 0));
+    ASSERT_EQ(0, result);
 }
 
 #endif  // AXC_WITH_DPDK
