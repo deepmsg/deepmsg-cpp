@@ -38,10 +38,13 @@ namespace
 
 constexpr std::string_view PROPERTY_PREFIX{"deepmsg.dpdk."};
 
+#if defined(AXC_WITH_DPDK)
 /// How long `open_media` waits for the port's link before it refuses to open.
 /// A 10GBASE-T link was measured at ~20 s after the port starts (Rust track
-/// T4), and a media opened before it is up drops its first frames in silence.
+/// T4); here the first read after start was down and the link came up ~8 s
+/// later. A media opened before it is up drops its first frames in silence.
 constexpr int LINK_TIMEOUT_SECONDS = 30;
+#endif
 
 constexpr std::string_view KNOWN_PROPERTIES[] = {
     "deepmsg.dpdk.enabled",         "deepmsg.dpdk.eal.args",       "deepmsg.dpdk.port",
