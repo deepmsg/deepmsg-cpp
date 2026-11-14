@@ -87,6 +87,10 @@ public:
     /// The userspace stack, when the media is open.
     [[nodiscard]] stack::Stack* stack() const noexcept;
 
+    /// The port and the pool, when the media is open.
+    [[nodiscard]] class Port* port() const noexcept;
+    [[nodiscard]] class Mempool* pool() const noexcept;
+
     /// Stop and release what the media owns. Idempotent; the destructor calls it.
     [[nodiscard]] std::expected<void, Error> close() noexcept;
 

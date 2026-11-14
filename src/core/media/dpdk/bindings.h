@@ -26,6 +26,9 @@ namespace stack
 class Stack;
 }
 
+class Mempool;
+class Port;
+
 namespace bindings
 {
 
@@ -33,7 +36,8 @@ namespace bindings
 ///
 /// Only DEDICATED drivers: the receiver thread pumps the port and pushes into
 /// the per-slot rings, and the sender thread drains its own transports' rings.
-[[nodiscard]] std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack& target) noexcept;
+[[nodiscard]] std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack& target, Port* port,
+                                                 Mempool* pool) noexcept;
 
 }  // namespace bindings
 

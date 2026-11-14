@@ -24,12 +24,21 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "core/config/property_source.h"
+#include "core/driver/embedded_driver.h"
+#include "core/media/dpdk/counters.h"
 #include "core/media/dpdk/eal.h"
 #include "core/media/dpdk/media.h"
 #include "core/media/dpdk/mempool.h"
 #include "core/media/dpdk/port.h"
 #include "core/media/dpdk/stack/frame.h"
 #include "core/media/dpdk/stack/stack.h"
+
+extern "C"
+{
+#include "aeronc.h"
+#include "util/aeron_properties_util.h"
+}
 
 namespace
 {
@@ -230,6 +239,134 @@ TEST(DpdkMedia, TheStackRunsInAChildProcess)
     {
         (void)::setenv("AXC_DPDK_CHILD", "1", 1);
         ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkMediaChild.TheStackReceivesAndSendsOnAPcapPort",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
+namespace
+{
+
+struct SeenCounters
+{
+    int transports{0};
+    bool port_info{false};
+    bool packets{false};
+    bool poller{false};
+};
+
+void count_one(std::int64_t /*value*/, std::int32_t /*id*/, std::int32_t type_id, const std::uint8_t* /*key*/,
+               std::size_t /*key_length*/, const char* /*label*/, std::size_t /*label_length*/, void* clientd)
+{
+    auto* seen = static_cast<SeenCounters*>(clientd);
+    if (axc::core::media::dpdk::counters::TRANSPORT == type_id)
+    {
+        ++seen->transports;
+    }
+    if (axc::core::media::dpdk::counters::PORT_INFO == type_id)
+    {
+        seen->port_info = true;
+    }
+    if (axc::core::media::dpdk::counters::PKTS == type_id)
+    {
+        seen->packets = true;
+    }
+    if (axc::core::media::dpdk::counters::POLLER == type_id)
+    {
+        seen->poller = true;
+    }
+}
+
+}  // namespace
+
+TEST(DpdkCountersChild, TheDpdkCountersAreInTheCnc)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    char directory[] = "/tmp/axc-dpdk-counters-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)std::remove("/tmp/axc-dpdk-counters.pcap");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-counters.pcap");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+    properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+
+    {
+        aeron_context_t* context = nullptr;
+        aeron_t* client = nullptr;
+        ASSERT_EQ(0, aeron_context_init(&context));
+        ASSERT_EQ(0, aeron_context_set_dir(context, directory));
+        (void)aeron_context_set_use_conductor_agent_invoker(context, true);
+        ASSERT_EQ(0, aeron_init(&client, context));
+
+        aeron_async_add_publication_t* async = nullptr;
+        ASSERT_EQ(0, aeron_async_add_publication(&async, client, "aeron:udp?endpoint=localhost:20104", 1001));
+        aeron_publication_t* publication = nullptr;
+        for (int attempt = 0; attempt < 3000 && nullptr == publication; ++attempt)
+        {
+            (void)aeron_main_do_work(client);
+            if (1 == aeron_async_add_publication_poll(&publication, async))
+            {
+                break;
+            }
+            ::usleep(1000);
+        }
+        ASSERT_NE(nullptr, publication);
+
+        for (int pass = 0; pass < 50; ++pass)
+        {
+            (void)aeron_main_do_work(client);
+            ::usleep(1000);
+        }
+
+        auto* reader = aeron_counters_reader(client);
+        ASSERT_NE(nullptr, reader);
+        SeenCounters seen;
+        aeron_counters_reader_foreach_counter(reader, &count_one, &seen);
+
+        EXPECT_GE(seen.transports, 1) << "a DPDK transport counter (76) per channel";
+        EXPECT_TRUE(seen.port_info) << "port info (75)";
+        EXPECT_TRUE(seen.packets) << "port packets (82)";
+        EXPECT_TRUE(seen.poller) << "poller (87)";
+
+        (void)aeron_publication_close(publication, nullptr, nullptr);
+        (void)aeron_close(client);
+        (void)aeron_context_close(context);
+    }
+
+    std::ignore = driver->close();
+    std::filesystem::remove_all(directory);
+    (void)std::remove("/tmp/axc-dpdk-counters.pcap");
+}
+
+TEST(DpdkCounters, TheCountersChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkCountersChild.TheDpdkCountersAreInTheCnc",
                 "--gtest_color=no", static_cast<char*>(nullptr));
         ::_exit(127);
     }

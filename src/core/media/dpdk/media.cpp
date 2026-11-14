@@ -485,6 +485,24 @@ stack::Stack* Media::stack() const noexcept
 #endif
 }
 
+Port* Media::port() const noexcept
+{
+#if defined(AXC_WITH_DPDK)
+    return impl_ ? &impl_->port : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
+Mempool* Media::pool() const noexcept
+{
+#if defined(AXC_WITH_DPDK)
+    return impl_ ? &impl_->pool : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
 std::expected<void, Error> Media::close() noexcept
 {
     if (closed_)
@@ -692,7 +710,7 @@ std::expected<Media, Error> install_if_configured(aeron_driver_context_t* contex
         std::ignore = media->close();
         return std::unexpected(make_error(ErrorCode::internal_error, "the DPDK stack is missing"));
     }
-    if (auto installed = bindings::install(context, *target); !installed)
+    if (auto installed = bindings::install(context, *target, media->port(), media->pool()); !installed)
     {
         std::ignore = media->close();
         return std::unexpected(installed.error());

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -19,12 +20,16 @@
 extern "C"
 {
 #include "aeron_driver_context.h"
+#include "concurrent/aeron_counters_manager.h"
 #include "media/aeron_udp_channel_transport.h"
 #include "media/aeron_udp_channel_transport_bindings.h"
 #include "media/aeron_udp_transport_poller.h"
 }
 
+#include "core/media/dpdk/counters.h"
 #include "core/media/dpdk/eal.h"
+#include "core/media/dpdk/mempool.h"
+#include "core/media/dpdk/port.h"
 #include "core/media/dpdk/stack/stack.h"
 
 namespace axc::core::media::dpdk::bindings
@@ -35,12 +40,147 @@ namespace
 
 const aeron_udp_channel_transport_bindings_t* g_default = nullptr;
 stack::Stack* g_stack = nullptr;
+Port* g_port = nullptr;
+Mempool* g_pool = nullptr;
+
+struct CounterAddresses
+{
+    std::int64_t* port_info{nullptr};
+    std::int64_t* nobufs{nullptr};
+    std::int64_t* tx_eagain{nullptr};
+    std::int64_t* error{nullptr};
+    std::int64_t* pkts{nullptr};
+    std::int64_t* bytes{nullptr};
+    std::int64_t* missed{nullptr};
+    std::int64_t* arp_miss{nullptr};
+    std::int64_t* rx_sender_discard{nullptr};
+    std::int64_t* poller{nullptr};
+    std::int64_t* queue_drop{nullptr};
+    std::int64_t* checksum_failure{nullptr};
+    std::int64_t* fragmented{nullptr};
+    std::int64_t* mempool_available{nullptr};
+    std::int64_t* extended_stats{nullptr};
+    std::int64_t* unsupported_ethernet_type{nullptr};
+    std::int64_t* unsupported_protocol{nullptr};
+    std::int64_t* rx_receiver_discard{nullptr};
+};
+
+CounterAddresses g_counters{};
+bool g_counters_ready = false;
+std::int64_t g_next_stats_ns = 0;
 
 struct TransportState
 {
     std::optional<ports::Binding> binding;
+    std::int64_t* counter{nullptr};
     std::vector<std::uint8_t> scratch;
 };
+
+[[nodiscard]] std::int64_t* allocate_counter(aeron_driver_context_t* context, std::int32_t type_id, const void* key,
+                                             std::size_t key_length) noexcept
+{
+    auto* manager = context->counters_manager;
+    if (nullptr == manager)
+    {
+        return nullptr;
+    }
+    const std::string_view label = counters::label(type_id);
+    const std::int32_t id = aeron_counters_manager_allocate(manager, type_id, static_cast<const std::uint8_t*>(key),
+                                                            key_length, label.data(), label.size());
+    return id < 0 ? nullptr : aeron_counters_manager_addr(manager, id);
+}
+
+struct PortCounterKey
+{
+    std::uint16_t index;
+    std::uint16_t type;
+};
+
+void allocate_one(aeron_driver_context_t* context, std::int32_t type_id, std::int64_t*& slot)
+{
+    const PortCounterKey key{0, static_cast<std::uint16_t>(type_id)};
+    slot = allocate_counter(context, type_id, &key, sizeof(key));
+}
+
+void allocate_port_counters(aeron_driver_context_t* context) noexcept
+{
+    if (g_counters_ready || nullptr == context->counters_manager)
+    {
+        return;
+    }
+    allocate_one(context, counters::PORT_INFO, g_counters.port_info);
+    allocate_one(context, counters::NOBUFS, g_counters.nobufs);
+    allocate_one(context, counters::TX_EAGAIN, g_counters.tx_eagain);
+    allocate_one(context, counters::ERROR, g_counters.error);
+    allocate_one(context, counters::PKTS, g_counters.pkts);
+    allocate_one(context, counters::BYTES, g_counters.bytes);
+    allocate_one(context, counters::MISSED_PACKETS, g_counters.missed);
+    allocate_one(context, counters::ARP_MISS, g_counters.arp_miss);
+    allocate_one(context, counters::RX_SENDER_DISCARD, g_counters.rx_sender_discard);
+    allocate_one(context, counters::POLLER, g_counters.poller);
+    allocate_one(context, counters::QUEUE_DROP_COUNT, g_counters.queue_drop);
+    allocate_one(context, counters::CHECKSUM_FAILURE, g_counters.checksum_failure);
+    allocate_one(context, counters::FRAGMENTED_PACKETS, g_counters.fragmented);
+    allocate_one(context, counters::MEMPOOL_AVAILABLE, g_counters.mempool_available);
+    allocate_one(context, counters::EXTENDED_STATS, g_counters.extended_stats);
+    allocate_one(context, counters::RX_UNSUPPORTED_ETHERNET_TYPE, g_counters.unsupported_ethernet_type);
+    allocate_one(context, counters::RX_UNSUPPORTED_PROTOCOL, g_counters.unsupported_protocol);
+    allocate_one(context, counters::RX_RECEIVER_DISCARD, g_counters.rx_receiver_discard);
+    g_counters_ready = true;
+}
+
+void set_counter(std::int64_t* address, std::uint64_t value) noexcept
+{
+    if (nullptr != address)
+    {
+        aeron_counter_set_release(address, static_cast<std::int64_t>(value));
+    }
+}
+
+void mirror_stack_counters() noexcept
+{
+    if (nullptr == g_stack)
+    {
+        return;
+    }
+    auto& source = g_stack->counters();
+    set_counter(g_counters.arp_miss, source.arp_miss.load(std::memory_order_relaxed));
+    set_counter(g_counters.rx_sender_discard, source.rx_sender_discard.load(std::memory_order_relaxed));
+    set_counter(g_counters.queue_drop, source.queue_drop.load(std::memory_order_relaxed));
+    set_counter(g_counters.checksum_failure, source.checksum_failure.load(std::memory_order_relaxed));
+    set_counter(g_counters.fragmented, source.fragmented.load(std::memory_order_relaxed));
+    set_counter(g_counters.unsupported_ethernet_type, source.unsupported_ethernet_type.load(std::memory_order_relaxed));
+    set_counter(g_counters.unsupported_protocol, source.unsupported_protocol.load(std::memory_order_relaxed));
+    set_counter(g_counters.rx_receiver_discard, source.rx_receiver_discard.load(std::memory_order_relaxed));
+    set_counter(g_counters.tx_eagain, source.tx_eagain.load(std::memory_order_relaxed));
+}
+
+void update_port_counters() noexcept
+{
+    const std::int64_t now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now < g_next_stats_ns)
+    {
+        return;
+    }
+    g_next_stats_ns = now + 1000LL * 1000 * 1000;
+
+    if (nullptr != g_port)
+    {
+        if (const auto stats = g_port->stats(); stats)
+        {
+            set_counter(g_counters.pkts, stats->ipackets);
+            set_counter(g_counters.bytes, stats->ibytes);
+            set_counter(g_counters.missed, stats->imissed);
+        }
+        set_counter(g_counters.extended_stats, static_cast<std::uint64_t>(g_port->xstats_count()));
+    }
+    if (nullptr != g_pool)
+    {
+        set_counter(g_counters.mempool_available, g_pool->available());
+    }
+}
 
 struct PollerState
 {
@@ -173,6 +313,20 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
         }
     }
 
+    if (context->counters_manager)
+    {
+        struct TransportKey
+        {
+            std::uint32_t address;
+            std::uint16_t port;
+            std::uint16_t type;
+        };
+        const TransportKey key{address.value_or(g_stack->params().address),
+                               static_cast<std::uint16_t>(local_port(transport).value_or(0)),
+                               static_cast<std::uint16_t>(counters::TRANSPORT)};
+        state->counter = allocate_counter(context, counters::TRANSPORT, &key, sizeof(key));
+    }
+
     state->scratch.resize(g_stack->params().mtu);
     transport->bindings_clientd = state.release();
     return 0;
@@ -281,6 +435,7 @@ extern "C" int dpdk_poller_init(aeron_udp_transport_poller_t* poller, aeron_driv
         return -1;
     }
     state->inner_ready = true;
+    allocate_port_counters(context);
     state->buffer.resize(g_stack->params().mtu);
     poller->bindings_clientd = state.release();
     return 0;
@@ -335,6 +490,12 @@ extern "C" int dpdk_poller_poll(aeron_udp_transport_poller_t* poller, struct mms
     if (state->receiver)
     {
         work += g_stack->pump();
+        mirror_stack_counters();
+        update_port_counters();
+    }
+    if (nullptr != g_counters.poller)
+    {
+        aeron_counter_increment(g_counters.poller);
     }
 
     for (auto* transport : state->transports)
@@ -386,7 +547,8 @@ aeron_udp_channel_transport_bindings_t g_bindings = {
 
 }  // namespace
 
-std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack& target) noexcept
+std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack& target, Port* port,
+                                   Mempool* pool) noexcept
 {
     if (nullptr == context)
     {
@@ -412,6 +574,8 @@ std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack
 
     g_default = defaults;
     g_stack = &target;
+    g_port = port;
+    g_pool = pool;
     (void)aeron_driver_context_set_udp_channel_transport_bindings(context, &g_bindings);
     return {};
 }
