@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -125,45 +126,77 @@ class ThreeNodeRig : public ::testing::Test
 protected:
     void SetUp() override
     {
+        if (!set_up_environment())
+        {
+            return;
+        }
+        compile_probes();
+    }
+
+    /// Checks the binaries and creates the round root. C6c's election-trigger
+    /// cases only read counters, so they can skip the Java probe compile.
+    [[nodiscard]] bool set_up_environment()
+    {
+        // `GTEST_SKIP()` expands to a `return`; wrap it so this helper can
+        // report "skipped" and still return a bool.
+        const auto skip = [](const std::string& message) { GTEST_SKIP() << message; };
+
         const std::string jar = aeron_jar();
         if (jar.empty() || !std::filesystem::exists(jar))
         {
-            GTEST_SKIP() << "reference jar not found (set AXC_AERON_JAR): " << jar;
+            skip("reference jar not found (set AXC_AERON_JAR): " + jar);
+            return false;
         }
         jar_ = jar;
+        if (!std::filesystem::exists(AXC_CLUSTER_NODE_BIN) || !std::filesystem::exists(AXC_CONTAINER_BINARY) ||
+            !std::filesystem::exists(AXC_AERONMD_DEFAULT))
+        {
+            skip("cluster binaries or aeronmd not found");
+            return false;
+        }
+
+        std::string pattern = "/tmp/axc-c6a-three-XXXXXX";
+        const char* created = ::mkdtemp(pattern.data());
+        EXPECT_NE(nullptr, created);
+        if (nullptr == created)
+        {
+            return false;
+        }
+        root_dir_ = created;
+        classes_dir_ = root_dir_ + "/classes";
+        std::filesystem::create_directories(classes_dir_);
+        return true;
+    }
+
+    void compile_probes()
+    {
         if (!std::filesystem::exists("/usr/bin/javac") && !std::filesystem::exists("/usr/local/bin/javac"))
         {
             GTEST_SKIP() << "javac not found: the probes cannot be compiled";
+            return;
         }
         const std::string root = tests_root();
         if (root.empty())
         {
             GTEST_SKIP() << "AXC_AERON_TESTS is not set; the fork's probe sources are required";
+            return;
         }
         const std::string probe = find_probe(root, "ClusterEchoClientProbe.java");
         if (probe.empty())
         {
             GTEST_SKIP() << "ClusterEchoClientProbe.java not found under " << root;
+            return;
         }
-        if (!std::filesystem::exists(AXC_CLUSTER_NODE_BIN) || !std::filesystem::exists(AXC_CONTAINER_BINARY) ||
-            !std::filesystem::exists(AXC_AERONMD_DEFAULT))
-        {
-            GTEST_SKIP() << "cluster binaries or aeronmd not found";
-        }
-
-        std::string pattern = "/tmp/axc-c6a-three-XXXXXX";
-        const char* created = ::mkdtemp(pattern.data());
-        ASSERT_NE(nullptr, created);
-        root_dir_ = created;
-        classes_dir_ = root_dir_ + "/classes";
-        std::filesystem::create_directories(classes_dir_);
 
         axc::interop::ProcessOptions compile;
         compile.arguments = {"-proc:none", "-cp", jar_, "-d", classes_dir_, probe};
         compile.timeout = std::chrono::seconds(120);
         auto compiled = axc::interop::run_process("javac", compile);
-        ASSERT_TRUE(compiled) << compiled.error().message.view();
-        ASSERT_EQ(0, compiled->exit_code) << compiled->output;
+        EXPECT_TRUE(compiled) << compiled.error().message.view();
+        if (compiled)
+        {
+            EXPECT_EQ(0, compiled->exit_code) << compiled->output;
+        }
     }
 
     void TearDown() override
@@ -277,6 +310,13 @@ protected:
                 << "aeron.cluster.log.control.enable=true\n"
                 << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << ports.archive_control[i] << "\n"
                 << "aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0\n";
+
+            // C6c: per-node overrides (e.g. `aeron.image.liveness.timeout` for
+            // the silent-leader test). Later names win in the property source.
+            for (const auto& [name, value] : node_property_overrides_[i])
+            {
+                out << name << "=" << value << "\n";
+            }
         }
     }
 
@@ -476,6 +516,25 @@ protected:
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         process.reset();
+    }
+
+    /// SIGSTOP/SIGCONT a node: the process and its driver stay alive, but the
+    /// consensus module stops sending or answering. C6c's election triggers
+    /// need exactly this shape (a silent leader/follower, not a dead one).
+    void pause_node(int index)
+    {
+        if (nodes_[index])
+        {
+            (void)::kill(nodes_[index]->pid(), SIGSTOP);
+        }
+    }
+
+    void resume_node(int index)
+    {
+        if (nodes_[index])
+        {
+            (void)::kill(nodes_[index]->pid(), SIGCONT);
+        }
     }
 
     [[nodiscard]] DeepmsgClient* node_client(int index)
@@ -827,6 +886,7 @@ protected:
     std::string root_dir_{};
     std::string classes_dir_{};
     std::string client_aeron_dir_{};
+    std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[NODES]{};
     std::unique_ptr<ChildProcess> containers_[NODES]{};

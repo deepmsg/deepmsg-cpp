@@ -963,6 +963,30 @@ int ConsensusModuleAgent::slow_tick_work(std::int64_t now_ns) noexcept
             session_manager_->check_sessions(now_ns, leadership_term_id_, leader_member_.id, ingress_endpoints_);
     }
 
+    // `ConsensusModuleAgent.slowTickWork:2438-2441`: a leader that can no
+    // longer see a follower quorum steps down. A single-member cluster is
+    // exempt: it is its own quorum (`activeMembers.length > 1`).
+    if (nullptr == election_ && ClusterRole::leader == role_ && state_ == ConsensusModuleState::active &&
+        active_members_.size() > 1 &&
+        !common::has_active_quorum(active_members_, now_ns, config_.leader_heartbeat_timeout_ns))
+    {
+        enter_election(false, "inactive follower quorum");
+        ++work_count;
+    }
+
+    // `ConsensusModuleAgent.slowTickWork:2463-2467`: a follower that has not
+    // seen the leader's log update for a heartbeat timeout starts an election.
+    // `enter_election` above sets `election_`, so the two triggers cannot fire
+    // in the same tick.
+    if (nullptr == election_ && ClusterRole::follower == role_ &&
+        (ConsensusModuleState::active == state_ || ConsensusModuleState::suspended == state_) &&
+        now_ns >= (time_of_last_log_update_ns_ + config_.leader_heartbeat_timeout_ns) &&
+        NULL_POSITION == termination_position_)
+    {
+        enter_election(false, "leader heartbeat timeout");
+        ++work_count;
+    }
+
     // `ConsensusModuleAgent.slowTickWork:2473-2476`: the node toggle is read
     // for both roles once ACTIVE and no election is running.
     if (nullptr == election_ && ConsensusModuleState::active == state_)
@@ -4208,6 +4232,12 @@ void ConsensusModuleAgent::on_new_leadership_term(
     std::int32_t leader_member_id, std::int32_t log_session_id, std::int32_t app_version, bool is_startup)
 {
     (void)app_version;
+    const std::int64_t now = now_ns();
+    if (leadership_term_id >= leadership_term_id_)
+    {
+        time_of_last_leader_update_ns_ = now;
+    }
+
     if (nullptr != election_)
     {
         auto handled = election_->on_new_leadership_term(
@@ -4218,6 +4248,22 @@ void ConsensusModuleAgent::on_new_leadership_term(
         {
             report(handled.error());
         }
+    }
+    else if (ClusterRole::follower == role_ && leadership_term_id == leadership_term_id_ &&
+             leader_member_id == leader_member_.id)
+    {
+        // `ConsensusModuleAgent.onNewLeadershipTerm:1063-1070`: a steady-state
+        // follower accepts the current leader's term event as a heartbeat.
+        notified_commit_position_ = std::max(notified_commit_position_, commit_position);
+        time_of_last_log_update_ns_ = now;
+    }
+    else if (leadership_term_id > leadership_term_id_)
+    {
+        // `ConsensusModuleAgent.onNewLeadershipTerm:1071-1075`: the event names
+        // a newer term, so a new election is already in progress elsewhere.
+        enter_election(false, "unexpected new leadership term event: this.leadershipTermId=" +
+                                  std::to_string(leadership_term_id_) +
+                                  " newLeadershipTermId=" + std::to_string(leadership_term_id));
     }
 }
 
@@ -4253,7 +4299,7 @@ void ConsensusModuleAgent::on_append_position(std::int64_t leadership_term_id, s
 void ConsensusModuleAgent::on_commit_position(std::int64_t leadership_term_id, std::int64_t log_position,
                                               std::int32_t leader_member_id)
 {
-    // `ConsensusModuleAgent.onCommitPosition:1108-1132`.
+    // `ConsensusModuleAgent.onCommitPosition:1108-1140`.
     const std::int64_t now = now_ns();
     if (leadership_term_id >= leadership_term_id_)
     {
@@ -4273,6 +4319,18 @@ void ConsensusModuleAgent::on_commit_position(std::int64_t leadership_term_id, s
     {
         notified_commit_position_ = std::max(notified_commit_position_, log_position);
         time_of_last_log_update_ns_ = now;
+    }
+    else if (leadership_term_id > leadership_term_id_)
+    {
+        // `ConsensusModuleAgent.onCommitPosition:1129-1140`: a new leader has
+        // already been elected elsewhere; step into an election instead of
+        // waiting for the log image to close.
+        enter_election(false, "unexpected commit position from new leader - this.leadershipTermId=" +
+                                  std::to_string(leadership_term_id_) +
+                                  " newLeadershipTermId=" + std::to_string(leadership_term_id) +
+                                  " this.leaderMemberId=" + std::to_string(leader_member_.id) +
+                                  " this.commitPosition=" + std::to_string(commit_position()) +
+                                  " this.appendPosition=" + std::to_string(append_position()));
     }
 }
 

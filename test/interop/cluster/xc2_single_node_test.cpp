@@ -112,20 +112,59 @@ class Xc2SingleNodeTest : public ::testing::Test
 protected:
     void SetUp() override
     {
+        if (!set_up_environment())
+        {
+            return;
+        }
+        compile_probes();
+    }
+
+    [[nodiscard]] bool set_up_environment()
+    {
+        const auto skip = [](const std::string& message) { GTEST_SKIP() << message; };
+
         const std::string jar = aeron_jar();
         if (jar.empty() || !std::filesystem::exists(jar))
         {
-            GTEST_SKIP() << "reference jar not found (set AXC_AERON_JAR): " << jar;
+            skip("reference jar not found (set AXC_AERON_JAR): " + jar);
+            return false;
         }
         jar_ = jar;
+        if (!std::filesystem::exists(AXC_CLUSTER_NODE_BIN) || !std::filesystem::exists(AXC_CONTAINER_BINARY))
+        {
+            skip("cluster binaries not found");
+            return false;
+        }
+
+        std::string pattern = "/tmp/axc-c4f-xc2-XXXXXX";
+        const char* created = ::mkdtemp(pattern.data());
+        EXPECT_NE(nullptr, created);
+        if (nullptr == created)
+        {
+            return false;
+        }
+        directory_ = created;
+        aeron_dir_ = directory_ + "/aeron";
+        cluster_dir_ = directory_ + "/cluster";
+        archive_dir_ = directory_ + "/archive";
+        classes_dir_ = directory_ + "/classes";
+        std::filesystem::create_directories(classes_dir_);
+        log_port_ = 24500 + (static_cast<int>(::getpid()) % 500);
+        return true;
+    }
+
+    void compile_probes()
+    {
         if (!std::filesystem::exists("/usr/bin/javac") && !std::filesystem::exists("/usr/local/bin/javac"))
         {
             GTEST_SKIP() << "javac not found: the probes cannot be compiled";
+            return;
         }
         const std::string root = tests_root();
         if (root.empty())
         {
             GTEST_SKIP() << "AXC_AERON_TESTS is not set; the fork's probe sources are required";
+            return;
         }
         for (const char* const name : {"ClusterEchoClientProbe.java", "ClusterTimerClientProbe.java",
                                        "ClusterAdminRequestProbe.java", "ClusterSessionEventProbe.java"})
@@ -134,24 +173,10 @@ protected:
             if (path.empty())
             {
                 GTEST_SKIP() << "probe source not found under " << root << ": " << name;
+                return;
             }
             probe_sources_.push_back(path);
         }
-        if (!std::filesystem::exists(AXC_CLUSTER_NODE_BIN) || !std::filesystem::exists(AXC_CONTAINER_BINARY))
-        {
-            GTEST_SKIP() << "cluster binaries not found";
-        }
-
-        std::string pattern = "/tmp/axc-c4f-xc2-XXXXXX";
-        const char* created = ::mkdtemp(pattern.data());
-        ASSERT_NE(nullptr, created);
-        directory_ = created;
-        aeron_dir_ = directory_ + "/aeron";
-        cluster_dir_ = directory_ + "/cluster";
-        archive_dir_ = directory_ + "/archive";
-        classes_dir_ = directory_ + "/classes";
-        std::filesystem::create_directories(classes_dir_);
-        log_port_ = 24500 + (static_cast<int>(::getpid()) % 500);
 
         axc::interop::ProcessOptions compile;
         compile.arguments = {"-proc:none", "-cp", jar_, "-d", classes_dir_};
@@ -161,8 +186,11 @@ protected:
         }
         compile.timeout = std::chrono::seconds(120);
         auto compiled = axc::interop::run_process("javac", compile);
-        ASSERT_TRUE(compiled) << compiled.error().message.view();
-        ASSERT_EQ(0, compiled->exit_code) << compiled->output;
+        EXPECT_TRUE(compiled) << compiled.error().message.view();
+        if (compiled)
+        {
+            EXPECT_EQ(0, compiled->exit_code) << compiled->output;
+        }
     }
 
     void TearDown() override
@@ -407,6 +435,20 @@ protected:
     std::unique_ptr<ChildProcess> node_{};
     std::unique_ptr<ChildProcess> container_{};
     std::unique_ptr<DeepmsgClient> client_{};
+};
+
+/// The election-trigger cases only read counters; they run without the fork's
+/// Java probes.
+class Xc2SingleNodeElectionTest : public Xc2SingleNodeTest
+{
+protected:
+    void SetUp() override
+    {
+        if (!set_up_environment())
+        {
+            return;
+        }
+    }
 };
 
 TEST_F(Xc2SingleNodeTest, theNodeStartsAndEchoes)
@@ -655,6 +697,31 @@ TEST_F(Xc2SingleNodeTest, shutdownTerminatesBothProcesses)
 
     ASSERT_TRUE(node_ && !node_->running()) << "the node did not stop" << log_text("node");
     ASSERT_TRUE(container_ && !container_->running()) << "the container did not stop" << log_text("container");
+}
+
+TEST_F(Xc2SingleNodeElectionTest, aSingleNodeDoesNotEnterAnElectionOnItsOwn)
+{
+    start();
+
+    const std::int64_t term_before = cluster_counter(deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+    ASSERT_EQ(2, cluster_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID))
+        << "node=" << (node_ && node_->running() ? "running" : "stopped")
+        << " container=" << (container_ && container_->running() ? "running" : "stopped")
+        << " client=" << (client_ ? "yes" : "no") << log_text("node") << log_text("container");
+
+    // The default leader heartbeat timeout is 10s; wait past it. A single
+    // member is its own quorum, so `slowTickWork:2438` must not fire.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        // Keep the counter client's conductor serviced while we wait.
+        (void)cluster_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    EXPECT_EQ(2, cluster_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID)) << log_text("node");
+    EXPECT_EQ(term_before, cluster_counter(deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID))
+        << log_text("node");
 }
 
 }  // namespace
