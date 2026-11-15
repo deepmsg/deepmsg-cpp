@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/error/error.h"
 #include "core/media/dpdk/stack/frame.h"
 #include "core/media/dpdk/stack/neighbour.h"
 #include "core/media/dpdk/stack/packet_io.h"
@@ -52,6 +53,8 @@ struct StackCounters
     std::atomic<std::uint64_t> unsupported_protocol{0};       // 94
     std::atomic<std::uint64_t> rx_receiver_discard{0};        // 95
     std::atomic<std::uint64_t> tx_eagain{0};                  // 78
+    std::atomic<std::uint64_t> nobufs{0};                     // 77
+    std::atomic<std::uint64_t> errors{0};                     // 79
 };
 
 class Stack
@@ -102,9 +105,11 @@ public:
     std::size_t pump();
 
     /// One datagram to `destination` from `binding`. Answers the payload bytes
-    /// taken, or zero for back pressure (no MAC yet, or the port refused it).
-    std::size_t send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
-                     std::span<const std::uint8_t> payload);
+    /// taken, zero for back pressure (no MAC yet, or the port refused it), or
+    /// an error when the datagram cannot travel at all -- it is larger than
+    /// this port's MTU allows (counter 79).
+    [[nodiscard]] std::expected<std::size_t, Error> send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
+                                                         std::span<const std::uint8_t> payload);
 
     /// Copy the next datagram for `binding` into `buffer`; answers its length,
     /// or zero when none is waiting.
@@ -147,6 +152,7 @@ private:
     void reset_ring(const ports::Binding& binding);
     void clear_ring(std::uint16_t slot);
     std::size_t send_frame(std::span<const std::uint8_t> frame, packet_io::TxPort& port);
+    void note_tx_result(const packet_io::TxResult& result) noexcept;
 
     StackParams params_;
     ports::PortTable ports_;

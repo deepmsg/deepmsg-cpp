@@ -25,6 +25,15 @@ namespace
 std::expected<EmbeddedDriver, Error> EmbeddedDriver::create(const PropertySource& properties, TerminationHook hook,
                                                             void* state) noexcept
 {
+    // The reference's media-selection name must be answered before the context
+    // exists: `aeron_driver_context_init` resolves it and knows only `default`
+    // (`plan-dpdk-media.md` §4.8).
+    PropertySource effective = properties;
+    if (auto aliased = media::dpdk::apply_reference_media_alias(effective); !aliased)
+    {
+        return std::unexpected(aliased.error());
+    }
+
     aeron_driver_context_t* context = nullptr;
     if (0 != aeron_driver_context_init(&context))
     {
@@ -36,7 +45,7 @@ std::expected<EmbeddedDriver, Error> EmbeddedDriver::create(const PropertySource
         (void)aeron_driver_context_set_driver_termination_hook(context, hook, state);
     }
 
-    auto media = media::dpdk::install_if_configured(context, properties);
+    auto media = media::dpdk::install_if_configured(context, effective);
     if (!media)
     {
         (void)aeron_driver_context_close(context);

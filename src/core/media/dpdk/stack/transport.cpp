@@ -18,16 +18,17 @@ Transport::~Transport()
     close();
 }
 
-std::size_t Transport::send(std::span<const std::uint8_t> payload)
+std::expected<std::size_t, Error> Transport::send(std::span<const std::uint8_t> payload)
 {
     if (!peer_)
     {
-        return 0;
+        return std::size_t{0};
     }
     return stack_->send(binding_, *peer_, payload);
 }
 
-std::size_t Transport::send_to(ports::Ipv4Endpoint destination, std::span<const std::uint8_t> payload)
+std::expected<std::size_t, Error> Transport::send_to(ports::Ipv4Endpoint destination,
+                                                     std::span<const std::uint8_t> payload)
 {
     return stack_->send(binding_, destination, payload);
 }

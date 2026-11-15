@@ -89,7 +89,7 @@ std::size_t DpdkPort::mtu() const noexcept
     return mtu_;
 }
 
-std::size_t DpdkPort::tx_burst(std::size_t count, packet_io::TxFill fill, void* context)
+packet_io::TxResult DpdkPort::tx_burst(std::size_t count, packet_io::TxFill fill, void* context)
 {
     const auto burst = static_cast<unsigned>(std::min<std::size_t>(count, SHIM_BURST_MAX));
     const std::size_t allocated = port_->tx_alloc(*pool_, tx_scratch_.data(), burst);
@@ -116,11 +116,15 @@ std::size_t DpdkPort::tx_burst(std::size_t count, packet_io::TxFill fill, void* 
         tx_written_[written++] = slot;
     }
 
+    // An empty pool is counter 77 and a ring that will not take the frame is
+    // counter 78; the caller cannot tell them apart from `taken` alone.
+    const auto not_allocated = static_cast<std::size_t>(burst - allocated);
     if (0 == written)
     {
-        return 0;
+        return packet_io::TxResult{0, not_allocated};
     }
-    return port_->tx_burst(tx_queue_, tx_written_.data(), static_cast<unsigned>(written));
+    return packet_io::TxResult{port_->tx_burst(tx_queue_, tx_written_.data(), static_cast<unsigned>(written)),
+                               not_allocated};
 }
 
 frame::L4Checksum DpdkPort::checksums() const noexcept

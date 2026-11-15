@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +21,7 @@
 #include <iterator>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <sys/wait.h>
@@ -220,7 +222,7 @@ TEST(DpdkMediaChild, TheStackReceivesAndSendsOnAPcapPort)
     EXPECT_EQ(payload[4], received[4]);
 
     const std::array<std::uint8_t, 3> outbound{1, 2, 3};
-    EXPECT_EQ(outbound.size(), stack->send(*binding, {0x0a0a0002, 6000}, outbound));
+    EXPECT_EQ(outbound.size(), *stack->send(*binding, {0x0a0a0002, 6000}, outbound));
 
     EXPECT_TRUE(media->close().has_value());
 
@@ -459,6 +461,242 @@ TEST(DpdkMedia, TheMediaLineIsOnStdout)
         << output;
     EXPECT_NE(std::string::npos, output.find("dpdk media closed")) << output;
     (void)std::remove(MEDIA_LINE_PATH);
+}
+
+namespace
+{
+
+constexpr const char* OVERSIZE_PCAP_PATH = "/tmp/axc-dpdk-oversize.pcap";
+constexpr const char* CLUSTER_FREE_PORT = "24610";
+constexpr std::size_t OVERSIZE_PAYLOAD = 1500;
+
+/// The driver's error log, read off the running driver's CnC.
+struct ErrorLogSeen
+{
+    bool ours{false};
+};
+
+void on_error_log_entry(int32_t /*observation_count*/, int64_t /*first*/, int64_t /*last*/, const char* error,
+                        size_t error_length, void* clientd)
+{
+    auto* seen = static_cast<ErrorLogSeen*>(clientd);
+    const std::string message{error, error_length};
+    if (std::string::npos != message.find("larger than the port allows"))
+    {
+        seen->ours = true;
+    }
+}
+
+}  // namespace
+
+// A datagram the port cannot frame is refused at the seam with `EMSGSIZE`, not
+// answered with back pressure: `dpdk_send` returns -1, the driver logs it
+// (`aeron_driver_sender.c:433-437`) and counter 79 moves. The channel's MTU
+// (`aeron.mtu.length`) is the driver's and is deliberately larger here than
+// the port's 1500.
+TEST(DpdkOversizeChild, ThePortRefusesADatagramItCannotFrame)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)std::remove(OVERSIZE_PCAP_PATH);
+    char directory[] = "/tmp/axc-dpdk-oversize-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)::aeron_properties_setenv("aeron.mtu.length", "1600");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + OVERSIZE_PCAP_PATH);
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+
+    aeron_context_t* context = nullptr;
+    aeron_t* client = nullptr;
+    ASSERT_EQ(0, aeron_context_init(&context));
+    ASSERT_EQ(0, aeron_context_set_dir(context, directory));
+    (void)aeron_context_set_use_conductor_agent_invoker(context, true);
+    ASSERT_EQ(0, aeron_init(&client, context));
+
+    const std::string channel = std::string{"aeron:udp?endpoint=10.10.0.1:"} + CLUSTER_FREE_PORT;
+    aeron_async_add_subscription_t* sub_add = nullptr;
+    aeron_async_add_publication_t* pub_add = nullptr;
+    ASSERT_EQ(
+        0, aeron_async_add_subscription(&sub_add, client, channel.c_str(), 1001, nullptr, nullptr, nullptr, nullptr));
+    ASSERT_EQ(0, aeron_async_add_publication(&pub_add, client, channel.c_str(), 1001));
+    aeron_subscription_t* subscription = nullptr;
+    aeron_publication_t* publication = nullptr;
+    for (int attempt = 0; attempt < 3000 && (nullptr == subscription || nullptr == publication); ++attempt)
+    {
+        (void)aeron_main_do_work(client);
+        if (nullptr == subscription)
+        {
+            (void)aeron_async_add_subscription_poll(&subscription, sub_add);
+        }
+        if (nullptr == publication)
+        {
+            (void)aeron_async_add_publication_poll(&publication, pub_add);
+        }
+        ::usleep(1000);
+    }
+    ASSERT_NE(nullptr, subscription);
+    ASSERT_NE(nullptr, publication);
+
+    const std::string payload(OVERSIZE_PAYLOAD, 'z');
+    bool offered = false;
+    for (int attempt = 0; attempt < 3000 && !offered; ++attempt)
+    {
+        (void)aeron_main_do_work(client);
+        offered = 0 < aeron_publication_offer(publication, reinterpret_cast<const std::uint8_t*>(payload.data()),
+                                              payload.size(), nullptr, nullptr);
+        ::usleep(1000);
+    }
+    ASSERT_TRUE(offered) << "the client never accepted the payload";
+
+    // Counter 79 is mirrored from the stack on every receive poll.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::int64_t errors = 0;
+    while (std::chrono::steady_clock::now() < deadline && 0 == errors)
+    {
+        (void)aeron_main_do_work(client);
+        auto* reader = aeron_counters_reader(client);
+        ASSERT_NE(nullptr, reader);
+        const std::int32_t max_id = aeron_counters_reader_max_counter_id(reader);
+        for (std::int32_t id = 0; id < max_id && 0 == errors; ++id)
+        {
+            char label[256] = {};
+            const int length = aeron_counters_reader_counter_label(reader, id, label, sizeof(label));
+            if (length > 0 && std::string_view{label, static_cast<std::size_t>(length)} == "dpdk error")
+            {
+                const std::int64_t* address = aeron_counters_reader_addr(reader, id);
+                errors = nullptr == address ? 0 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
+            }
+        }
+        ::usleep(1000);
+    }
+    EXPECT_GE(errors, 1) << "counter 79 did not move";
+
+    ErrorLogSeen seen;
+    aeron_cnc_t* cnc = nullptr;
+    ASSERT_EQ(0, aeron_cnc_init(&cnc, directory, 5000));
+    (void)aeron_cnc_error_log_read(cnc, &on_error_log_entry, &seen, 0);
+    EXPECT_TRUE(seen.ours) << "the driver's error log has no 'larger than the port allows'";
+    aeron_cnc_close(cnc);
+
+    (void)aeron_publication_close(publication, nullptr, nullptr);
+    (void)aeron_subscription_close(subscription, nullptr, nullptr);
+    (void)aeron_close(client);
+    (void)aeron_context_close(context);
+    EXPECT_TRUE(driver->close().has_value());
+    std::filesystem::remove_all(directory);
+    (void)std::remove(OVERSIZE_PCAP_PATH);
+}
+
+TEST(DpdkOversize, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe",
+                "--gtest_filter=DpdkOversizeChild.ThePortRefusesADatagramItCannotFrame", "--gtest_color=no",
+                static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
+namespace
+{
+
+constexpr const char* ALIAS_LINE_PATH = "/tmp/axc-dpdk-alias-line.txt";
+constexpr const char* ALIAS_PCAP_PATH = "/tmp/axc-dpdk-alias.pcap";
+
+}  // namespace
+
+// `aeron.udp.channel.transport.bindings.media=dpdk` is the reference's name for
+// a media the C driver cannot resolve (it knows `default`, and a `dpdk` symbol is
+// not exported). The launcher answers `default` and turns the switch on before
+// the context exists; without both halves this driver does not start at all.
+TEST(DpdkAliasChild, TheReferenceMediaNameIsTheAlias)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)std::remove(ALIAS_PCAP_PATH);
+    char directory[] = "/tmp/axc-dpdk-alias-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    // What a launcher's `aeron.*` push does; `aeron_driver_context_init` reads it.
+    (void)::aeron_properties_setenv("aeron.udp.channel.transport.bindings.media", "dpdk");
+
+    axc::core::PropertySource properties;
+    properties.set("aeron.udp.channel.transport.bindings.media", "dpdk");
+    properties.set("deepmsg.dpdk.eal.args",
+                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + ALIAS_PCAP_PATH);
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+    EXPECT_TRUE(driver->close().has_value());
+    std::filesystem::remove_all(directory);
+    (void)std::remove(ALIAS_PCAP_PATH);
+}
+
+TEST(DpdkAlias, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    (void)std::remove(ALIAS_LINE_PATH);
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+
+    if (0 == child)
+    {
+        const int output = ::open(ALIAS_LINE_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (0 > output || 0 > ::dup2(output, STDOUT_FILENO))
+        {
+            ::_exit(127);
+        }
+        (void)::close(output);
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkAliasChild.TheReferenceMediaNameIsTheAlias",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(0, WEXITSTATUS(status)) << "the child failed; what it wrote is in " << ALIAS_LINE_PATH;
+
+    std::ifstream input{ALIAS_LINE_PATH};
+    ASSERT_TRUE(input);
+    const std::string output{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+    EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0 (net_pcap), address 10.10.0.1/24, mtu "))
+        << output;
+    (void)std::remove(ALIAS_LINE_PATH);
 }
 
 #endif  // AXC_WITH_DPDK

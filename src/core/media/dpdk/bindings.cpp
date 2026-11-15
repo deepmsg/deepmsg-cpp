@@ -1,6 +1,7 @@
 #include "core/media/dpdk/bindings.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -25,6 +26,7 @@ extern "C"
 #include "media/aeron_udp_channel_transport.h"
 #include "media/aeron_udp_channel_transport_bindings.h"
 #include "media/aeron_udp_transport_poller.h"
+#include "util/aeron_error.h"
 }
 
 #include "core/media/dpdk/counters.h"
@@ -154,6 +156,8 @@ void mirror_stack_counters() noexcept
     set_counter(g_counters.unsupported_protocol, source.unsupported_protocol.load(std::memory_order_relaxed));
     set_counter(g_counters.rx_receiver_discard, source.rx_receiver_discard.load(std::memory_order_relaxed));
     set_counter(g_counters.tx_eagain, source.tx_eagain.load(std::memory_order_relaxed));
+    set_counter(g_counters.nobufs, source.nobufs.load(std::memory_order_relaxed));
+    set_counter(g_counters.error, source.errors.load(std::memory_order_relaxed));
 }
 
 void update_port_counters() noexcept
@@ -345,7 +349,12 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
         state->counter = allocate_counter(context, counters::TRANSPORT, &key, sizeof(key));
     }
 
-    state->scratch.resize(g_stack->params().mtu);
+    // The datagram is the driver's to size (`aeron.mtu.length`, 1408 by
+    // default) and the frame bound is the port's. Copying only up to the port's
+    // MTU sent anything larger down the kernel fallback in silence, where the
+    // media's own address cannot go; the stack is the one that decides, and it
+    // refuses what it cannot frame (counter 79, `EMSGSIZE`).
+    state->scratch.resize(std::max<std::size_t>(g_stack->params().mtu, params->mtu_length));
     transport->bindings_clientd = state.release();
     return 0;
 }
@@ -422,9 +431,17 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         offset += iov[index].iov_len;
     }
 
-    const std::size_t sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
-                                           std::span<const std::uint8_t>{state->scratch.data(), total});
-    if (0 == sent)
+    const auto sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
+                                    std::span<const std::uint8_t>{state->scratch.data(), total});
+    if (!sent)
+    {
+        // The stack's 79 already counted it; the driver logs the sender error
+        // this return becomes (`aeron_driver_sender.c:433-437`), so a datagram
+        // the port cannot carry is loud instead of an eternal back pressure.
+        AERON_SET_ERR(EMSGSIZE, "%s", std::string{sent.error().message.view()}.c_str());
+        return -1;
+    }
+    if (0 == *sent)
     {
         *bytes_sent = 0;
         return 0;

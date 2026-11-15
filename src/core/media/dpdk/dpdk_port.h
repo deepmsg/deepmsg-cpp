@@ -33,7 +33,7 @@ public:
     [[nodiscard]] std::array<std::uint8_t, 6> mac() const noexcept override;
     [[nodiscard]] std::size_t mtu() const noexcept override;
 
-    std::size_t tx_burst(std::size_t count, packet_io::TxFill fill, void* context) override;
+    packet_io::TxResult tx_burst(std::size_t count, packet_io::TxFill fill, void* context) override;
     [[nodiscard]] frame::L4Checksum checksums() const noexcept override;
 
 private:

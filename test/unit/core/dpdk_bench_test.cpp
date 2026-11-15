@@ -164,7 +164,13 @@ int run_media_side(const BenchSettings& settings, std::uint16_t peer_port, bool 
     std::size_t sent = 0;
     for (int attempt = 0; attempt < 5000 && PAYLOAD_LENGTH != sent; ++attempt)
     {
-        sent = stack->send(*binding, {peer, peer_port}, out);
+        const auto offered = stack->send(*binding, {peer, peer_port}, out);
+        if (!offered)
+        {
+            std::fprintf(stderr, "send: %s\n", std::string{offered.error().message.view()}.c_str());
+            return 1;
+        }
+        sent = *offered;
         if (PAYLOAD_LENGTH != sent)
         {
             (void)stack->pump();  // the ARP answer arrives on this path
@@ -529,7 +535,13 @@ int run_arm_side(Arm arm, const BenchSettings& settings, std::uint16_t peer_port
             std::size_t sent = 0;
             while (RTT_PAYLOAD != sent && std::chrono::steady_clock::now() < deadline)
             {
-                sent = stack->send(*binding, {peer, peer_port}, message);
+                const auto offered = stack->send(*binding, {peer, peer_port}, message);
+                if (!offered)
+                {
+                    std::fprintf(stderr, "media arm: send: %s\n", std::string{offered.error().message.view()}.c_str());
+                    return 1;
+                }
+                sent = *offered;
                 if (RTT_PAYLOAD != sent)
                 {
                     (void)stack->pump();

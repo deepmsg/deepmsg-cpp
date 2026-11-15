@@ -32,6 +32,38 @@ constexpr std::uint32_t PEER = 0x0a0a0002;
 constexpr Mac MAC_A{0x02, 0, 0, 0, 0, 0x01};
 constexpr Mac MAC_B{0x02, 0, 0, 0, 0, 0x02};
 
+/// A transmit port whose pool is always empty: the only way a test reaches
+/// counter 77, because a wire allocates nothing and a real port starves only
+/// under load.
+class StarvedTxPort : public axc::core::media::dpdk::packet_io::TxPort
+{
+public:
+    explicit StarvedTxPort(std::size_t mtu) : mtu_{mtu} {}
+
+    axc::core::media::dpdk::packet_io::TxResult tx_burst(std::size_t count,
+                                                         axc::core::media::dpdk::packet_io::TxFill /*fill*/,
+                                                         void* /*context*/) override
+    {
+        return axc::core::media::dpdk::packet_io::TxResult{0, count};
+    }
+
+    [[nodiscard]] axc::core::media::dpdk::frame::L4Checksum checksums() const noexcept override
+    {
+        return axc::core::media::dpdk::frame::L4Checksum::software;
+    }
+    [[nodiscard]] Mac mac() const noexcept override
+    {
+        return MAC_A;
+    }
+    [[nodiscard]] std::size_t mtu() const noexcept override
+    {
+        return mtu_;
+    }
+
+private:
+    std::size_t mtu_;
+};
+
 StackParams params(std::uint32_t address, Mac mac)
 {
     StackParams result;
@@ -73,11 +105,11 @@ TEST(Stack, ArpResolvesAndAUdpDatagramArrives)
     ASSERT_TRUE(binding_b.has_value());
 
     const std::array<std::uint8_t, 4> payload{1, 2, 3, 4};
-    EXPECT_EQ(0u, a->send(*binding_a, endpoint(PEER, 5001), payload));  // ARP request first
+    EXPECT_EQ(0u, *a->send(*binding_a, endpoint(PEER, 5001), payload));  // ARP request first
     EXPECT_EQ(1u, b->pump());
     EXPECT_EQ(1u, a->pump());
 
-    EXPECT_EQ(4u, a->send(*binding_a, endpoint(PEER, 5001), payload));
+    EXPECT_EQ(4u, *a->send(*binding_a, endpoint(PEER, 5001), payload));
     EXPECT_EQ(1u, b->pump());
 
     std::array<std::uint8_t, 64> received{};
@@ -98,7 +130,7 @@ TEST(Stack, AStaticNeighbourSkipsTheArpExchange)
     ASSERT_TRUE(binding_a.has_value() && binding_b.has_value());
 
     const std::array<std::uint8_t, 2> payload{9, 8};
-    EXPECT_EQ(2u, a->send(*binding_a, endpoint(PEER, 5001), payload));
+    EXPECT_EQ(2u, *a->send(*binding_a, endpoint(PEER, 5001), payload));
     EXPECT_EQ(1u, b->pump());
 
     std::array<std::uint8_t, 8> received{};
@@ -119,7 +151,7 @@ TEST(Stack, AnUnclaimedDatagramIsCounted)
     ASSERT_TRUE(binding_a.has_value());
 
     const std::array<std::uint8_t, 8> payload{0, 0, 0, 0, 0, 0, 1, 0};
-    ASSERT_EQ(payload.size(), a->send(*binding_a, endpoint(PEER, 5001), payload));
+    ASSERT_EQ(payload.size(), *a->send(*binding_a, endpoint(PEER, 5001), payload));
     EXPECT_EQ(1u, b->pump());
     EXPECT_EQ(1u, b->counters().rx_receiver_discard.load());
 }
@@ -137,7 +169,7 @@ TEST(Stack, ACorruptFrameIsAChecksumFailure)
 
     wire.set_injection(Side::a, Injection{std::nullopt, std::nullopt, false, 1, std::nullopt});
     const std::array<std::uint8_t, 4> payload{1, 2, 3, 4};
-    ASSERT_EQ(4u, a->send(*binding_a, endpoint(PEER, 5001), payload));
+    ASSERT_EQ(4u, *a->send(*binding_a, endpoint(PEER, 5001), payload));
     EXPECT_EQ(1u, b->pump());
     EXPECT_EQ(1u, b->counters().checksum_failure.load());
 }
@@ -155,7 +187,7 @@ TEST(Stack, AConnectedTransportHearsOnlyItsPeer)
     ASSERT_TRUE(binding_a.has_value() && binding_b.has_value());
 
     const std::array<std::uint8_t, 3> payload{1, 2, 3};
-    ASSERT_EQ(3u, a->send(*binding_a, endpoint(PEER, 5001), payload));
+    ASSERT_EQ(3u, *a->send(*binding_a, endpoint(PEER, 5001), payload));
     EXPECT_EQ(1u, b->pump());
     std::array<std::uint8_t, 16> buffer{};
     EXPECT_EQ(3u, b->receive(*binding_b, buffer));
@@ -163,7 +195,7 @@ TEST(Stack, AConnectedTransportHearsOnlyItsPeer)
     // A datagram from another source port is somebody else's.
     const auto port_9999 = a->bind(OWN, 9999, std::nullopt, endpoint(OWN, 9999));
     ASSERT_TRUE(port_9999.has_value());
-    ASSERT_EQ(3u, a->send(*port_9999, endpoint(PEER, 5001), payload));
+    ASSERT_EQ(3u, *a->send(*port_9999, endpoint(PEER, 5001), payload));
     EXPECT_EQ(1u, b->pump());
     EXPECT_EQ(0u, b->receive(*binding_b, buffer));
 }
@@ -253,7 +285,7 @@ TEST(Stack, ADatagramToThisStacksOwnAddressLoopsInsideIt)
     ASSERT_TRUE(sender.has_value() && receiver.has_value());
 
     const std::array<std::uint8_t, 4> payload{7, 6, 5, 4};
-    EXPECT_EQ(4u, a->send(*sender, endpoint(OWN, 5001), payload));
+    EXPECT_EQ(4u, *a->send(*sender, endpoint(OWN, 5001), payload));
 
     // Nothing went on the wire: the receiver's ring already has it.
     EXPECT_TRUE(wire.take(Side::a, 10).empty());
@@ -261,6 +293,29 @@ TEST(Stack, ADatagramToThisStacksOwnAddressLoopsInsideIt)
     std::array<std::uint8_t, 8> received{};
     EXPECT_EQ(4u, a->receive(*receiver, received));
     EXPECT_EQ(payload, (std::array<std::uint8_t, 4>{received[0], received[1], received[2], received[3]}));
+}
+
+TEST(Stack, AnEmptyPoolIsCounter77AndNotCounter78)
+{
+    Wire wire;
+    auto settings = params(OWN, MAC_A);
+    settings.static_neighbours.emplace_back(PEER, MAC_B);
+
+    const std::size_t frame_capacity = settings.mtu + axc::core::media::dpdk::frame::ETHERNET_HEADER_LENGTH;
+    auto rx = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    auto sender = std::make_unique<StarvedTxPort>(settings.mtu);
+    auto receiver = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    Stack a{settings, std::move(rx), std::move(sender), std::move(receiver)};
+
+    const auto binding = a.bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    ASSERT_TRUE(binding.has_value());
+
+    const std::array<std::uint8_t, 3> payload{1, 2, 3};
+    const auto sent = a.send(*binding, endpoint(PEER, 5001), payload);
+    ASSERT_TRUE(sent.has_value()) << sent.error().message.view();
+    EXPECT_EQ(0u, *sent);
+    EXPECT_EQ(1u, a.counters().nobufs.load());
+    EXPECT_EQ(0u, a.counters().tx_eagain.load());
 }
 
 TEST(Stack, TheLargestDatagramLeavesAndOneByteMoreDoesNot)
@@ -279,15 +334,20 @@ TEST(Stack, TheLargestDatagramLeavesAndOneByteMoreDoesNot)
     ASSERT_EQ(1472u, a->params().largest_datagram());
 
     const std::vector<std::uint8_t> largest(1472, 0x5a);
-    EXPECT_EQ(1472u, a->send(*binding_a, endpoint(PEER, 5001), largest));
+    EXPECT_EQ(1472u, *a->send(*binding_a, endpoint(PEER, 5001), largest));
     EXPECT_EQ(1u, b->pump());
 
     std::vector<std::uint8_t> received(largest.size() + 1);
     EXPECT_EQ(1472u, b->receive(*binding_b, received));
 
-    // One byte more is refused before a frame is built.
+    // One byte more is refused before a frame is built, and it is an error and
+    // not back pressure: no later pass makes it fit.
     const std::vector<std::uint8_t> too_large(1473, 0x5a);
-    EXPECT_EQ(0u, a->send(*binding_a, endpoint(PEER, 5001), too_large));
+    const auto refused = a->send(*binding_a, endpoint(PEER, 5001), too_large);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_NE(std::string::npos, std::string{refused.error().message.view()}.find("larger than the port allows"));
+    EXPECT_EQ(1u, a->counters().errors.load());
+    EXPECT_EQ(0u, a->counters().tx_eagain.load());
     EXPECT_EQ(0u, b->pump());
 
     // The frame bound itself is the MTU plus the Ethernet header: a full-size

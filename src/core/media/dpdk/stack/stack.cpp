@@ -7,9 +7,11 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "core/error/error.h"
 #include "core/media/dpdk/stack/arp.h"
 #include "core/media/dpdk/stack/demux.h"
 
@@ -201,12 +203,19 @@ std::size_t Stack::pump()
     return handed;
 }
 
-std::size_t Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
-                        std::span<const std::uint8_t> payload)
+std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
+                                              std::span<const std::uint8_t> payload)
 {
+    // Not back pressure: no later pass makes a datagram this size fit, and the
+    // caller has to hear about it (counter 79, `EMSGSIZE` at the seam). The
+    // channel's MTU is the driver's and the port's is the card's, and nothing
+    // reconciles them before a frame is built (plan §4.10).
     if (payload.size() > params_.largest_datagram())
     {
-        return 0;
+        counters_.errors.fetch_add(1, std::memory_order_relaxed);
+        return std::unexpected(make_error(ErrorCode::invalid_argument,
+                                          "datagram is larger than the port allows: " + std::to_string(payload.size()) +
+                                              " > " + std::to_string(params_.largest_datagram())));
     }
 
     // A datagram this stack addresses to its own address cannot travel on the
@@ -259,10 +268,10 @@ std::size_t Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint desti
     const frame::Ipv4Write ipv4{*hardware, params_.mac, params_.address, destination.address, next_identification()};
 
     UdpFill fill_context{this, ipv4, binding, destination, payload};
-    const std::size_t taken = sender_tx_->tx_burst(1, &udp_fill, &fill_context);
-    if (0 == taken)
+    const packet_io::TxResult sent = sender_tx_->tx_burst(1, &udp_fill, &fill_context);
+    if (0 == sent.taken)
     {
-        counters_.tx_eagain.fetch_add(1, std::memory_order_relaxed);
+        note_tx_result(sent);
         return 0;
     }
     return payload.size();
@@ -376,15 +385,28 @@ std::size_t Stack::send_frame(std::span<const std::uint8_t> bytes, packet_io::Tx
     // side to that, and this is the frame's own bound.
     if (bytes.size() > params_.mtu + frame::ETHERNET_HEADER_LENGTH)
     {
+        counters_.errors.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
     CopyFill fill{bytes};
-    const std::size_t taken = port.tx_burst(1, &copy_fill, &fill);
-    if (0 == taken)
+    const packet_io::TxResult sent = port.tx_burst(1, &copy_fill, &fill);
+    if (0 == sent.taken)
     {
-        counters_.tx_eagain.fetch_add(1, std::memory_order_relaxed);
+        note_tx_result(sent);
     }
-    return taken;
+    return sent.taken;
+}
+
+/// A burst that took nothing is either an empty pool (77) or a ring that would
+/// not take the frame (78); only the port can tell the two apart, and it did.
+void Stack::note_tx_result(const packet_io::TxResult& result) noexcept
+{
+    if (result.not_allocated > 0)
+    {
+        counters_.nobufs.fetch_add(result.not_allocated, std::memory_order_relaxed);
+        return;
+    }
+    counters_.tx_eagain.fetch_add(1, std::memory_order_relaxed);
 }
 
 }  // namespace axc::core::media::dpdk::stack

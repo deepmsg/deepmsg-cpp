@@ -123,6 +123,23 @@ private:
 /// Parse and open in one step.
 [[nodiscard]] std::expected<Media, Error> open_media(const PropertySource& properties) noexcept;
 
+/// The reference's media-selection name, honoured as an alias (P5).
+///
+/// `aeron.udp.channel.transport.bindings.media=dpdk` is what an operator of the
+/// reference's closed DPDK media would write. The C driver resolves that name
+/// during `aeron_driver_context_init` (`aeron_driver_context.c:1288`), before a
+/// media can be installed, and knows only `default`; `dpdk` would be a
+/// `dlsym(RTLD_DEFAULT, "dpdk")` of a symbol we do not export
+/// (`aeron_symbol_table.c:59-95`). So the launcher answers `default` in the
+/// driver's environment and turns `deepmsg.dpdk.enabled` on here, before the
+/// context is built. `aeron.print.configuration` therefore shows `default`; that
+/// is the documented deviation.
+///
+/// A conflicting `deepmsg.dpdk.enabled=false` is refused rather than silently
+/// overridden. Any other name is left alone, so the driver refuses it exactly
+/// as the reference would.
+[[nodiscard]] std::expected<void, Error> apply_reference_media_alias(PropertySource& properties) noexcept;
+
 /// Install the configured media into a driver context.
 ///
 /// A build without DPDK refuses `deepmsg.dpdk.enabled=true` with a message that
