@@ -624,6 +624,148 @@ TEST(DpdkOversize, TheChildProcess)
 namespace
 {
 
+constexpr const char* IDLE_WARNING_PATH = "/tmp/axc-dpdk-idle-warning.txt";
+constexpr const char* IDLE_QUIET_PATH = "/tmp/axc-dpdk-idle-quiet.txt";
+
+[[nodiscard]] std::string read_all(const char* path)
+{
+    std::ifstream input{path};
+    if (!input)
+    {
+        return {};
+    }
+    return std::string{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+}
+
+}  // namespace
+
+// A sleeping idle strategy leaves the frames in the NIC ring (counter 84) with
+// no hint of why; the media says so once, on stdout, and still opens (design
+// §4.12).
+TEST(DpdkIdleWarningChild, ASleepingReceiverIsAWarning)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)::setenv("AERON_RECEIVER_IDLE_STRATEGY", "sleeping", 1);
+    char directory[] = "/tmp/axc-dpdk-idle-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)::aeron_properties_setenv("aeron.receiver.idle.strategy", "sleeping");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-warning.pcap");
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+    EXPECT_TRUE(driver->close().has_value());
+    std::filesystem::remove_all(directory);
+    (void)std::remove("/tmp/axc-dpdk-idle-warning.pcap");
+}
+
+TEST(DpdkIdleWarning, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        const int output = ::open(IDLE_WARNING_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (0 > output || 0 > ::dup2(output, STDOUT_FILENO))
+        {
+            ::_exit(127);
+        }
+        (void)::close(output);
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkIdleWarningChild.ASleepingReceiverIsAWarning",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(0, WEXITSTATUS(status)) << "the child failed; what it wrote is in " << IDLE_WARNING_PATH;
+
+    const std::string output = read_all(IDLE_WARNING_PATH);
+    EXPECT_NE(std::string::npos, output.find("dpdk media warning: the receiver idle strategy is not a busy spin"))
+        << output;
+    (void)std::remove(IDLE_WARNING_PATH);
+}
+
+// A busy spin keeps the ring drained and earns no line.
+TEST(DpdkIdleQuietChild, ABusySpinIdleStrategyIsQuiet)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)::setenv("AERON_RECEIVER_IDLE_STRATEGY", "spin", 1);
+    (void)::setenv("AERON_SENDER_IDLE_STRATEGY", "spin", 1);
+    char directory[] = "/tmp/axc-dpdk-idle-quiet-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-quiet.pcap");
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+    EXPECT_TRUE(driver->close().has_value());
+    std::filesystem::remove_all(directory);
+    (void)std::remove("/tmp/axc-dpdk-idle-quiet.pcap");
+}
+
+TEST(DpdkIdleQuiet, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        const int output = ::open(IDLE_QUIET_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (0 > output || 0 > ::dup2(output, STDOUT_FILENO))
+        {
+            ::_exit(127);
+        }
+        (void)::close(output);
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkIdleQuietChild.ABusySpinIdleStrategyIsQuiet",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(0, WEXITSTATUS(status)) << "the child failed; what it wrote is in " << IDLE_QUIET_PATH;
+
+    const std::string output = read_all(IDLE_QUIET_PATH);
+    EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0")) << output;
+    EXPECT_EQ(std::string::npos, output.find("dpdk media warning:")) << output;
+    (void)std::remove(IDLE_QUIET_PATH);
+}
+
+namespace
+{
+
 constexpr const char* ALIAS_LINE_PATH = "/tmp/axc-dpdk-alias-line.txt";
 constexpr const char* ALIAS_PCAP_PATH = "/tmp/axc-dpdk-alias.pcap";
 

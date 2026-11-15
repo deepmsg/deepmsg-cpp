@@ -23,6 +23,7 @@
 
 extern "C"
 {
+#include "aeron_agent.h"
 #include "util/aeron_properties_util.h"
 }
 
@@ -360,6 +361,9 @@ std::expected<std::vector<std::string>, Error> eal_arguments(const Settings& set
     }
 
     bool no_telemetry = false;
+    bool no_huge = false;
+    bool no_shconf = false;
+    bool in_memory = false;
     for (const auto& argument : arguments)
     {
         if ("-l" == argument || argument.starts_with("--lcore"))
@@ -368,15 +372,38 @@ std::expected<std::vector<std::string>, Error> eal_arguments(const Settings& set
                 config_error("deepmsg.dpdk.eal.args",
                              "--lcores is chosen by the media from the process's own cpuset; do not give it"));
         }
-        if ("--no-telemetry" == argument)
-        {
-            no_telemetry = true;
-        }
+        no_telemetry = no_telemetry || "--no-telemetry" == argument;
+        no_huge = no_huge || "--no-huge" == argument;
+        no_shconf = no_shconf || "--no-shconf" == argument;
+        in_memory = in_memory || "--in-memory" == argument;
     }
 
     if (!no_telemetry)
     {
         arguments.emplace_back("--no-telemetry");
+    }
+
+    // The media owns the process's runtime files (design §4.8): on huge pages
+    // `--in-memory` keeps EAL from writing /var/run/dpdk at all, so a second
+    // DPDK process on the same host cannot collide with this one; with
+    // `--no-huge` the same effect comes from `--no-shconf`. The two are
+    // mutually exclusive in EAL (`--no-huge` implies legacy mem), so an
+    // operator asking for both is an error rather than a silent pick.
+    if (no_huge)
+    {
+        if (in_memory)
+        {
+            return std::unexpected(
+                config_error("deepmsg.dpdk.eal.args", "--in-memory and --no-huge are mutually exclusive in EAL"));
+        }
+        if (!no_shconf)
+        {
+            arguments.emplace_back("--no-shconf");
+        }
+    }
+    else if (!in_memory)
+    {
+        arguments.emplace_back("--in-memory");
     }
 
     auto lcores = default_lcores_argument();
@@ -855,6 +882,15 @@ std::expected<Media, Error> open_media(const PropertySource& properties) noexcep
         return std::unexpected(settings.error());
     }
     return open_media(*settings);
+}
+
+bool idle_strategy_can_starve_the_ring(void (*strategy)(void* state, int work_count)) noexcept
+{
+    // `backoff` counts too: it is a busy spin only until it parks, and the
+    // park grows to 1 ms (aeron_agent.h:45-46) -- measured on the bench as a
+    // 1.07 ms driver-level round trip that `spin` turns into 29.7 us.
+    return &aeron_idle_strategy_sleeping_idle == strategy || &aeron_idle_strategy_yielding_idle == strategy ||
+           &aeron_idle_strategy_backoff_idle == strategy;
 }
 
 std::expected<void, Error> apply_reference_media_alias(PropertySource& properties) noexcept

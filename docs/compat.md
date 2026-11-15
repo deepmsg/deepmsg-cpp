@@ -84,6 +84,21 @@ environment form is `DEEPMSG_DPDK_*` (`DEEPMSG_DPDK_IPV4_ADDRESS` ->
   operator's EAL arguments; an operator `--lcores`/`-l` is refused rather than
   overridden (`plan-dpdk-media.md` §4.7). The main thread's affinity is saved
   before `rte_eal_init` and restored after it.
+- The media also answers for the process's runtime files: on huge pages it adds
+  `--in-memory`, with an operator `--no-huge` it adds `--no-shconf` instead, so
+  it writes nothing under `/var/run/dpdk` and a second DPDK process on the same
+  host cannot collide with it. EAL does not allow the two together, so an
+  operator asking for `--no-huge --in-memory` is refused with that reason.
+- If the driver's receiver (or sender) idle strategy is not a busy spin — it is
+  loaded from `AERON_RECEIVER_IDLE_STRATEGY`/`AERON_SENDER_IDLE_STRATEGY` — the
+  media writes one line to stdout at install time, because frames then wait in
+  the NIC ring (counter 84) and nothing else drains the port. That includes the
+  default `backoff`, whose park grows to 1 ms (`aeron_agent.h:45-46`): a
+  driver-level round trip on the bench pair measured 1.07 ms with it and
+  29.7 us with `spin`. It is a warning, not a refusal (design §4.12), and the
+  strategy's *name* is not printed: the C driver loads the function from the
+  environment but leaves its `..._name` at the `backoff` default
+  (`aeron_driver_context.c:1204-1211`).
 - `open_media` waits up to 30 s for the port's link before it returns; a
   10GBASE-T link was measured at ~20 s after start, and frames sent before it
   is up are lost without an error.

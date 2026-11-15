@@ -123,6 +123,24 @@ private:
 /// Parse and open in one step.
 [[nodiscard]] std::expected<Media, Error> open_media(const PropertySource& properties) noexcept;
 
+/// Whether an idle strategy lets frames pile up in the NIC ring.
+///
+/// This media's reader is the driver's receiver thread and nobody else drains
+/// the port, so a strategy that is not a busy spin turns the ring into the
+/// queue: `eagain` and 84 (missed) are what the operator sees, without a hint
+/// as to why. That includes the C driver's default `backoff`: it spins only
+/// until it parks, and the park grows to 1 ms (`aeron_agent.h:45-46`) -- a
+/// benchmark of the driver-level round trip measured 1.07 ms with the default
+/// and 29.7 us with `spin`. A strategy outside `spin`/`noop` earns a line on
+/// stdout at install time, not a refusal (design §4.12).
+///
+/// The answer comes from the function the context loaded, not from its
+/// `..._idle_strategy_name`: `aeron_driver_context_init` loads the function
+/// from `AERON_*_IDLE_STRATEGY` and leaves the name at its `backoff` default
+/// (`aeron_driver_context.c:1204-1211`), so the name is not a reading of what
+/// the thread will do.
+[[nodiscard]] bool idle_strategy_can_starve_the_ring(void (*strategy)(void* state, int work_count)) noexcept;
+
 /// The reference's media-selection name, honoured as an alias (P5).
 ///
 /// `aeron.udp.channel.transport.bindings.media=dpdk` is what an operator of the
