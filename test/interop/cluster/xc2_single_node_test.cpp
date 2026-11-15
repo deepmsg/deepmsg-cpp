@@ -28,6 +28,7 @@
 
 #include <unistd.h>
 
+#include "client/aeron_archive.h"
 #include "cluster/common/cluster_counters.h"
 #include "cluster/common/recording_log.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -149,7 +150,12 @@ protected:
         archive_dir_ = directory_ + "/archive";
         classes_dir_ = directory_ + "/classes";
         std::filesystem::create_directories(classes_dir_);
-        log_port_ = 24500 + (static_cast<int>(::getpid()) % 500);
+        // Each test in this binary reuses the same process id; vary the port
+        // block so a previous test's bound UDP sockets do not collide with the
+        // next one.
+        static std::atomic<int> port_sequence{0};
+        log_port_ = 24500 + ((static_cast<int>(::getpid()) % 100) * 100) + (port_sequence.fetch_add(1) * 2);
+        archive_control_port_ = log_port_ + 100;
         return true;
     }
 
@@ -216,6 +222,7 @@ protected:
             << "aeron.cluster.log.channel=aeron:udp?endpoint=localhost:" << log_port_ << "\n"
             << "aeron.cluster.replication.channel=aeron:udp\n"
             << "aeron.cluster.control.channel=aeron:ipc?term-length=128k\n"
+            << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << archive_control_port_ << "\n"
             << "aeron.cluster.service.count=" << SERVICE_COUNT << "\n"
             << "aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0\n";
         if (!supplier.empty())
@@ -366,6 +373,39 @@ protected:
         return entries;
     }
 
+    /// `ClusterTest.shouldEnterElectionWhenRecordingStopsUnexpectedlyOnLeader`
+    /// on one node: stop the cluster log recording (id 0 on a fresh directory).
+    [[nodiscard]] bool stop_log_recording()
+    {
+        aeron_archive_context_t* context = nullptr;
+        if (0 != aeron_archive_context_init(&context))
+        {
+            return false;
+        }
+        const std::string request = "aeron:udp?endpoint=localhost:" + std::to_string(archive_control_port_);
+        const std::string response = "aeron:udp?endpoint=localhost:" + std::to_string(archive_control_port_ + 100);
+        (void)aeron_archive_context_set_aeron_directory_name(context, aeron_dir_.c_str());
+        (void)aeron_archive_context_set_control_request_channel(context, request.c_str());
+        (void)aeron_archive_context_set_control_request_stream_id(context, 10);
+        (void)aeron_archive_context_set_control_response_channel(context, response.c_str());
+        (void)aeron_archive_context_set_control_response_stream_id(context, 10);
+        (void)aeron_archive_context_set_message_timeout_ns(context, 10'000'000'000ULL);
+
+        aeron_archive_t* archive = nullptr;
+        bool stopped = false;
+        const bool connected = 0 == aeron_archive_connect(&archive, context);
+        if (connected)
+        {
+            (void)aeron_archive_try_stop_recording_by_identity(&stopped, archive, 0);
+        }
+        if (nullptr != archive)
+        {
+            (void)aeron_archive_close(archive);
+        }
+        (void)aeron_archive_context_close(context);
+        return connected && stopped;
+    }
+
     [[nodiscard]] ProcessResult run_probe(const std::string& main_class, const std::vector<std::string>& arguments,
                                           std::chrono::milliseconds timeout = std::chrono::seconds(90))
     {
@@ -432,6 +472,7 @@ protected:
     std::string classes_dir_{};
     std::vector<std::string> probe_sources_{};
     std::int32_t log_port_{0};
+    std::int32_t archive_control_port_{0};
     std::unique_ptr<ChildProcess> node_{};
     std::unique_ptr<ChildProcess> container_{};
     std::unique_ptr<DeepmsgClient> client_{};
@@ -722,6 +763,32 @@ TEST_F(Xc2SingleNodeElectionTest, aSingleNodeDoesNotEnterAnElectionOnItsOwn)
     EXPECT_EQ(2, cluster_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID)) << log_text("node");
     EXPECT_EQ(term_before, cluster_counter(deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID))
         << log_text("node");
+}
+
+TEST_F(Xc2SingleNodeElectionTest, shouldEnterElectionWhenRecordingStopsUnexpectedlyOnLeaderOfSingleNodeCluster)
+{
+    start();
+
+    const std::int64_t term_before = cluster_counter(deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+    ASSERT_EQ(2, cluster_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID)) << log_text("node");
+
+    ASSERT_TRUE(stop_log_recording()) << log_text("node");
+
+    bool advanced = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        // Drive the counter client's conductor while the CM elects itself.
+        const std::int64_t term = cluster_counter(deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+        if (term > term_before)
+        {
+            advanced = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    EXPECT_TRUE(advanced) << "the single node did not start a new term after the recording stopped" << log_text("node");
 }
 
 }  // namespace
