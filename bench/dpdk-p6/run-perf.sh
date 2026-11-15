@@ -50,17 +50,26 @@ cell() # cell <session> <arm> <position>
     fi
     p6_start_reference "$dir/ref-aeron"
 
+    # The echo subscribes first and waits for the trigger: if its publication
+    # existed before our subscription did, its SETUP frames would land on a port
+    # with no binding and count as data-plane discards (the invariant).
+    local trigger=$dir/trigger
     "$p6_work/bin/echo" "$dir/ref-aeron" "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" "$STREAM" \
-        "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" >"$dir/echo.log" 2>&1 &
+        "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" 0 "$trigger" >"$dir/echo.log" 2>&1 &
     local echo_pid=$!
-    sleep 1
+    local deadline=$((SECONDS + 30))
+    while ((SECONDS < deadline)) && ! grep -q READY "$dir/echo.log"; do sleep 0.1; done
 
     local ping_log=$dir/ping.log
     local status=0
     P6_DUMP_RTTS=$dir/rtts.txt "$p6_work/bin/ping" "$dir/ours-aeron" \
         "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" "$STREAM" \
         "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" "$COUNT" "$WARMUP" \
-        >"$ping_log" 2>&1 || status=$?
+        >"$ping_log" 2>&1 &
+    local ping_pid=$!
+    sleep 1
+    touch "$trigger"
+    wait "$ping_pid" || status=$?
 
     kill -TERM "$echo_pid" 2>/dev/null || true
     wait "$echo_pid" 2>/dev/null || true
