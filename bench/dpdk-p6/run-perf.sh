@@ -38,6 +38,8 @@ cell() # cell <session> <arm> <position>
     local driver_arm=kernel
     [[ "$arm" == M ]] && driver_arm=media
     mkdir -p "$dir"
+    # The build type is part of the reading: see lib.sh's p6_build_info.
+    p6_build_info "$dir/RUN-INFO.txt"
 
     p6_setup_ours "$driver_arm"
     p6_ours_pid= p6_ref_pid=
@@ -116,6 +118,8 @@ main()
     [[ -n "$p6_peer_iface" ]] || { echo "cannot name the peer port" >&2; exit 2; }
     p6_work=$(mktemp -d "/tmp/axc-p6-perf-XXXXXX")
     trap p6_teardown EXIT
+    p6_build_info "$p6_work/BUILD-INFO.txt"
+    p6_warn_if_debug
     say "P6 perf: $p6_pci, $p6_local_cidr vs reference on $p6_peer_iface $p6_peer_cidr; N=$COUNT warmup=$WARMUP sessions=$SESSIONS [$p6_work]"
 
     export AERON_RECEIVER_IDLE_STRATEGY=${P6_IDLE_STRATEGY:-spin}

@@ -52,6 +52,47 @@ p6_preflight()
     [[ -d "/sys/bus/pci/devices/$p6_peer_bdf" ]] || { echo "no peer PCI device $p6_peer_bdf" >&2; exit 2; }
 }
 
+# What the driver under test was compiled as.
+#
+# 2026-11-15: the whole DPDK line was measured on a Debug (`-O0`) build by
+# accident -- this rig's default build directory is `build/dpdk`, and the
+# `dpdk` preset is Debug. A cell's numbers are only comparable with cells of
+# the same build type (our own per-frame cost moved 4.3x between the two), so
+# every cell records it, and a Debug arm says so out loud.
+p6_build_type()
+{
+    sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "$p6_build/CMakeCache.txt" 2>/dev/null | head -1
+}
+
+# p6_build_info <file>: what this cell was measured with.
+p6_build_info()
+{
+    local file=$1
+    {
+        echo "build_dir=$p6_build"
+        echo "build_type=$(p6_build_type)"
+        echo "segments=$(sed -n 's/^AXC_DPDK_SEGMENTS:BOOL=//p' "$p6_build/CMakeCache.txt" 2>/dev/null | head -1)"
+        echo "media_sha256=$(sha256sum "$p6_build/apps/deepmsg-media-driver/deepmsg-media-driver" 2>/dev/null | cut -d' ' -f1)"
+        echo "aeronmd_sha256=$(sha256sum "$p6_build/aeron/binaries/aeronmd" 2>/dev/null | cut -d' ' -f1)"
+        grep -h '^CXX_FLAGS' "$p6_build/apps/deepmsg-media-driver/CMakeFiles/deepmsg-media-driver.dir/flags.make" 2>/dev/null |
+            head -1 | sed 's/^/media_/'
+    } >"$file"
+}
+
+# A Debug arm is allowed -- the build-type card measures it -- but it must not
+# pass for a product reading.
+p6_warn_if_debug()
+{
+    local type
+    type=$(p6_build_type)
+    [[ "$type" == "Release" ]] && return 0
+    p6_say "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    p6_say "!! build type is '${type:-unknown}' in $p6_build"
+    p6_say "!! not comparable with Release readings (2026-11-15: the S4b/S2c"
+    p6_say "!! 1.3/0.78 us that started a card were this build type's -O0)"
+    p6_say "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+}
+
 p6_compile_probes()
 {
     local probes=$p6_repo/bench/dpdk-p6/probes
