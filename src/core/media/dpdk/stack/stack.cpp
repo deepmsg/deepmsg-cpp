@@ -92,6 +92,9 @@ Stack::Stack(StackParams params, std::unique_ptr<packet_io::RxPort> rx, std::uni
       sender_tx_{std::move(sender_tx)},
       receiver_tx_{std::move(receiver_tx)}
 {
+    // A frame is at most the port's MTU plus the Ethernet header that MTU
+    // does not count.
+    answer_buffer_.resize(params_.mtu + frame::ETHERNET_HEADER_LENGTH);
     for (std::size_t index = 0; index < ports::SLOT_CAPACITY; ++index)
     {
         rings_[index].capacity = params_.ring_capacity();
@@ -172,27 +175,26 @@ std::size_t Stack::pump()
 {
     counters_.poller.fetch_add(1, std::memory_order_relaxed);
 
-    std::vector<demux::Deferred> deferred;
-    DemuxContext context{this, &deferred};
-    std::vector<std::pair<ports::Binding, packet_io::ReadyFrame>> kept;
-    const std::size_t handed = rx_->rx_burst(params_.rx_burst, &demux_callback, &context, kept);
+    deferred_.clear();
+    kept_frames_.clear();
+    DemuxContext context{this, &deferred_};
+    const std::size_t handed = rx_->rx_burst(params_.rx_burst, &demux_callback, &context, kept_frames_);
 
-    std::vector<std::uint8_t> scratch(params_.mtu);
-    for (auto& answer : deferred)
+    for (auto& answer : deferred_)
     {
         std::optional<std::size_t> written;
         if (answer.kind == demux::Deferred::Kind::arp_reply)
         {
-            written = frame::write_arp(scratch, answer.ethernet, answer.arp);
+            written = frame::write_arp(answer_buffer_, answer.ethernet, answer.arp);
         }
         else
         {
             const frame::IcmpEcho echo{frame::ICMP_ECHO_REPLY, answer.identifier, answer.sequence, answer.payload};
-            written = frame::write_icmp_echo_reply(scratch, answer.ipv4, echo);
+            written = frame::write_icmp_echo_reply(answer_buffer_, answer.ipv4, echo);
         }
         if (written)
         {
-            (void)send_frame(std::span<const std::uint8_t>{scratch}.first(*written), *receiver_tx_);
+            (void)send_frame(std::span<const std::uint8_t>{answer_buffer_}.first(*written), *receiver_tx_);
         }
     }
 
@@ -205,6 +207,21 @@ std::size_t Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint desti
     if (payload.size() > params_.largest_datagram())
     {
         return 0;
+    }
+
+    // A datagram this stack addresses to its own address cannot travel on the
+    // wire: nobody out there answers an ARP for an address that is ours. The
+    // kernel media loops it through the local route; a media that owns the
+    // address does the same, and the port table decides who receives it.
+    if (destination.address == params_.address)
+    {
+        const auto target = lookup(destination.address, destination.port, {params_.address, binding.port});
+        if (!target)
+        {
+            return 0;
+        }
+        const bool delivered = deliver(*target, {params_.address, binding.port}, payload);
+        return delivered ? payload.size() : 0;
     }
 
     const auto next = next_hop(destination.address);
@@ -354,7 +371,10 @@ void Stack::clear_ring(std::uint16_t slot)
 
 std::size_t Stack::send_frame(std::span<const std::uint8_t> bytes, packet_io::TxPort& port)
 {
-    if (bytes.size() > params_.mtu)
+    // `params_.mtu` is the port's MTU, which counts the IPv4 and UDP headers
+    // but not the Ethernet one; `largest_datagram()` already holds the send
+    // side to that, and this is the frame's own bound.
+    if (bytes.size() > params_.mtu + frame::ETHERNET_HEADER_LENGTH)
     {
         return 0;
     }

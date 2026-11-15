@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -32,6 +33,7 @@ extern "C"
 #include "cluster/consensus/consensus_module.h"
 #include "cluster/consensus/consensus_module_context.h"
 #include "core/config/property_source.h"
+#include "core/driver/embedded_driver.h"
 
 namespace
 {
@@ -161,11 +163,21 @@ int main(int argc, char* argv[])
 
     // The embedded driver reads its configuration from the environment, as
     // `aeronmd` does with `-D` (same mapping as the archive server binary).
+    // `deepmsg.*` is our own namespace: it stays out of the C driver's
+    // environment and is what `EmbeddedDriver` installs a media from.
     if (embedded_driver)
     {
+        if (auto loaded = properties->load_environment("DEEPMSG_", "deepmsg."); !loaded)
+        {
+            fail(std::string{loaded.error().message.view()});
+        }
         properties->for_each(
             [](std::string_view name, std::string_view value)
             {
+                if (!name.starts_with("aeron."))
+                {
+                    return;
+                }
                 const std::string_view driver_value = driver_property_value(name, value);
                 (void)aeron_properties_setenv(std::string{name}.c_str(), std::string{driver_value}.c_str());
             });
@@ -189,33 +201,21 @@ int main(int argc, char* argv[])
         fail(std::string{prepared.error().message.view()});
     }
 
-    aeron_driver_context_t* driver_context = nullptr;
-    aeron_driver_t* driver = nullptr;
+    std::optional<axc::core::driver::EmbeddedDriver> driver;
     if (embedded_driver)
     {
-        if (0 != aeron_driver_context_init(&driver_context))
+        auto created_driver = axc::core::driver::EmbeddedDriver::create(*properties, &on_driver_termination, nullptr);
+        if (!created_driver)
         {
-            fail(std::string{"driver context init: "} + aeron_errmsg());
+            fail(std::string{created_driver.error().message.view()});
         }
-        (void)aeron_driver_context_set_driver_termination_hook(driver_context, &on_driver_termination, nullptr);
-        if (0 != aeron_driver_init(&driver, driver_context))
-        {
-            fail(std::string{"driver init: "} + aeron_errmsg());
-        }
-        if (0 != aeron_driver_start(driver, false))
-        {
-            fail(std::string{"driver start: "} + aeron_errmsg());
-        }
+        driver.emplace(std::move(*created_driver));
     }
 
     auto created = ArchiveServer::create(*archive_config);
     if (!created)
     {
-        if (embedded_driver)
-        {
-            (void)aeron_driver_close(driver);
-            (void)aeron_driver_context_close(driver_context);
-        }
+        driver.reset();
         fail(std::string{created.error().message.view()});
     }
     std::unique_ptr<ArchiveServer> archive = std::move(*created);
@@ -223,11 +223,7 @@ int main(int argc, char* argv[])
     if (auto started = archive->start(); !started)
     {
         archive.reset();
-        if (embedded_driver)
-        {
-            (void)aeron_driver_close(driver);
-            (void)aeron_driver_context_close(driver_context);
-        }
+        driver.reset();
         fail(std::string{started.error().message.view()});
     }
 
@@ -236,11 +232,7 @@ int main(int argc, char* argv[])
     {
         archive->close();
         archive.reset();
-        if (embedded_driver)
-        {
-            (void)aeron_driver_close(driver);
-            (void)aeron_driver_context_close(driver_context);
-        }
+        driver.reset();
         fail(std::string{config.error().message.view()});
     }
 
@@ -263,11 +255,7 @@ int main(int argc, char* argv[])
     {
         archive->close();
         archive.reset();
-        if (embedded_driver)
-        {
-            (void)aeron_driver_close(driver);
-            (void)aeron_driver_context_close(driver_context);
-        }
+        driver.reset();
         fail(std::string{module.error().message.view()});
     }
 
@@ -285,18 +273,14 @@ int main(int argc, char* argv[])
     archive.reset();
 
     int exit_status = g_expected.load(std::memory_order_acquire) ? EXIT_SUCCESS : EXIT_FAILURE;
-    if (embedded_driver)
+    if (driver)
     {
-        if (0 != aeron_driver_close(driver))
+        if (auto closed = driver->close(); !closed)
         {
-            std::fprintf(stderr, "deepmsg-cluster-node: driver close: %s\n", aeron_errmsg());
+            std::fprintf(stderr, "deepmsg-cluster-node: %s\n", std::string{closed.error().message.view()}.c_str());
             exit_status = EXIT_FAILURE;
         }
-        if (0 != aeron_driver_context_close(driver_context))
-        {
-            std::fprintf(stderr, "deepmsg-cluster-node: driver context close: %s\n", aeron_errmsg());
-            exit_status = EXIT_FAILURE;
-        }
+        driver.reset();
     }
 
     return exit_status;

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 
 extern "C"
 {
@@ -237,7 +238,9 @@ void register_thread_once() noexcept
 [[nodiscard]] std::optional<std::uint16_t> local_port(aeron_udp_channel_transport_t* transport) noexcept
 {
     char buffer[128] = {};
-    if (0 != g_default->bind_addr_and_port_func(transport, buffer, sizeof(buffer)))
+    // The reference's `bind_addr_and_port` answers the number of characters it
+    // wrote, not 0 for success; a negative answer is the failure.
+    if (0 > g_default->bind_addr_and_port_func(transport, buffer, sizeof(buffer)))
     {
         return std::nullopt;
     }
@@ -265,7 +268,22 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
     {
         return -1;
     }
-    if (0 != g_default->init_func(transport, bind_addr, multicast_if_addr, connect_addr, params, context, affinity))
+
+    // The kernel cannot own an address this media owns: `bind(10.10.0.1)` is
+    // EADDRNOTAVAIL there, and the default bindings would fail the whole
+    // transport. The socket keeps the port on the wildcard instead, and the
+    // stack below takes the address.
+    struct sockaddr_storage kernel_bind{};
+    struct sockaddr_storage* kernel_bind_addr = bind_addr;
+    if (nullptr != bind_addr && AF_INET == bind_addr->ss_family && address_of(bind_addr) == g_stack->params().address)
+    {
+        kernel_bind = *bind_addr;
+        reinterpret_cast<struct sockaddr_in*>(&kernel_bind)->sin_addr.s_addr = htonl(INADDR_ANY);
+        kernel_bind_addr = &kernel_bind;
+    }
+
+    if (0 !=
+        g_default->init_func(transport, kernel_bind_addr, multicast_if_addr, connect_addr, params, context, affinity))
     {
         return -1;
     }
@@ -520,6 +538,12 @@ extern "C" int dpdk_poller_poll(aeron_udp_transport_poller_t* poller, struct mms
             sin->sin_addr.s_addr = htonl(source.address);
             recv_func(transport->data_paths, transport, clientd, transport->dispatch_clientd,
                       transport->destination_clientd, state->buffer.data(), length, &address, nullptr);
+            // Every datagram this transport takes off the media, which is what
+            // 76 counts. Without this the counter is allocated and never moves.
+            if (nullptr != transport_state->counter)
+            {
+                aeron_counter_increment(transport_state->counter);
+            }
             ++work;
         }
     }

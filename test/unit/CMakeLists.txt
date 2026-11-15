@@ -23,6 +23,7 @@ axc_add_executable(axc_unit_tests
         core/dpdk_arp_test.cpp
         core/dpdk_stack_test.cpp
         core/dpdk_port_test.cpp
+        core/dpdk_bench_test.cpp
     DEPS
         axc_core
         axc_driver

@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <string_view>
+
+#include <pthread.h>
+#include <sched.h>
 
 #include "core/config/property_source.h"
 #include "core/media/dpdk/media.h"
@@ -149,4 +153,68 @@ TEST(DpdkMediaConfig, DisabledInstallIsANoOp)
     ASSERT_TRUE(media.has_value());
     EXPECT_FALSE(media->enabled());
     EXPECT_TRUE(media->close().has_value());
+}
+
+TEST(DpdkMediaConfig, TheEalArgumentsCarryTheProcessCpuset)
+{
+    axc::core::media::dpdk::Settings settings;
+    settings.eal_args = "-a 0000:03:00.0";
+
+    const auto arguments = axc::core::media::dpdk::eal_arguments(settings);
+    ASSERT_TRUE(arguments.has_value()) << message_of(arguments.error());
+    ASSERT_FALSE(arguments->empty());
+    EXPECT_EQ("deepmsg-dpdk", arguments->front());
+
+    // The expected argument is computed here the way the process's own
+    // affinity describes it: one lcore allowed on these CPUs.
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    ASSERT_EQ(0, ::pthread_getaffinity_np(::pthread_self(), sizeof(set), &set));
+    std::string expected{""};
+    bool first = true;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+    {
+        if (0 == CPU_ISSET(cpu, &set))
+        {
+            continue;
+        }
+        if (!first)
+        {
+            expected.push_back(',');
+        }
+        expected += std::to_string(cpu);
+        first = false;
+    }
+    ASSERT_FALSE(expected.empty()) << "the process was given no CPU";
+    const std::string lcores = "--lcores=0@(" + expected + ")";
+
+    EXPECT_EQ(1u, static_cast<std::size_t>(std::count(arguments->begin(), arguments->end(), lcores)));
+    EXPECT_EQ(1u, static_cast<std::size_t>(std::count(arguments->begin(), arguments->end(), "--no-telemetry")));
+    // The operator's own arguments are split into argv tokens and kept.
+    EXPECT_EQ(1u, static_cast<std::size_t>(std::count(arguments->begin(), arguments->end(), "-a")));
+    EXPECT_EQ(1u, static_cast<std::size_t>(std::count(arguments->begin(), arguments->end(), "0000:03:00.0")));
+}
+
+TEST(DpdkMediaConfig, AnOperatorLcoresArgumentIsRefused)
+{
+    for (const std::string_view given : {"--lcores=0@(0)", "-l 0-3", "--lcore=0"})
+    {
+        axc::core::media::dpdk::Settings settings;
+        settings.eal_args = std::string{"--no-huge "} + std::string{given};
+
+        const auto arguments = axc::core::media::dpdk::eal_arguments(settings);
+        ASSERT_FALSE(arguments.has_value()) << given;
+        EXPECT_NE(std::string::npos, message_of(arguments.error()).find("chosen by the media")) << given;
+    }
+}
+
+TEST(DpdkMediaConfig, AnOperatorTelemetryArgumentIsNotDuplicated)
+{
+    axc::core::media::dpdk::Settings settings;
+    settings.eal_args = "--no-telemetry";
+
+    const auto arguments = axc::core::media::dpdk::eal_arguments(settings);
+    ASSERT_TRUE(arguments.has_value()) << message_of(arguments.error());
+
+    EXPECT_EQ(1u, static_cast<std::size_t>(std::count(arguments->begin(), arguments->end(), "--no-telemetry")));
 }

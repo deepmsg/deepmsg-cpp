@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/config/property_source.h"
 #include "core/error/error.h"
@@ -65,6 +66,17 @@ struct Settings
 /// An unknown `deepmsg.dpdk.*` name is an error rather than a silent ignore, the
 /// way the reference refuses a configuration name it does not serve.
 [[nodiscard]] std::expected<Settings, Error> parse_settings(const PropertySource& properties) noexcept;
+
+/// The EAL command line this media starts with: `argv[0]`, the operator's
+/// `deepmsg.dpdk.eal.args`, and the arguments the media adds for itself.
+///
+/// The media owns two arguments because they are properties of the process
+/// rather than of the operator's deployment: `--lcores=0@(<this process's
+/// cpuset>)` keeps EAL inside the CPUs the process was given, and
+/// `--no-telemetry` keeps it from opening a socket nobody reads. An operator
+/// argument that conflicts with either is an error rather than an override
+/// (`analysis/cpp/plan-dpdk-media.md` §4.7).
+[[nodiscard]] std::expected<std::vector<std::string>, Error> eal_arguments(const Settings& settings) noexcept;
 
 /// The media a driver context holds: the EAL, the pool, the port and the
 /// userspace stack. Move-only because none of those can be shared.
