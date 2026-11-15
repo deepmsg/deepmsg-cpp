@@ -75,6 +75,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc2_three_nodes_test.cpp
         cluster/xc2_follower_path_test.cpp
         cluster/xc2_election_test.cpp
+        cluster/xc2_restart_path_test.cpp
         cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp

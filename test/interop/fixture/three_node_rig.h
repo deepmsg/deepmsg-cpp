@@ -515,6 +515,58 @@ protected:
         }
     }
 
+    /// Restart one node with the reference's `startStaticNode(index, cleanStart)`:
+    /// `cleanStart` removes the cluster/archive directories, a plain restart
+    /// keeps the recordings.
+    void restart_node(int round, int index, bool clean_start)
+    {
+        stop_node_gracefully(index);
+        if (clean_start)
+        {
+            std::error_code error;
+            const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
+            std::filesystem::remove_all(node_dir + "/cluster", error);
+            std::filesystem::remove_all(node_dir + "/archive", error);
+        }
+        start_node(round, index);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        start_container(round, index);
+        // C6b's stale-CnC rule: do not read counters until the new driver has
+        // replaced the old CnC.
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
+    [[nodiscard]] bool wait_for_node_active(int index, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            if (1 == node_counter(index, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) &&
+                node_counter(index, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID) >= 0)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool await_commit(int index, std::int64_t position, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            if (node_counter(index, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID) >= position)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
     /// SIGKILL a process without the graceful path: the follower must look
     /// crashed, not stopped.
     void kill_hard(std::unique_ptr<ChildProcess>& process)
