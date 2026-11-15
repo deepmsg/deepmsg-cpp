@@ -108,7 +108,13 @@ environment form is `DEEPMSG_DPDK_*` (`DEEPMSG_DPDK_IPV4_ADDRESS` ->
   and 92 is the port's extended-statistics name count. Their keys and labels
   are ours, because the reference's media is closed. 77 counts a transmit that
   could not get a buffer from the pool, 78 a ring that would not take the
-  frame, and 79 a send the stack refused.
+  frame, and 79 a send the stack refused -- or one the transport had to assemble
+  through its own buffer (more than four iovecs).
+- `deepmsg.dpdk.sender.ring` is how many frames a transport's ready list holds.
+  A frame waits there in the buffer it arrived in (a parked mbuf), so a channel
+  whose ring the pool cannot cover is refused when it opens, with a line naming
+  the buffers in use against the budget; the media does not shrink the ring
+  behind the operator's back.
 
 ## Known gaps (A4b, 2026-11-09)
 

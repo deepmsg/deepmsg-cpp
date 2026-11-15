@@ -180,7 +180,7 @@ std::size_t Wire::delivery_capacity(Side side) const
 }
 
 std::size_t FakePort::rx_burst(std::size_t max, packet_io::RxCallback callback, void* context,
-                               std::vector<std::pair<ports::Binding, packet_io::ReadyFrame>>& kept)
+                               std::vector<packet_io::KeptFrame>& kept)
 {
     const std::size_t limit = std::min(max, wire_->delivery_capacity(side_));
 
@@ -197,7 +197,8 @@ std::size_t FakePort::rx_burst(std::size_t max, packet_io::RxCallback callback, 
         const packet_io::Disposition disposition = callback(context, view);
         if (disposition.keep)
         {
-            kept.emplace_back(*disposition.keep, packet_io::ReadyFrame{std::move(*frame)});
+            kept.push_back(packet_io::KeptFrame{*disposition.keep, disposition.source, disposition.payload_offset,
+                                                packet_io::ReadyFrame::bytes(std::move(*frame))});
         }
         ++handed;
     }

@@ -30,19 +30,24 @@ struct RxFrame
 };
 
 /// What the reader wants done with the frame it was just handed: nothing, or
-/// it belongs to the transport holding this binding.
+/// it belongs to the transport holding this binding (and to the peer it came
+/// from, which the ring has to carry to `receive`).
 struct Disposition
 {
     std::optional<ports::Binding> keep;
+    ports::Ipv4Endpoint source{};
+    /// Where the datagram starts inside the frame (what `receive` answers).
+    std::size_t payload_offset{0};
 
     static constexpr Disposition consumed() noexcept
     {
         return {};
     }
 
-    static constexpr Disposition keep_for(ports::Binding binding) noexcept
+    static constexpr Disposition keep_for(ports::Binding binding, ports::Ipv4Endpoint from,
+                                          std::size_t offset = 0) noexcept
     {
-        return Disposition{binding};
+        return Disposition{binding, from, offset};
     }
 };
 
@@ -50,27 +55,126 @@ struct Disposition
 /// than `std::function` because this is a per-frame call on the receive path.
 using RxCallback = Disposition (*)(void* context, const RxFrame& frame);
 
-/// A frame that has left its port but not yet its transport. Owned bytes; the
-/// DPDK build adds a frame still parked in the port's pool.
+/// A frame that has left its port but not yet its transport.
+///
+/// Two backings. `bytes` owns a copy -- the in-memory wire and the one path
+/// that has no pool (a datagram this stack addresses to itself). `parked`
+/// borrows a frame that is still in the port's pool and gives it back through
+/// `release` when the frame is destroyed: that is what keeps the receive path
+/// from copying and from allocating, and `release` is a plain function pointer
+/// so the per-frame path never touches `std::function` or the heap.
+///
+/// The parked form must not outlive its port or pool: the ring owner frees
+/// every parked frame before the port closes (`Stack::clear_ring`).
 class ReadyFrame
 {
 public:
-    explicit ReadyFrame(std::vector<std::uint8_t> bytes) noexcept : bytes_{std::move(bytes)} {}
+    ReadyFrame() noexcept = default;
 
-    ReadyFrame(ReadyFrame&& other) noexcept = default;
-    ReadyFrame& operator=(ReadyFrame&& other) noexcept = default;
-    ~ReadyFrame() = default;
+    static ReadyFrame bytes(std::vector<std::uint8_t> data) noexcept
+    {
+        ReadyFrame frame;
+        frame.owned_ = std::move(data);
+        frame.data_ = frame.owned_.data();
+        frame.length_ = frame.owned_.size();
+        return frame;
+    }
+
+    static ReadyFrame parked(void* handle, const std::uint8_t* data, std::size_t length,
+                             void (*release)(void* handle) noexcept) noexcept
+    {
+        ReadyFrame frame;
+        frame.handle_ = handle;
+        frame.data_ = data;
+        frame.length_ = length;
+        frame.release_ = release;
+        return frame;
+    }
+
+    ReadyFrame(ReadyFrame&& other) noexcept
+        : handle_{other.handle_},
+          data_{other.data_},
+          length_{other.length_},
+          release_{other.release_},
+          owned_{std::move(other.owned_)}
+    {
+        other.handle_ = nullptr;
+        other.data_ = nullptr;
+        other.length_ = 0;
+        other.release_ = nullptr;
+        if (!owned_.empty())
+        {
+            data_ = owned_.data();
+            length_ = owned_.size();
+        }
+    }
+
+    ReadyFrame& operator=(ReadyFrame&& other) noexcept
+    {
+        if (this != &other)
+        {
+            release();
+            handle_ = other.handle_;
+            data_ = other.data_;
+            length_ = other.length_;
+            release_ = other.release_;
+            owned_ = std::move(other.owned_);
+            other.handle_ = nullptr;
+            other.data_ = nullptr;
+            other.length_ = 0;
+            other.release_ = nullptr;
+            if (!owned_.empty())
+            {
+                data_ = owned_.data();
+                length_ = owned_.size();
+            }
+        }
+        return *this;
+    }
+
+    ~ReadyFrame()
+    {
+        release();
+    }
 
     ReadyFrame(const ReadyFrame&) = delete;
     ReadyFrame& operator=(const ReadyFrame&) = delete;
 
     [[nodiscard]] std::span<const std::uint8_t> as_bytes() const noexcept
     {
-        return bytes_;
+        return std::span<const std::uint8_t>{data_, length_};
+    }
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return nullptr != data_;
     }
 
 private:
-    std::vector<std::uint8_t> bytes_;
+    void release() noexcept
+    {
+        if (nullptr != release_)
+        {
+            release_(handle_);
+            release_ = nullptr;
+        }
+    }
+
+    void* handle_{nullptr};
+    const std::uint8_t* data_{nullptr};
+    std::size_t length_{0};
+    void (*release_)(void* handle) noexcept {nullptr};
+    std::vector<std::uint8_t> owned_{};
+};
+
+/// A frame a port kept for a transport: the binding it was routed under, the
+/// peer it came from, and the frame itself (parked, in the DPDK build).
+struct KeptFrame
+{
+    ports::Binding binding;
+    ports::Ipv4Endpoint source;
+    std::size_t payload_offset{0};
+    ReadyFrame frame;
 };
 
 /// What a port's hardware did to a frame's checksums.
@@ -125,8 +229,9 @@ public:
 
     /// Hand over up to `max` frames; `callback` decides each one's fate, and a
     /// kept frame is appended to `kept` under the binding it was routed under.
-    virtual std::size_t rx_burst(std::size_t max, RxCallback callback, void* context,
-                                 std::vector<std::pair<ports::Binding, ReadyFrame>>& kept) = 0;
+    /// A kept frame is handed over without a copy where the port can (the DPDK
+    /// build parks it); the rest are released before this returns.
+    virtual std::size_t rx_burst(std::size_t max, RxCallback callback, void* context, std::vector<KeptFrame>& kept) = 0;
 
     [[nodiscard]] virtual Offloads offloads() const noexcept = 0;
     [[nodiscard]] virtual std::array<std::uint8_t, 6> mac() const noexcept = 0;

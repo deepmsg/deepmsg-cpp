@@ -12,7 +12,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -78,6 +77,13 @@ public:
         return counters_;
     }
 
+    /// How many ring buffers the pool has been committed to (0 with an
+    /// unbounded budget).
+    [[nodiscard]] std::size_t ring_mbufs() const noexcept
+    {
+        return ring_mbufs_;
+    }
+
     [[nodiscard]] std::expected<ports::Binding, ports::BindFailure> bind(std::optional<std::uint32_t> address,
                                                                          std::uint16_t port,
                                                                          std::optional<ports::Ipv4Endpoint> peer,
@@ -111,6 +117,12 @@ public:
     [[nodiscard]] std::expected<std::size_t, Error> send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
                                                          std::span<const std::uint8_t> payload);
 
+    /// The same, for a datagram the caller holds in pieces (the driver's
+    /// `send_func` hands us iovecs): the frame is written once, straight into
+    /// the port's buffer, so no one copies the payload to put it together.
+    [[nodiscard]] std::expected<std::size_t, Error> send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
+                                                         std::span<const std::span<const std::uint8_t>> parts);
+
     /// Copy the next datagram for `binding` into `buffer`; answers its length,
     /// or zero when none is waiting.
     std::size_t receive(const ports::Binding& binding, std::span<std::uint8_t> buffer,
@@ -123,6 +135,10 @@ public:
     // Used by the demultiplexer.
     void count_a_discard(frame::Discard discard) noexcept;
     void count_unclaimed(std::span<const std::uint8_t> payload) noexcept;
+    /// A send the transport had to assemble through its own buffer (more
+    /// iovecs than the stack takes in one pass): counted in 79 with the
+    /// refusals, so the fallback is never invisible.
+    void count_a_transport_copy() noexcept;
     bool deliver(const ports::Binding& binding, ports::Ipv4Endpoint source, std::span<const std::uint8_t> payload);
 
     [[nodiscard]] packet_io::TxPort& sender_tx() noexcept
@@ -138,12 +154,19 @@ private:
     struct Datagram
     {
         ports::Ipv4Endpoint source{};
+        std::size_t payload_offset{0};
         packet_io::ReadyFrame frame;
     };
 
+    /// A transport's ready list: a fixed array (sized once, at bind) with a
+    /// read index and a count, so a delivered frame costs no allocation. Slots
+    /// are `optional` because a parked frame has no empty value to fall back
+    /// on -- an empty slot has to be distinguishable from a parked one.
     struct Ring
     {
-        std::deque<Datagram> frames;
+        std::vector<std::optional<Datagram>> frames;
+        std::size_t head{0};
+        std::size_t size{0};
         std::uint32_t generation{0};
         std::size_t capacity{0};
         SpinLock lock;
@@ -151,6 +174,8 @@ private:
 
     void reset_ring(const ports::Binding& binding);
     void clear_ring(std::uint16_t slot);
+    bool deliver_frame(const ports::Binding& binding, ports::Ipv4Endpoint source, std::size_t payload_offset,
+                       packet_io::ReadyFrame&& frame);
     std::size_t send_frame(std::span<const std::uint8_t> frame, packet_io::TxPort& port);
     void note_tx_result(const packet_io::TxResult& result) noexcept;
 
@@ -160,6 +185,7 @@ private:
     neighbour::NeighbourTable neighbours_;
     std::unique_ptr<Ring[]> rings_;
     StackCounters counters_;
+    std::size_t ring_mbufs_{0};
     std::unique_ptr<packet_io::RxPort> rx_;
     std::unique_ptr<packet_io::TxPort> sender_tx_;
 
@@ -173,7 +199,7 @@ private:
     // ARP or ICMP answer. A delivered datagram still copies its payload into
     // its transport's ring; zero-copy is not in this slice.
     std::vector<demux::Deferred> deferred_;
-    std::vector<std::pair<ports::Binding, packet_io::ReadyFrame>> kept_frames_;
+    std::vector<packet_io::KeptFrame> kept_frames_;
     std::vector<std::uint8_t> answer_buffer_;
     std::unique_ptr<packet_io::TxPort> receiver_tx_;
     std::atomic<std::uint16_t> identification_{0};

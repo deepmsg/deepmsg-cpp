@@ -55,18 +55,24 @@ struct UdpFill
     frame::Ipv4Write ipv4;
     ports::Binding binding;
     ports::Ipv4Endpoint destination;
-    std::span<const std::uint8_t> payload;
+    std::span<const std::span<const std::uint8_t>> parts;
+    std::size_t total;
 };
 
 std::pair<std::size_t, frame::TxOffloads> udp_fill(void* context, std::span<std::uint8_t> buffer)
 {
     const auto& udp = *static_cast<UdpFill*>(context);
-    if (buffer.size() < frame::IPV4_UDP_HEADER_LENGTH + udp.payload.size())
+    if (buffer.size() < frame::IPV4_UDP_HEADER_LENGTH + udp.total)
     {
         return {0, frame::TxOffloads::none()};
     }
-    std::copy(udp.payload.begin(), udp.payload.end(), buffer.begin() + frame::IPV4_UDP_HEADER_LENGTH);
-    const frame::UdpWrite write{udp.ipv4, udp.binding.port, udp.destination.port, udp.payload.size()};
+    std::size_t offset = frame::IPV4_UDP_HEADER_LENGTH;
+    for (const auto part : udp.parts)
+    {
+        std::copy(part.begin(), part.end(), buffer.begin() + static_cast<std::ptrdiff_t>(offset));
+        offset += part.size();
+    }
+    const frame::UdpWrite write{udp.ipv4, udp.binding.port, udp.destination.port, udp.total};
     const auto written = frame::write_ipv4_udp(buffer, write, udp.stack->sender_tx().checksums());
     if (!written)
     {
@@ -113,10 +119,20 @@ std::expected<ports::Binding, ports::BindFailure> Stack::bind(std::optional<std:
                                                               std::optional<ports::Ipv4Endpoint> peer,
                                                               ports::Ipv4Endpoint failure_at)
 {
+    // A parked frame holds a buffer until its transport drains it, so a ring
+    // that the pool cannot cover is refused here rather than turning into
+    // 88-shaped drops later.
+    const std::size_t capacity = params_.ring_capacity();
+    if (ring_mbufs_ + capacity > params_.ring_mbuf_budget)
+    {
+        return std::unexpected(ports::BindFailure{ENOBUFS, -1, failure_at});
+    }
+
     auto binding = ports_.bind(address, port, peer, failure_at);
     if (binding)
     {
         reset_ring(*binding);
+        ring_mbufs_ += capacity;
     }
     return binding;
 }
@@ -182,6 +198,14 @@ std::size_t Stack::pump()
     DemuxContext context{this, &deferred_};
     const std::size_t handed = rx_->rx_burst(params_.rx_burst, &demux_callback, &context, kept_frames_);
 
+    for (auto& kept : kept_frames_)
+    {
+        (void)deliver_frame(kept.binding, kept.source, kept.payload_offset, std::move(kept.frame));
+    }
+    // A frame the ring could not take is dropped here, and its buffer goes back
+    // to the pool now rather than at the next pass.
+    kept_frames_.clear();
+
     for (auto& answer : deferred_)
     {
         std::optional<std::size_t> written;
@@ -206,15 +230,28 @@ std::size_t Stack::pump()
 std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
                                               std::span<const std::uint8_t> payload)
 {
+    const std::span<const std::uint8_t> parts[]{payload};
+    return send(binding, destination, std::span<const std::span<const std::uint8_t>>{parts});
+}
+
+std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
+                                              std::span<const std::span<const std::uint8_t>> parts)
+{
+    std::size_t payload_size = 0;
+    for (const auto part : parts)
+    {
+        payload_size += part.size();
+    }
+
     // Not back pressure: no later pass makes a datagram this size fit, and the
     // caller has to hear about it (counter 79, `EMSGSIZE` at the seam). The
     // channel's MTU is the driver's and the port's is the card's, and nothing
     // reconciles them before a frame is built (plan §4.10).
-    if (payload.size() > params_.largest_datagram())
+    if (payload_size > params_.largest_datagram())
     {
         counters_.errors.fetch_add(1, std::memory_order_relaxed);
         return std::unexpected(make_error(ErrorCode::invalid_argument,
-                                          "datagram is larger than the port allows: " + std::to_string(payload.size()) +
+                                          "datagram is larger than the port allows: " + std::to_string(payload_size) +
                                               " > " + std::to_string(params_.largest_datagram())));
     }
 
@@ -229,8 +266,22 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
         {
             return 0;
         }
-        const bool delivered = deliver(*target, {params_.address, binding.port}, payload);
-        return delivered ? payload.size() : 0;
+        bool delivered = false;
+        if (1 == parts.size())
+        {
+            delivered = deliver(*target, {params_.address, binding.port}, parts.front());
+        }
+        else
+        {
+            std::vector<std::uint8_t> joined;
+            joined.reserve(payload_size);
+            for (const auto part : parts)
+            {
+                joined.insert(joined.end(), part.begin(), part.end());
+            }
+            delivered = deliver(*target, {params_.address, binding.port}, joined);
+        }
+        return delivered ? payload_size : 0;
     }
 
     const auto next = next_hop(destination.address);
@@ -267,34 +318,39 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
 
     const frame::Ipv4Write ipv4{*hardware, params_.mac, params_.address, destination.address, next_identification()};
 
-    UdpFill fill_context{this, ipv4, binding, destination, payload};
+    UdpFill fill_context{this, ipv4, binding, destination, parts, payload_size};
     const packet_io::TxResult sent = sender_tx_->tx_burst(1, &udp_fill, &fill_context);
     if (0 == sent.taken)
     {
         note_tx_result(sent);
         return 0;
     }
-    return payload.size();
+    return payload_size;
 }
 
 std::size_t Stack::receive(const ports::Binding& binding, std::span<std::uint8_t> buffer, ports::Ipv4Endpoint* source)
 {
     Ring& ring = rings_[binding.slot];
     SpinGuard guard{ring.lock};
-    if (ring.generation != binding.generation || ring.frames.empty())
+    if (ring.generation != binding.generation || 0 == ring.size)
     {
         return 0;
     }
 
-    const Datagram& datagram = ring.frames.front();
+    const Datagram& datagram = *ring.frames[ring.head];
     if (nullptr != source)
     {
         *source = datagram.source;
     }
-    const auto bytes = datagram.frame.as_bytes();
+    const auto frame_bytes = datagram.frame.as_bytes();
+    const auto bytes = frame_bytes.subspan(std::min(datagram.payload_offset, frame_bytes.size()));
     const std::size_t copied = std::min(buffer.size(), bytes.size());
     std::copy(bytes.data(), bytes.data() + copied, buffer.begin());
-    ring.frames.pop_front();
+    // The parked buffer goes back to the pool here, and not before: everything
+    // above read through it.
+    ring.frames[ring.head].reset();
+    ring.head = (ring.head + 1) % ring.capacity;
+    --ring.size;
     return copied;
 }
 
@@ -347,17 +403,32 @@ void Stack::count_unclaimed(std::span<const std::uint8_t> payload) noexcept
     counters_.rx_receiver_discard.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Stack::count_a_transport_copy() noexcept
+{
+    counters_.errors.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool Stack::deliver(const ports::Binding& binding, ports::Ipv4Endpoint source, std::span<const std::uint8_t> payload)
+{
+    return deliver_frame(binding, source, 0,
+                         packet_io::ReadyFrame::bytes(std::vector<std::uint8_t>(payload.begin(), payload.end())));
+}
+
+/// Put a frame (parked, in the DPDK build) in its transport's ring. The ring is
+/// full or stale: the frame is dropped here and its buffer goes back with it.
+bool Stack::deliver_frame(const ports::Binding& binding, ports::Ipv4Endpoint source, std::size_t payload_offset,
+                          packet_io::ReadyFrame&& frame)
 {
     Ring& ring = rings_[binding.slot];
     SpinGuard guard{ring.lock};
-    if (ring.generation != binding.generation || ring.frames.size() >= ring.capacity)
+    if (ring.generation != binding.generation || ring.size >= ring.capacity)
     {
         counters_.queue_drop.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    ring.frames.push_back(
-        Datagram{source, packet_io::ReadyFrame{std::vector<std::uint8_t>(payload.begin(), payload.end())}});
+    const std::size_t tail = (ring.head + ring.size) % ring.capacity;
+    ring.frames[tail] = Datagram{source, payload_offset, std::move(frame)};
+    ++ring.size;
     return true;
 }
 
@@ -365,16 +436,29 @@ void Stack::reset_ring(const ports::Binding& binding)
 {
     Ring& ring = rings_[binding.slot];
     SpinGuard guard{ring.lock};
-    ring.frames.clear();
-    ring.generation = binding.generation;
     ring.capacity = params_.ring_capacity();
+    ring.frames = std::vector<std::optional<Datagram>>(ring.capacity);
+    ring.head = 0;
+    ring.size = 0;
+    ring.generation = binding.generation;
 }
 
 void Stack::clear_ring(std::uint16_t slot)
 {
     Ring& ring = rings_[slot];
     SpinGuard guard{ring.lock};
+    if (ring.capacity <= ring_mbufs_)
+    {
+        ring_mbufs_ -= ring.capacity;
+    }
+    else
+    {
+        ring_mbufs_ = 0;
+    }
     ring.frames.clear();
+    ring.head = 0;
+    ring.size = 0;
+    ring.capacity = 0;
     ring.generation = 0;
 }
 

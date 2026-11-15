@@ -1,6 +1,7 @@
 #include "core/media/dpdk/bindings.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -332,6 +333,13 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
             {
                 state->binding = *binding;
             }
+            else if (ENOBUFS == binding.error().errcode)
+            {
+                std::fprintf(stdout,
+                             "dpdk media: a channel was refused: the mbuf pool has no room for another ring "
+                             "(rings use %zu of %zu buffers)\n",
+                             g_stack->ring_mbufs(), g_stack->params().ring_mbuf_budget);
+            }
         }
     }
 
@@ -410,29 +418,56 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
+    // The datagram goes into the frame straight from the driver's iovecs when
+    // there are few enough of them: the stack writes the headers once and
+    // copies each piece into the port's buffer, so nothing assembles the
+    // payload first (the transport's scratch is only the fallback).
+    constexpr std::size_t MAX_SEND_PARTS = 4;
+    std::array<std::span<const std::uint8_t>, MAX_SEND_PARTS> parts{};
     std::size_t total = 0;
+    std::size_t part_count = 0;
+    bool joined = false;
     for (std::size_t index = 0; index < iov_length; ++index)
     {
-        if (iov[index].iov_len > state->scratch.size() - total)
-        {
-            return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
-        }
         total += iov[index].iov_len;
+        if (part_count < MAX_SEND_PARTS)
+        {
+            parts[part_count++] = std::span<const std::uint8_t>{static_cast<const std::uint8_t*>(iov[index].iov_base),
+                                                                iov[index].iov_len};
+        }
+        else
+        {
+            joined = true;
+        }
     }
     if (0 == total)
     {
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
-    std::size_t offset = 0;
-    for (std::size_t index = 0; index < iov_length; ++index)
+    std::expected<std::size_t, Error> sent =
+        std::unexpected(make_error(ErrorCode::internal_error, "the datagram was neither scattered nor assembled"));
+    if (!joined)
     {
-        std::memcpy(state->scratch.data() + offset, iov[index].iov_base, iov[index].iov_len);
-        offset += iov[index].iov_len;
+        sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
+                             std::span<const std::span<const std::uint8_t>>{parts.data(), part_count});
     }
-
-    const auto sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
-                                    std::span<const std::uint8_t>{state->scratch.data(), total});
+    else
+    {
+        if (total > state->scratch.size())
+        {
+            return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
+        }
+        std::size_t offset = 0;
+        for (std::size_t index = 0; index < iov_length; ++index)
+        {
+            std::memcpy(state->scratch.data() + offset, iov[index].iov_base, iov[index].iov_len);
+            offset += iov[index].iov_len;
+        }
+        g_stack->count_a_transport_copy();
+        sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
+                             std::span<const std::uint8_t>{state->scratch.data(), total});
+    }
     if (!sent)
     {
         // The stack's 79 already counted it; the driver logs the sender error

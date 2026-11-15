@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -39,6 +40,12 @@ struct StackParams
     std::int64_t arp_timeout_ns{300LL * 1000 * 1000 * 1000};
     /// Next hops that were configured rather than learned.
     std::vector<std::pair<std::uint32_t, Mac>> static_neighbours;
+    /// How many buffers the pool can spare for transport rings (a parked frame
+    /// holds one until its transport copies it out). `max` means "no check",
+    /// which is what the in-memory wire wants; the DPDK media passes what is
+    /// left of its pool after the descriptors and the caches, and a bind that
+    /// does not fit is refused rather than turning into silent drops.
+    std::size_t ring_mbuf_budget{std::numeric_limits<std::size_t>::max()};
 
     /// The largest datagram this port can carry: its MTU less the IPv4 and UDP
     /// headers. The Ethernet header is not in the MTU, so it is not subtracted

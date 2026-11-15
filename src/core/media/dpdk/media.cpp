@@ -814,6 +814,19 @@ std::expected<Media, Error> open_media(const Settings& settings) noexcept
     params.arp_interval_ns = static_cast<std::int64_t>(settings.arp_retry_ms) * 1000 * 1000;
     params.arp_timeout_ns = static_cast<std::int64_t>(settings.arp_timeout_ms) * 1000 * 1000;
     params.static_neighbours = parse_neighbours(settings.static_neighbours);
+    // `deepmsg.dpdk.sender.ring` is how many frames a transport's ring holds;
+    // the window it is derived from keeps the same relationship the Rust track
+    // had (ring = next power of two >= twice the window's frames).
+    params.receive_window = std::max<std::size_t>(2, settings.sender_ring / 2) * params.mtu;
+
+    // The pool's reserve before any transport ring: the receive and transmit
+    // descriptors, the per-thread caches, and a margin. What is left is the
+    // budget `Stack::bind` will hold every channel to (a parked frame holds a
+    // buffer for as long as its ring does).
+    const std::size_t pool_size = settings.mempool_size.value_or(8191);
+    const std::size_t descriptor_reserve = static_cast<std::size_t>(settings.rx_descriptors) +
+                                           static_cast<std::size_t>(settings.tx_descriptors) * tx_queues + 64;
+    params.ring_mbuf_budget = pool_size > descriptor_reserve ? pool_size - descriptor_reserve : 0;
 
     // The adapters hold raw pointers to the port and the pool, so they are
     // built from the Impl's own members, never from the locals that were moved
