@@ -21,6 +21,8 @@ p6_java_opens=("--add-opens" "java.base/jdk.internal.misc=ALL-UNNAMED" "--add-op
 
 p6_work=
 p6_peer_iface=
+p6_netns=p6-peer
+p6_peer_in_netns=0
 p6_ours_pid=
 p6_ref_pid=
 
@@ -64,17 +66,39 @@ p6_compile_probes()
     done
 }
 
-# p6_setup_peer: the kernel side of the cable (both arms need it).
+# p6_setup_peer: the kernel side of the cable, in its own netns.
+#
+# The netns is not decoration: with both addresses in the host's netns the
+# kernel's route to the peer is `local ... dev lo`, so the kernel arm never
+# touches the cable (E4 voided two rounds on exactly this). The reference
+# driver and its clients run inside the namespace, on both arms, so the far
+# side is identical.
 p6_setup_peer()
 {
     nmcli device set "$(p6_peer_iface_name)" managed no 2>/dev/null || true
     ip link set "$(p6_peer_iface_name)" up
-    ip addr replace "$p6_peer_cidr" dev "$(p6_peer_iface_name)"
+    ip netns add "$p6_netns"
+    ip link set "$(p6_peer_iface_name)" netns "$p6_netns"
+    ip -n "$p6_netns" link set "$(p6_peer_iface_name)" up
+    ip -n "$p6_netns" addr replace "$p6_peer_cidr" dev "$(p6_peer_iface_name)"
+    p6_peer_in_netns=1
     local deadline=$((SECONDS + 20))
     while ((SECONDS < deadline)); do
-        ip link show "$(p6_peer_iface_name)" | grep -q LOWER_UP && break
+        if ip -n "$p6_netns" link show "$(p6_peer_iface_name)" | grep -q LOWER_UP; then
+            break
+        fi
         sleep 0.2
     done
+}
+
+# Run a command on the far side (inside the peer namespace when there is one).
+p6_on_peer()
+{
+    if [[ "$p6_peer_in_netns" == 1 ]]; then
+        ip netns exec "$p6_netns" "$@"
+    else
+        "$@"
+    fi
 }
 
 # p6_setup_ours <media|kernel>
@@ -167,7 +191,12 @@ p6_start_reference()
     mkdir -p "$aeron_dir"
     local cell_dir=${aeron_dir%/*}
     local log="$cell_dir/reference.log"
-    p6_start p6_ref_pid "$log" "$p6_build/aeron/binaries/aeronmd" "-Daeron.dir=$aeron_dir"
+    if [[ "$p6_peer_in_netns" == 1 ]]; then
+        p6_start p6_ref_pid "$log" ip netns exec "$p6_netns" "$p6_build/aeron/binaries/aeronmd" \
+            "-Daeron.dir=$aeron_dir"
+    else
+        p6_start p6_ref_pid "$log" "$p6_build/aeron/binaries/aeronmd" "-Daeron.dir=$aeron_dir"
+    fi
     p6_wait_until 30 test -f "$aeron_dir/cnc.dat" ||
         { echo "the reference driver did not start" >&2; tail -5 "$log"; exit 1; }
 }
@@ -188,6 +217,10 @@ p6_teardown()
     done
     sleep 1
     pkill -f "$p6_work/bin/" 2>/dev/null
+    if [[ "$p6_peer_in_netns" == 1 ]] && ip netns list 2>/dev/null | grep -q "^$p6_netns"; then
+        ip -n "$p6_netns" link set "$(p6_peer_iface_name)" netns 1 2>/dev/null
+        ip netns del "$p6_netns" 2>/dev/null
+    fi
     [[ -n "$p6_peer_iface" ]] && ip addr del "$p6_peer_cidr" dev "$p6_peer_iface" 2>/dev/null
     ip addr del "$p6_local_cidr" dev "$(p6_root_iface)" 2>/dev/null
     nmcli device set "$(p6_root_iface)" managed yes 2>/dev/null

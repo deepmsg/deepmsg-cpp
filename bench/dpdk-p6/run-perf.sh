@@ -43,10 +43,9 @@ cell() # cell <session> <arm> <position>
     p6_ours_pid= p6_ref_pid=
     p6_start_ours "$driver_arm" "$dir/ours-aeron"
     if [[ "$driver_arm" == media ]]; then
-        # the PMD's reset bounces the peer link; the address goes back on after
-        # the media line (E3's pitfall 1)
-        ip link set "$(p6_peer_iface_name)" up
-        ip addr replace "$p6_peer_cidr" dev "$(p6_peer_iface_name)"
+        # The PMD's reset bounces the peer link; the address lives in the peer
+        # namespace and survives the bounce, the link only has to be up again.
+        ip -n "$p6_netns" link set "$(p6_peer_iface_name)" up 2>/dev/null || true
     fi
     p6_start_reference "$dir/ref-aeron"
 
@@ -54,8 +53,9 @@ cell() # cell <session> <arm> <position>
     # existed before our subscription did, its SETUP frames would land on a port
     # with no binding and count as data-plane discards (the invariant).
     local trigger=$dir/trigger
-    "$p6_work/bin/echo" "$dir/ref-aeron" "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" "$STREAM" \
-        "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" 0 "$trigger" >"$dir/echo.log" 2>&1 &
+    p6_on_peer "$p6_work/bin/echo" "$dir/ref-aeron" "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" \
+        "$STREAM" "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" 0 "$trigger" \
+        >"$dir/echo.log" 2>&1 &
     local echo_pid=$!
     local deadline=$((SECONDS + 30))
     while ((SECONDS < deadline)) && ! grep -q READY "$dir/echo.log"; do sleep 0.1; done
