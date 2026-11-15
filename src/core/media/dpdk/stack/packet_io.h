@@ -137,6 +137,18 @@ public:
 /// nothing this time) and the offload it asks the port for.
 using TxFill = std::pair<std::size_t, frame::TxOffloads> (*)(void* context, std::span<std::uint8_t> buffer);
 
+/// What one transmit burst did.
+///
+/// A full ring and an empty buffer pool both leave the caller with nothing
+/// taken, and they are different counters: 78 (tx eagain) is the ring's
+/// answer, 77 (nobufs) is the pool's. Only the port can tell the two apart, so
+/// it says both.
+struct TxResult
+{
+    std::size_t taken{0};
+    std::size_t not_allocated{0};
+};
+
 /// A port's transmit side.
 class TxPort
 {
@@ -149,8 +161,8 @@ public:
     TxPort& operator=(const TxPort&) = delete;
 
     /// Ask `fill` for up to `count` frames and hand them to the port. Answers
-    /// how many were taken (G7).
-    virtual std::size_t tx_burst(std::size_t count, TxFill fill, void* context) = 0;
+    /// how many were taken (G7) and how many the port could not allocate.
+    virtual TxResult tx_burst(std::size_t count, TxFill fill, void* context) = 0;
 
     [[nodiscard]] virtual frame::L4Checksum checksums() const noexcept = 0;
     [[nodiscard]] virtual std::array<std::uint8_t, 6> mac() const noexcept = 0;

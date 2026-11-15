@@ -149,7 +149,7 @@ TEST(FakePort, AKeptFrameCarriesItsBytesAndBinding)
     Binding binding{3, 5000, 7};
 
     Fill fill{std::vector<std::uint8_t>{9, 8, 7, 6}};
-    ASSERT_EQ(1u, sender.tx_burst(1, fill_with, &fill));
+    ASSERT_EQ(1u, sender.tx_burst(1, fill_with, &fill).taken);
 
     std::vector<std::pair<Binding, ReadyFrame>> kept;
     EXPECT_EQ(1u, receiver.rx_burst(1, keep_all, &binding, kept));
@@ -166,7 +166,7 @@ TEST(FakePort, AConsumedFrameIsNotKept)
     auto receiver = wire.port(Side::b, MAC_B, 1500);
 
     Fill fill{std::vector<std::uint8_t>{1, 2, 3}};
-    ASSERT_EQ(1u, sender.tx_burst(1, fill_with, &fill));
+    ASSERT_EQ(1u, sender.tx_burst(1, fill_with, &fill).taken);
 
     std::vector<std::pair<Binding, ReadyFrame>> kept;
     EXPECT_EQ(1u, receiver.rx_burst(1, consume_all, nullptr, kept));
@@ -179,7 +179,7 @@ TEST(FakePort, AFrameLongerThanThePortIsNotTaken)
     auto sender = wire.port(Side::a, MAC_A, 8);
     Fill fill{std::vector<std::uint8_t>(9, 0xaa)};
 
-    EXPECT_EQ(0u, sender.tx_burst(1, fill_with, &fill));
+    EXPECT_EQ(0u, sender.tx_burst(1, fill_with, &fill).taken);
     EXPECT_EQ(0u, wire.queued(Side::a));
 }
 

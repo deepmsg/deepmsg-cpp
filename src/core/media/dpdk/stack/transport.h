@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <span>
 
@@ -30,11 +31,13 @@ public:
     Transport(Transport&&) = delete;
     Transport& operator=(Transport&&) = delete;
 
-    /// Send to the connected peer. Zero is back pressure.
-    std::size_t send(std::span<const std::uint8_t> payload);
+    /// Send to the connected peer. Zero is back pressure; an error is a
+    /// datagram the port cannot carry at all.
+    [[nodiscard]] std::expected<std::size_t, Error> send(std::span<const std::uint8_t> payload);
 
     /// Send to an explicit destination (an unconnected transport).
-    std::size_t send_to(ports::Ipv4Endpoint destination, std::span<const std::uint8_t> payload);
+    [[nodiscard]] std::expected<std::size_t, Error> send_to(ports::Ipv4Endpoint destination,
+                                                            std::span<const std::uint8_t> payload);
 
     /// Copy the next datagram into `buffer`; zero when none is waiting.
     std::size_t receive(std::span<std::uint8_t> buffer);

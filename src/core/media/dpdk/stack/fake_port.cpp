@@ -219,7 +219,7 @@ std::size_t FakePort::mtu() const noexcept
     return mtu_;
 }
 
-std::size_t FakePort::tx_burst(std::size_t count, packet_io::TxFill fill, void* context)
+packet_io::TxResult FakePort::tx_burst(std::size_t count, packet_io::TxFill fill, void* context)
 {
     std::size_t taken = 0;
     for (std::size_t index = 0; index < count; ++index)
@@ -239,7 +239,8 @@ std::size_t FakePort::tx_burst(std::size_t count, packet_io::TxFill fill, void* 
         wire_->enqueue(side_, std::vector<std::uint8_t>(begin, begin + length));
         ++taken;
     }
-    return taken;
+    // A wire allocates nothing, so it can never starve its caller (77).
+    return packet_io::TxResult{taken, 0};
 }
 
 frame::L4Checksum FakePort::checksums() const noexcept

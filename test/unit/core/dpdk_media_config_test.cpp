@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 
@@ -14,6 +15,7 @@ namespace
 {
 
 using axc::core::PropertySource;
+using axc::core::media::dpdk::apply_reference_media_alias;
 using axc::core::media::dpdk::install_if_configured;
 using axc::core::media::dpdk::parse_settings;
 
@@ -217,4 +219,48 @@ TEST(DpdkMediaConfig, AnOperatorTelemetryArgumentIsNotDuplicated)
     ASSERT_TRUE(arguments.has_value()) << message_of(arguments.error());
 
     EXPECT_EQ(1u, static_cast<std::size_t>(std::count(arguments->begin(), arguments->end(), "--no-telemetry")));
+}
+
+// The reference's media-selection name (`plan-dpdk-media.md` §4.8): the C
+// driver resolves it during `aeron_driver_context_init` and knows only
+// `default`, so the launcher answers `default` in the environment and turns the
+// switch on.
+TEST(DpdkMediaConfig, TheReferenceMediaNameIsTheAlias)
+{
+    PropertySource properties;
+    properties.set("aeron.udp.channel.transport.bindings.media", "dpdk");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    ASSERT_TRUE(apply_reference_media_alias(properties).has_value());
+    EXPECT_EQ("true", properties.get_or("deepmsg.dpdk.enabled", ""));
+    EXPECT_EQ("default", properties.get_or("aeron.udp.channel.transport.bindings.media", ""));
+    EXPECT_STREQ("default", std::getenv("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_MEDIA"));
+
+    const auto settings = parse_settings(properties);
+    ASSERT_TRUE(settings.has_value());
+    EXPECT_TRUE(settings->enabled);
+    (void)::unsetenv("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_MEDIA");
+}
+
+TEST(DpdkMediaConfig, TheAliasRefusesAnExplicitNo)
+{
+    PropertySource properties;
+    properties.set("aeron.udp.channel.transport.bindings.media", "dpdk");
+    properties.set("deepmsg.dpdk.enabled", "false");
+
+    const auto aliased = apply_reference_media_alias(properties);
+    ASSERT_FALSE(aliased.has_value());
+    EXPECT_NE(std::string::npos, message_of(aliased.error()).find("deepmsg.dpdk.enabled"));
+}
+
+TEST(DpdkMediaConfig, EveryOtherMediaNameIsLeftAlone)
+{
+    for (const char* const name : {"default", "something-else"})
+    {
+        PropertySource properties;
+        properties.set("aeron.udp.channel.transport.bindings.media", name);
+        ASSERT_TRUE(apply_reference_media_alias(properties).has_value()) << name;
+        EXPECT_EQ(name, properties.get_or("aeron.udp.channel.transport.bindings.media", "")) << name;
+        EXPECT_EQ("", properties.get_or("deepmsg.dpdk.enabled", "")) << name;
+    }
 }

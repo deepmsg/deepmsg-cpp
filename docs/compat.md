@@ -64,7 +64,7 @@ environment form is `DEEPMSG_DPDK_*` (`DEEPMSG_DPDK_IPV4_ADDRESS` ->
 
 | Name | Default | Meaning | Pinned by |
 |---|---|---|---|
-| `deepmsg.dpdk.enabled` | `false` | The media's switch. This — not the reference's `aeron.udp.channel.transport.bindings.media` — selects it: the C driver resolves that name in `aeron_driver_context_init` (`aeron_driver_context.c:1288`) before a media can be installed, and no `dpdk` symbol is exported (P5 would add the alias). | `DpdkMediaConfigTest`, `DpdkCounters` |
+| `deepmsg.dpdk.enabled` | `false` | The media's switch. `aeron.udp.channel.transport.bindings.media=dpdk` is honoured as an alias: the launcher answers `default` in the driver's environment — the C driver resolves that name in `aeron_driver_context_init` (`aeron_driver_context.c:1288`), before a media can be installed, and no `dpdk` symbol is exported — and sets this switch on. A conflicting `deepmsg.dpdk.enabled=false` is refused. `aeron.print.configuration` shows `default`. | `DpdkMediaConfigTest`, `DpdkAlias`, `DpdkCounters` |
 | `deepmsg.dpdk.eal.args` | empty | The operator's EAL arguments, whitespace-split and passed through (`-a 0000:03:00.0`, `--vdev=net_pcap0,...`, `--no-huge`). `--lcores`/`-l` is refused: the media chooses it from the process's own cpuset. | `DpdkMediaConfig` |
 | `deepmsg.dpdk.port` | first probed port | The EAL port name (a PCI address or a vdev name). | `DpdkMediaConfig`, `DpdkPortTest` |
 | `deepmsg.dpdk.ipv4.address` | required when enabled | This port's address/prefix, e.g. `10.10.0.1/24`. The kernel does not have it; the stack answers ARP for it. | `DpdkMediaChild` |
@@ -98,9 +98,17 @@ environment form is `DEEPMSG_DPDK_*` (`DEEPMSG_DPDK_IPV4_ADDRESS` ->
   broadcast and unreachable destinations fall back to the kernel; everything
   else leaves through the DPDK port. Only `aeron.threading.mode=DEDICATED` is
   accepted.
+- A datagram the port cannot frame (larger than its MTU allows) is refused with
+  `EMSGSIZE` from the send function, counted in 79 and logged by the driver's
+  sender (`aeron_driver_sender.c:433-437`): it is not back pressure, because no
+  later pass makes it fit. The copy buffer a transport keeps is sized by the
+  larger of the port's MTU and the channel's `aeron.mtu.length`, so the stack —
+  not a silent kernel fallback — answers a large datagram.
 - Counters use type ids 75–95 (`aeron_counters.h:155-173`); 80/81 are unused
   and 92 is the port's extended-statistics name count. Their keys and labels
-  are ours, because the reference's media is closed.
+  are ours, because the reference's media is closed. 77 counts a transmit that
+  could not get a buffer from the pool, 78 a ring that would not take the
+  frame, and 79 a send the stack refused.
 
 ## Known gaps (A4b, 2026-11-09)
 

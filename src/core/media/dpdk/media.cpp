@@ -21,6 +21,11 @@
 #include <sched.h>
 #include <unistd.h>
 
+extern "C"
+{
+#include "util/aeron_properties_util.h"
+}
+
 #if defined(AXC_WITH_DPDK)
 #include "core/media/dpdk/bindings.h"
 #include "core/media/dpdk/dpdk_port.h"
@@ -37,6 +42,11 @@ namespace
 {
 
 constexpr std::string_view PROPERTY_PREFIX{"deepmsg.dpdk."};
+
+/// The reference's media-selection name (`aeron_driver_context.c:1288`).
+constexpr std::string_view REFERENCE_MEDIA_NAME{"aeron.udp.channel.transport.bindings.media"};
+constexpr std::string_view REFERENCE_MEDIA_DPDK{"dpdk"};
+constexpr std::string_view ENABLED_PROPERTY{"deepmsg.dpdk.enabled"};
 
 #if defined(AXC_WITH_DPDK)
 /// How long `open_media` waits for the port's link before it refuses to open.
@@ -845,6 +855,33 @@ std::expected<Media, Error> open_media(const PropertySource& properties) noexcep
         return std::unexpected(settings.error());
     }
     return open_media(*settings);
+}
+
+std::expected<void, Error> apply_reference_media_alias(PropertySource& properties) noexcept
+{
+    const auto value = properties.get(REFERENCE_MEDIA_NAME);
+    if (!value || REFERENCE_MEDIA_DPDK != *value)
+    {
+        // Absent, `default`, or a name only the reference could serve: leave it
+        // and let the driver's own lookup give its own answer.
+        return {};
+    }
+
+    if (const auto enabled = properties.get(ENABLED_PROPERTY); enabled && "false" == *enabled)
+    {
+        return std::unexpected(
+            config_error(ENABLED_PROPERTY, "false conflicts with " + std::string{REFERENCE_MEDIA_NAME} + "=dpdk"));
+    }
+
+    properties.set(ENABLED_PROPERTY, "true");
+    // `aeron.print.configuration` and anything else that reads the name back
+    // sees `default`: the reference's name is answered, not adopted.
+    properties.set(REFERENCE_MEDIA_NAME, "default");
+    // The driver reads this name from the environment during
+    // `aeron_driver_context_init`, before `install_if_configured` runs; the
+    // switch above is what selects the media.
+    (void)aeron_properties_setenv(std::string{REFERENCE_MEDIA_NAME}.c_str(), "default");
+    return {};
 }
 
 std::expected<Media, Error> install_if_configured(aeron_driver_context_t* context,
