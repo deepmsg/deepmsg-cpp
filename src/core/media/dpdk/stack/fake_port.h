@@ -108,7 +108,7 @@ public:
     }
 
     std::size_t rx_burst(std::size_t max, packet_io::RxCallback callback, void* context,
-                         std::vector<std::pair<ports::Binding, packet_io::ReadyFrame>>& kept) override;
+                         std::vector<packet_io::KeptFrame>& kept) override;
 
     [[nodiscard]] packet_io::Offloads offloads() const noexcept override;
     [[nodiscard]] std::array<std::uint8_t, 6> mac() const noexcept override;

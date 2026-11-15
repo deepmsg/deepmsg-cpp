@@ -198,7 +198,7 @@ TEST(DpdkMediaChild, TheStackReceivesAndSendsOnAPcapPort)
     settings.static_neighbours = "10.10.0.2=02:00:00:00:00:02";
     settings.rx_descriptors = 256;
     settings.tx_descriptors = 256;
-    settings.mempool_size = 1023;
+    settings.mempool_size = 4095;
     settings.mempool_cache = 128;
     settings.rx_burst = 32;
 
@@ -411,7 +411,7 @@ TEST(DpdkMediaChild, TheMediaSaysWhichPortItOpened)
     settings.ipv4_address = axc::core::media::dpdk::Ipv4Prefix{0x0a0a0001, 24};
     settings.rx_descriptors = 256;
     settings.tx_descriptors = 256;
-    settings.mempool_size = 1023;
+    settings.mempool_size = 4095;
     settings.mempool_cache = 128;
 
     auto media = axc::core::media::dpdk::open_media(settings);

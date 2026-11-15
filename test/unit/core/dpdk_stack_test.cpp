@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -316,6 +317,40 @@ TEST(Stack, AnEmptyPoolIsCounter77AndNotCounter78)
     EXPECT_EQ(0u, *sent);
     EXPECT_EQ(1u, a.counters().nobufs.load());
     EXPECT_EQ(0u, a.counters().tx_eagain.load());
+}
+
+TEST(Stack, AScatteredPayloadLeavesAsTheSameFrame)
+{
+    // Two fresh stacks, so the only difference between the frames they send is
+    // the shape the payload arrived in (the IPv4 identification counts up per
+    // send, so the two sends have to start from the same state).
+    const std::array<std::uint8_t, 7> payload{1, 2, 3, 4, 5, 6, 7};
+    auto settings = params(OWN, MAC_A);
+    settings.static_neighbours.emplace_back(PEER, MAC_B);
+
+    Wire single_wire;
+    auto single_stack = make_stack(single_wire, Side::a, settings);
+    make_stack(single_wire, Side::b, params(PEER, MAC_B));
+    const auto single_binding = single_stack->bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    ASSERT_TRUE(single_binding.has_value());
+    ASSERT_EQ(7u, *single_stack->send(*single_binding, endpoint(PEER, 5001), payload));
+    const auto single = single_wire.take(Side::b, 1);
+    ASSERT_EQ(1u, single.size());
+
+    Wire scattered_wire;
+    auto scattered_stack = make_stack(scattered_wire, Side::a, settings);
+    make_stack(scattered_wire, Side::b, params(PEER, MAC_B));
+    const auto scattered_binding = scattered_stack->bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    ASSERT_TRUE(scattered_binding.has_value());
+    const std::span<const std::uint8_t> parts[]{std::span<const std::uint8_t>{payload}.first(2),
+                                                std::span<const std::uint8_t>{payload}.subspan(2, 3),
+                                                std::span<const std::uint8_t>{payload}.subspan(5)};
+    ASSERT_EQ(7u, *scattered_stack->send(*scattered_binding, endpoint(PEER, 5001), parts));
+    const auto scattered = scattered_wire.take(Side::b, 1);
+    ASSERT_EQ(1u, scattered.size());
+
+    EXPECT_EQ(single.front(), scattered.front()) << "three pieces, one frame, byte for byte the same";
+    EXPECT_EQ(0u, scattered_stack->counters().errors.load()) << "a scattered send is not a refusal";
 }
 
 TEST(Stack, TheLargestDatagramLeavesAndOneByteMoreDoesNot)

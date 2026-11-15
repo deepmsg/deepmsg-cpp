@@ -51,8 +51,19 @@ DpdkPort::DpdkPort(Port& port, Mempool& pool, unsigned rx_queue, unsigned tx_que
     }
 }
 
+namespace
+{
+
+/// What a parked frame does with the mbuf when the transport is done with it.
+void release_mbuf(void* mbuf) noexcept
+{
+    Mempool::free_bulk(&mbuf, 1);
+}
+
+}  // namespace
+
 std::size_t DpdkPort::rx_burst(std::size_t max, packet_io::RxCallback callback, void* context,
-                               std::vector<std::pair<ports::Binding, packet_io::ReadyFrame>>& kept)
+                               std::vector<packet_io::KeptFrame>& kept)
 {
     const auto burst = static_cast<unsigned>(std::min<std::size_t>(max, SHIM_BURST_MAX));
     const std::size_t received = port_->rx_burst(rx_queue_, rx_scratch_.data(), burst);
@@ -65,8 +76,12 @@ std::size_t DpdkPort::rx_burst(std::size_t max, packet_io::RxCallback callback, 
         const packet_io::Disposition disposition = callback(context, view);
         if (disposition.keep)
         {
-            kept.emplace_back(*disposition.keep,
-                              packet_io::ReadyFrame{std::vector<std::uint8_t>(view.bytes.begin(), view.bytes.end())});
+            // The frame stays in the pool until the transport has copied it
+            // out; nothing is copied here and nothing is allocated.
+            kept.push_back(packet_io::KeptFrame{
+                *disposition.keep, disposition.source, disposition.payload_offset,
+                packet_io::ReadyFrame::parked(descriptor.mbuf, descriptor.data, descriptor.len, &release_mbuf)});
+            continue;
         }
         void* mbuf = descriptor.mbuf;
         Mempool::free_bulk(&mbuf, 1);

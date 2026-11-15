@@ -19,6 +19,7 @@ axc_add_executable(axc_unit_tests
         core/dpdk_ports_test.cpp
         core/dpdk_packet_io_test.cpp
         core/dpdk_fake_port_test.cpp
+        core/dpdk_parked_frame_test.cpp
         core/dpdk_neighbour_test.cpp
         core/dpdk_arp_test.cpp
         core/dpdk_stack_test.cpp

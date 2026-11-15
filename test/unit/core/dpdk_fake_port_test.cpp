@@ -21,11 +21,13 @@ using axc::core::media::dpdk::fake_port::Side;
 using axc::core::media::dpdk::fake_port::Wire;
 using axc::core::media::dpdk::frame::TxOffloads;
 using axc::core::media::dpdk::packet_io::Disposition;
+using axc::core::media::dpdk::packet_io::KeptFrame;
 using axc::core::media::dpdk::packet_io::ReadyFrame;
 using axc::core::media::dpdk::packet_io::RxFrame;
 using axc::core::media::dpdk::packet_io::RxPort;
 using axc::core::media::dpdk::packet_io::TxPort;
 using axc::core::media::dpdk::ports::Binding;
+using axc::core::media::dpdk::ports::Ipv4Endpoint;
 
 constexpr std::array<std::uint8_t, 6> MAC_A{0x02, 0, 0, 0, 0, 0x01};
 constexpr std::array<std::uint8_t, 6> MAC_B{0x02, 0, 0, 0, 0, 0x02};
@@ -37,7 +39,7 @@ Disposition consume_all(void* /*context*/, const RxFrame& /*frame*/)
 
 Disposition keep_all(void* context, const RxFrame& /*frame*/)
 {
-    return Disposition::keep_for(*static_cast<Binding*>(context));
+    return Disposition::keep_for(*static_cast<Binding*>(context), Ipv4Endpoint{0x0a0a0001, 5000});
 }
 
 struct Fill
@@ -134,7 +136,7 @@ TEST(FakePort, ACapacityHoldsFramesBackRatherThanDroppingThem)
     }
 
     auto port = wire.port(Side::b, MAC_B, 1500);
-    std::vector<std::pair<Binding, ReadyFrame>> kept;
+    std::vector<KeptFrame> kept;
     EXPECT_EQ(1u, port.rx_burst(10, consume_all, nullptr, kept));
     EXPECT_EQ(2u, wire.queued(Side::a));
     EXPECT_EQ(1u, port.rx_burst(10, consume_all, nullptr, kept));
@@ -151,12 +153,12 @@ TEST(FakePort, AKeptFrameCarriesItsBytesAndBinding)
     Fill fill{std::vector<std::uint8_t>{9, 8, 7, 6}};
     ASSERT_EQ(1u, sender.tx_burst(1, fill_with, &fill).taken);
 
-    std::vector<std::pair<Binding, ReadyFrame>> kept;
+    std::vector<KeptFrame> kept;
     EXPECT_EQ(1u, receiver.rx_burst(1, keep_all, &binding, kept));
     ASSERT_EQ(1u, kept.size());
-    EXPECT_EQ(binding, kept.front().first);
+    EXPECT_EQ(binding, kept.front().binding);
     EXPECT_EQ(fill.bytes,
-              std::vector<std::uint8_t>(kept.front().second.as_bytes().begin(), kept.front().second.as_bytes().end()));
+              std::vector<std::uint8_t>(kept.front().frame.as_bytes().begin(), kept.front().frame.as_bytes().end()));
 }
 
 TEST(FakePort, AConsumedFrameIsNotKept)
@@ -168,7 +170,7 @@ TEST(FakePort, AConsumedFrameIsNotKept)
     Fill fill{std::vector<std::uint8_t>{1, 2, 3}};
     ASSERT_EQ(1u, sender.tx_burst(1, fill_with, &fill).taken);
 
-    std::vector<std::pair<Binding, ReadyFrame>> kept;
+    std::vector<KeptFrame> kept;
     EXPECT_EQ(1u, receiver.rx_burst(1, consume_all, nullptr, kept));
     EXPECT_TRUE(kept.empty());
 }
