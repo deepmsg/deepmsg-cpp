@@ -9,6 +9,7 @@
 
 #include <aeronc.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -42,6 +43,9 @@
 #endif
 #ifndef AXC_AERON_JAR
 #define AXC_AERON_JAR ""
+#endif
+#ifndef AXC_ROLE_CHANGE_SERVICE_LIBRARY
+#define AXC_ROLE_CHANGE_SERVICE_LIBRARY ""
 #endif
 
 namespace
@@ -240,11 +244,21 @@ protected:
              << "aeron.cluster.service.id=0\n"
              << "aeron.cluster.service.name=clustered-service-" << CLUSTER_ID << "-0\n"
              << "deepmsg.cluster.service=echo\n";
+        if (!service_library_.empty())
+        {
+            cout << "deepmsg.cluster.service.library=" << service_library_ << "\n"
+                 << "deepmsg.cluster.service=role-change\n";
+        }
     }
 
     void start(const std::string& supplier = {})
     {
         write_properties(supplier);
+        if (!role_dir_.empty())
+        {
+            std::error_code error;
+            std::filesystem::create_directories(role_dir_, error);
+        }
         auto node = spawn_logged(AXC_CLUSTER_NODE_BIN, {"--embedded-driver", directory_ + "/node.properties"},
                                  directory_ + "/node.log");
         ASSERT_TRUE(node) << node.error().message.view();
@@ -256,6 +270,15 @@ protected:
         // give the CM a moment and respawn a container that exits early.
         ASSERT_TRUE(wait_for_driver()) << log_text("node");
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        if (!role_dir_.empty())
+        {
+            const std::string file = role_dir_ + "/role-0.txt";
+            (void)::setenv("AXC_TEST_ROLE_FILE", file.c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_ROLE_FILE");
+        }
         for (int attempt = 0; attempt < 20; ++attempt)
         {
             auto container = spawn_logged(AXC_CONTAINER_BINARY, {directory_ + "/container.properties"},
@@ -373,6 +396,29 @@ protected:
         return entries;
     }
 
+    [[nodiscard]] std::vector<std::int32_t> role_records() const
+    {
+        std::ifstream in{role_dir_ + "/role-0.txt"};
+        std::vector<std::int32_t> roles;
+        std::int32_t role = 0;
+        while (in >> role)
+        {
+            roles.push_back(role);
+        }
+        return roles;
+    }
+
+    [[nodiscard]] std::string role_files() const
+    {
+        std::string names;
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(role_dir_, error))
+        {
+            names.append(entry.path().filename().string()).append(" ");
+        }
+        return names;
+    }
+
     /// `ClusterTest.shouldEnterElectionWhenRecordingStopsUnexpectedlyOnLeader`
     /// on one node: stop the cluster log recording (id 0 on a fresh directory).
     [[nodiscard]] bool stop_log_recording()
@@ -473,6 +519,8 @@ protected:
     std::vector<std::string> probe_sources_{};
     std::int32_t log_port_{0};
     std::int32_t archive_control_port_{0};
+    std::string service_library_{};
+    std::string role_dir_{};
     std::unique_ptr<ChildProcess> node_{};
     std::unique_ptr<ChildProcess> container_{};
     std::unique_ptr<DeepmsgClient> client_{};
@@ -789,6 +837,19 @@ TEST_F(Xc2SingleNodeElectionTest, shouldEnterElectionWhenRecordingStopsUnexpecte
     }
 
     EXPECT_TRUE(advanced) << "the single node did not start a new term after the recording stopped" << log_text("node");
+}
+
+TEST_F(Xc2SingleNodeElectionTest, shouldCallOnRoleChangeOnBecomingLeaderSingleNodeCluster)
+{
+    service_library_ = AXC_ROLE_CHANGE_SERVICE_LIBRARY;
+    role_dir_ = directory_ + "/roles";
+
+    start();
+
+    const std::vector<std::int32_t> roles = role_records();
+    EXPECT_NE(roles.end(), std::find(roles.begin(), roles.end(), 2))
+        << "the single node's service never saw onRoleChange(LEADER); files: " << role_files() << log_text("node")
+        << log_text("container");
 }
 
 }  // namespace

@@ -99,6 +99,18 @@ axc_add_executable(deepmsg-cluster-client-smoke
         axc_cluster_client)
 set_target_properties(deepmsg-cluster-client-smoke PROPERTIES LINKER_LANGUAGE CXX)
 
+# C6c: the business that records `on_role_change` for the scenario to read.
+add_library(role_change_service_dynamic SHARED services/role_change_service.cpp)
+axc_target_defaults(role_change_service_dynamic)
+target_include_directories(role_change_service_dynamic PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_BINARY_DIR}/generated/axc/sbe"
+    "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-client/src/main/c"
+    "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-archive/src/main/c")
+add_dependencies(role_change_service_dynamic axc_sbe_codecs)
+set_target_properties(role_change_service_dynamic PROPERTIES PREFIX "" OUTPUT_NAME "role-change-service")
+target_link_options(role_change_service_dynamic PRIVATE "-Wl,--unresolved-symbols=ignore-all")
+
 target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
@@ -107,10 +119,11 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_CONSENSUS_MODULE_BIN=\"$<TARGET_FILE:deepmsg-consensus-module>\""
     "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\""
     "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
+    "AXC_ROLE_CHANGE_SERVICE_LIBRARY=\"$<TARGET_FILE:role_change_service_dynamic>\""
     "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\"")
 
 add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container deepmsg-cluster-node
-    deepmsg-consensus-module echo_service_dynamic deepmsg-cluster-client-smoke)
+    deepmsg-consensus-module echo_service_dynamic role_change_service_dynamic deepmsg-cluster-client-smoke)
 
 # The tool under test is an executable of its own; build it with the suite.
 add_dependencies(axc_archive_interop_tests archive-tool-ro)

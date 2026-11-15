@@ -335,6 +335,11 @@ protected:
                 << "aeron.cluster.service.id=0\n"
                 << "aeron.cluster.service.name=clustered-service-" << CLUSTER_ID << "-0\n"
                 << "deepmsg.cluster.service=echo\n";
+            if (!service_library_.empty())
+            {
+                out << "deepmsg.cluster.service.library=" << service_library_ << "\n"
+                    << "deepmsg.cluster.service=role-change\n";
+            }
         }
     }
 
@@ -374,6 +379,15 @@ protected:
     void start_container(int round, int index)
     {
         const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
+        if (!role_dir_.empty())
+        {
+            const std::string file = role_dir_ + "/role-" + std::to_string(index) + ".txt";
+            (void)::setenv("AXC_TEST_ROLE_FILE", file.c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_ROLE_FILE");
+        }
         auto container =
             spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
         ASSERT_TRUE(container) << container.error().message.view();
@@ -803,6 +817,20 @@ protected:
         return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     }
 
+    /// `on_role_change` records written by the role-change test service, one
+    /// role code per line.
+    [[nodiscard]] std::vector<std::int32_t> role_records(int index) const
+    {
+        std::ifstream in{role_dir_ + "/role-" + std::to_string(index) + ".txt"};
+        std::vector<std::int32_t> roles;
+        std::int32_t role = 0;
+        while (in >> role)
+        {
+            roles.push_back(role);
+        }
+        return roles;
+    }
+
     void start_cluster(int round)
     {
         round_ = round;
@@ -817,6 +845,11 @@ protected:
     {
         write_node_properties(round);
         write_container_properties(round);
+        if (!role_dir_.empty())
+        {
+            std::error_code error;
+            std::filesystem::create_directories(role_dir_, error);
+        }
         start_client_driver(round);
 
         // Start each node with its container, staggered: the consensus and log
@@ -886,6 +919,8 @@ protected:
     std::string root_dir_{};
     std::string classes_dir_{};
     std::string client_aeron_dir_{};
+    std::string service_library_{};
+    std::string role_dir_{};
     std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[NODES]{};
