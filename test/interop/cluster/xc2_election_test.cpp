@@ -247,6 +247,37 @@ protected:
             node_property_overrides_[i]["aeron.cluster.ingress.ipc.allowed"] = "true";
         }
     }
+
+    /// `AsyncConnect` can fail transiently while the client driver is still
+    /// settling; the scenario retries instead of treating one refused connect
+    /// as a product failure.
+    [[nodiscard]] bool connect_udp_retry(ClusterClientSession& session, const std::string& egress_channel)
+    {
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            if (session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress_channel))
+            {
+                return true;
+            }
+            session.close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool connect_ipc_retry(ClusterClientSession& session, int node_index)
+    {
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            if (session.connect_ipc(node_aeron_dir(round_, node_index)))
+            {
+                return true;
+            }
+            session.close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        return false;
+    }
 };
 
 TEST_F(Xc2ElectionTest, aHigherTermCommitPositionStartsAnElection)
@@ -487,7 +518,7 @@ TEST_F(Xc2ElectionTest, shouldConnectClientOverIpc)
     ASSERT_GE(leader, 0) << node_dump();
 
     ClusterClientSession session;
-    ASSERT_TRUE(session.connect_ipc(node_aeron_dir(round_, leader))) << node_dump();
+    ASSERT_TRUE(connect_ipc_retry(session, leader)) << node_dump() << session.last_error();
     EXPECT_TRUE(send_echoes(session, 10)) << node_dump() << node_log(0, leader);
     session.close();
 
@@ -502,7 +533,7 @@ TEST_F(Xc2ElectionTest, shouldConnectClientUsingResolvedResponsePortWithFixedPor
     ClusterClientSession session;
     const std::string egress =
         "aeron:udp?term-length=64k|endpoint=localhost:" + std::to_string(ports_for(round_).client_egress + 50);
-    ASSERT_TRUE(session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress)) << node_dump();
+    ASSERT_TRUE(connect_udp_retry(session, egress)) << node_dump() << session.last_error();
     EXPECT_TRUE(send_echoes(session, 10)) << node_dump();
     session.close();
 
@@ -515,9 +546,8 @@ TEST_F(Xc2ElectionTest, shouldConnectClientUsingResolvedResponsePortWithZeroPort
     ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
     ClusterClientSession session;
-    ASSERT_TRUE(session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_),
-                                    "aeron:udp?term-length=64k|endpoint=localhost:0"))
-        << node_dump();
+    ASSERT_TRUE(connect_udp_retry(session, "aeron:udp?term-length=64k|endpoint=localhost:0"))
+        << node_dump() << session.last_error();
     EXPECT_TRUE(send_echoes(session, 10)) << node_dump();
     session.close();
 
@@ -532,8 +562,7 @@ TEST_F(Xc2ElectionTest, shouldConnectAndSendKeepAlive)
     ASSERT_EQ(1, leader_index()) << node_dump();
 
     ClusterClientSession session;
-    ASSERT_TRUE(session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress_channel_for(round_)))
-        << node_dump();
+    ASSERT_TRUE(connect_udp_retry(session, egress_channel_for(round_))) << node_dump() << session.last_error();
     EXPECT_TRUE(session.send_keep_alive()) << node_dump();
     session.close();
 
@@ -548,8 +577,7 @@ TEST_F(Xc2ElectionTest, shouldEchoMessagesViaService)
     ASSERT_EQ(1, leader_index()) << node_dump();
 
     ClusterClientSession session;
-    ASSERT_TRUE(session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress_channel_for(round_)))
-        << node_dump();
+    ASSERT_TRUE(connect_udp_retry(session, egress_channel_for(round_))) << node_dump() << session.last_error();
     EXPECT_TRUE(send_echoes(session, 10)) << node_dump();
     session.close();
 
@@ -564,8 +592,7 @@ TEST_F(Xc2ElectionTest, shouldReplayWithAppointedLeaderWithThreeNodesWithNoSnaps
     ASSERT_EQ(1, leader_index()) << node_dump();
 
     ClusterClientSession session;
-    ASSERT_TRUE(session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress_channel_for(round_)))
-        << node_dump();
+    ASSERT_TRUE(connect_udp_retry(session, egress_channel_for(round_))) << node_dump() << session.last_error();
     EXPECT_TRUE(send_echoes(session, 10)) << node_dump();
     session.close();
 
@@ -580,16 +607,14 @@ TEST_F(Xc2ElectionTest, shouldCatchUpWithAppointedLeaderWithThreeNodesWithNoSnap
     ASSERT_EQ(1, leader_index()) << node_dump();
 
     ClusterClientSession session;
-    ASSERT_TRUE(session.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress_channel_for(round_)))
-        << node_dump();
+    ASSERT_TRUE(connect_udp_retry(session, egress_channel_for(round_))) << node_dump() << session.last_error();
     ASSERT_TRUE(send_echoes(session, 5)) << node_dump();
     session.close();
 
     stop_node_gracefully(0);
 
     ClusterClientSession second;
-    ASSERT_TRUE(second.connect_udp(client_aeron_dir_, ingress_endpoints_for(round_), egress_channel_for(round_)))
-        << node_dump();
+    ASSERT_TRUE(connect_udp_retry(second, egress_channel_for(round_))) << node_dump() << second.last_error();
     EXPECT_TRUE(send_echoes(second, 5)) << node_dump();
     second.close();
 

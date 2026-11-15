@@ -111,6 +111,11 @@ public:
         return listener_.new_leader_events;
     }
 
+    [[nodiscard]] const std::string& last_error() const noexcept
+    {
+        return last_error_;
+    }
+
     [[nodiscard]] bool send_keep_alive()
     {
         // `AsyncConnect` returns at DONE before the ingress publication's
@@ -210,17 +215,21 @@ private:
         auto client = DeepmsgClient::connect(axc::core::ClientConfig{aeron_dir});
         if (!client)
         {
+            last_error_ = "DeepmsgClient::connect failed";
             return false;
         }
         client_ = std::make_unique<DeepmsgClient>(std::move(*client));
 
-        if (!config.conclude().has_value())
+        auto concluded = config.conclude();
+        if (!concluded.has_value())
         {
+            last_error_ = "conclude: " + std::string{concluded.error().message.view()};
             return false;
         }
         auto async = AsyncConnect::create(config);
         if (!async.has_value())
         {
+            last_error_ = "AsyncConnect::create: " + std::string{async.error().message.view()};
             return false;
         }
 
@@ -230,6 +239,7 @@ private:
             auto polled = async->poll(*client_);
             if (!polled.has_value())
             {
+                last_error_ = "AsyncConnect::poll: " + std::string{polled.error().message.view()};
                 return false;
             }
             if (polled->has_value())
@@ -241,6 +251,7 @@ private:
             (void)client_->do_work();
             std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
+        last_error_ = "AsyncConnect deadline";
         return false;
     }
 
@@ -258,6 +269,7 @@ private:
     std::unique_ptr<DeepmsgClient> client_{};
     std::optional<ClusterClient> cluster_{};
     RecordingEgressListener listener_{};
+    std::string last_error_{};
 };
 
 }  // namespace axc::interop
