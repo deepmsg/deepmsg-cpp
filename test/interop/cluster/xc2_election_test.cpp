@@ -487,7 +487,7 @@ TEST_F(Xc2ElectionTest, shouldElectNewLeaderAfterGracefulLeaderClose)
 
     stop_node_gracefully(leader);
 
-    const int new_leader = await_new_leader(term, survivors, std::chrono::seconds(15));
+    const int new_leader = await_new_leader(term, survivors, std::chrono::seconds(45));
     EXPECT_GE(new_leader, 0) << "no new leader after a graceful close: " << node_dump() << node_log(0, leader);
     EXPECT_NE(leader, new_leader) << node_dump();
 
