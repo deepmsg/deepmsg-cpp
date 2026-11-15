@@ -5,6 +5,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -31,6 +32,7 @@ extern "C"
 
 #include "core/media/dpdk/counters.h"
 #include "core/media/dpdk/eal.h"
+#include "core/media/dpdk/media.h"
 #include "core/media/dpdk/mempool.h"
 #include "core/media/dpdk/port.h"
 #include "core/media/dpdk/stack/stack.h"
@@ -600,6 +602,26 @@ std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack
         return std::unexpected(
             make_error(ErrorCode::config_error, "the DPDK media needs aeron.threading.mode=DEDICATED"));
     }
+
+    // Nobody else drains the port: an idle strategy that sleeps leaves the
+    // frames in the NIC ring (counter 84) with no hint of why. A warning, not a
+    // refusal -- the reference lets an operator pick (design §4.12); stdout,
+    // because the reference's harnesses read stderr as a failure channel.
+    // The strategy's name is not printed: `aeron_driver_context_init` loads the
+    // function from `AERON_*_IDLE_STRATEGY` but leaves the name at `backoff`,
+    // so the name would read "backoff" for a strategy that sleeps.
+    const auto warn_if_idle_starves_the_ring = [](const char* role, aeron_idle_strategy_func_t strategy)
+    {
+        if (idle_strategy_can_starve_the_ring(strategy))
+        {
+            std::fprintf(stdout,
+                         "dpdk media warning: the %s idle strategy is not a busy spin; frames wait in the NIC "
+                         "ring while that thread idles (counter 84 counts what the ring drops)\n",
+                         role);
+        }
+    };
+    warn_if_idle_starves_the_ring("receiver", context->receiver_idle_strategy_func);
+    warn_if_idle_starves_the_ring("sender", context->sender_idle_strategy_func);
     if (nullptr != g_stack && g_stack != &target)
     {
         return std::unexpected(

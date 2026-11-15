@@ -4,9 +4,15 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <pthread.h>
 #include <sched.h>
+
+extern "C"
+{
+#include <aeron_agent.h>
+}
 
 #include "core/config/property_source.h"
 #include "core/media/dpdk/media.h"
@@ -16,6 +22,8 @@ namespace
 
 using axc::core::PropertySource;
 using axc::core::media::dpdk::apply_reference_media_alias;
+using axc::core::media::dpdk::eal_arguments;
+using axc::core::media::dpdk::idle_strategy_can_starve_the_ring;
 using axc::core::media::dpdk::install_if_configured;
 using axc::core::media::dpdk::parse_settings;
 
@@ -263,4 +271,59 @@ TEST(DpdkMediaConfig, EveryOtherMediaNameIsLeftAlone)
         EXPECT_EQ(name, properties.get_or("aeron.udp.channel.transport.bindings.media", "")) << name;
         EXPECT_EQ("", properties.get_or("deepmsg.dpdk.enabled", "")) << name;
     }
+}
+
+// A DPDK process that leaves files in /var/run/dpdk collides with the next one
+// on the same host (design §4.8). The media answers for that: `--in-memory` on
+// huge pages, `--no-shconf` with `--no-huge`, once each, and the two together
+// are an EAL impossibility worth refusing here.
+TEST(DpdkMediaConfig, TheEalArgumentsLeaveNoRuntimeFiles)
+{
+    const auto count_of = [](const std::vector<std::string>& arguments, const std::string& wanted)
+    { return static_cast<std::size_t>(std::count(arguments.begin(), arguments.end(), wanted)); };
+
+    axc::core::media::dpdk::Settings huge_pages;
+    huge_pages.eal_args = "-a 0000:03:00.0";
+    const auto huge = eal_arguments(huge_pages);
+    ASSERT_TRUE(huge.has_value()) << message_of(huge.error());
+    EXPECT_EQ(1u, count_of(*huge, "--in-memory"));
+    EXPECT_EQ(0u, count_of(*huge, "--no-shconf"));
+
+    axc::core::media::dpdk::Settings no_huge;
+    no_huge.eal_args = "--no-huge";
+    const auto shconf = eal_arguments(no_huge);
+    ASSERT_TRUE(shconf.has_value()) << message_of(shconf.error());
+    EXPECT_EQ(1u, count_of(*shconf, "--no-shconf"));
+    EXPECT_EQ(0u, count_of(*shconf, "--in-memory"));
+
+    axc::core::media::dpdk::Settings already;
+    already.eal_args = "--no-huge --no-shconf";
+    const auto kept = eal_arguments(already);
+    ASSERT_TRUE(kept.has_value()) << message_of(kept.error());
+    EXPECT_EQ(1u, count_of(*kept, "--no-shconf"));
+
+    axc::core::media::dpdk::Settings memory_given;
+    memory_given.eal_args = "--in-memory";
+    const auto memory = eal_arguments(memory_given);
+    ASSERT_TRUE(memory.has_value()) << message_of(memory.error());
+    EXPECT_EQ(1u, count_of(*memory, "--in-memory"));
+
+    axc::core::media::dpdk::Settings both;
+    both.eal_args = "--no-huge --in-memory";
+    const auto impossible = eal_arguments(both);
+    ASSERT_FALSE(impossible.has_value());
+    EXPECT_NE(std::string::npos, message_of(impossible.error()).find("mutually exclusive"));
+}
+
+TEST(DpdkMediaConfig, OnlyBusySpinIdleStrategiesKeepTheRingDrained)
+{
+    // `backoff` is the C driver's default and it parks up to 1 ms
+    // (aeron_agent.h:45-46); a driver-level round trip on the bench measured
+    // 1.07 ms with it and 29.7 us with `spin`.
+    EXPECT_TRUE(idle_strategy_can_starve_the_ring(&aeron_idle_strategy_sleeping_idle));
+    EXPECT_TRUE(idle_strategy_can_starve_the_ring(&aeron_idle_strategy_yielding_idle));
+    EXPECT_TRUE(idle_strategy_can_starve_the_ring(&aeron_idle_strategy_backoff_idle));
+    EXPECT_FALSE(idle_strategy_can_starve_the_ring(&aeron_idle_strategy_busy_spinning_idle));
+    EXPECT_FALSE(idle_strategy_can_starve_the_ring(&aeron_idle_strategy_noop_idle));
+    EXPECT_FALSE(idle_strategy_can_starve_the_ring(nullptr));
 }
