@@ -93,6 +93,31 @@ protected:
         return false;
     }
 
+    /// `wait_for_cluster` stops at ACTIVE/role/term; the election counter is
+    /// still CLOSED-or-earlier until each member finishes joining. The forged
+    /// message criterion needs a settled election, or the counter starts below
+    /// 17 for reasons unrelated to the trigger.
+    [[nodiscard]] bool wait_for_elections_closed(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            bool all_closed = true;
+            for (int i = 0; i < NODES; ++i)
+            {
+                all_closed =
+                    all_closed && node_counter(i, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID) == 17;
+            }
+            if (all_closed)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
     /// The trigger is observable as the election leaving CLOSED (17) and the
     /// counted error the reference's `enterElection` reports. The election may
     /// then resolve back to the current leader (there is no real higher-term
@@ -104,9 +129,8 @@ protected:
         while (std::chrono::steady_clock::now() < deadline)
         {
             drive_node_clients();
-            if (node_counter(target, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID) != 17 ||
-                node_counter(target, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID) >
-                    error_count_before)
+            (void)error_count_before;
+            if (node_counter(target, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID) != 17)
             {
                 return true;
             }
@@ -119,6 +143,7 @@ protected:
 TEST_F(Xc2ElectionTest, aHigherTermCommitPositionStartsAnElection)
 {
     start_cluster(0);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
     const int leader = leader_index();
     ASSERT_GE(leader, 0) << node_dump();
@@ -127,6 +152,9 @@ TEST_F(Xc2ElectionTest, aHigherTermCommitPositionStartsAnElection)
     const std::int64_t commit = node_counter(target, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
     const std::int64_t errors_before =
         node_counter(target, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
+
+    ASSERT_EQ(17, node_counter(target, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID))
+        << "the target is not in a closed election before the forged message: " << node_dump();
 
     auto publisher = publisher_for(target);
     ASSERT_NE(nullptr, publisher);
@@ -143,6 +171,7 @@ TEST_F(Xc2ElectionTest, aHigherTermCommitPositionStartsAnElection)
 TEST_F(Xc2ElectionTest, aHigherTermNewLeadershipTermStartsAnElection)
 {
     start_cluster(0);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
     const int leader = leader_index();
     ASSERT_GE(leader, 0) << node_dump();
@@ -151,6 +180,9 @@ TEST_F(Xc2ElectionTest, aHigherTermNewLeadershipTermStartsAnElection)
     const std::int64_t commit = node_counter(target, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
     const std::int64_t errors_before =
         node_counter(target, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID);
+
+    ASSERT_EQ(17, node_counter(target, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID))
+        << "the target is not in a closed election before the forged message: " << node_dump();
 
     auto publisher = publisher_for(target);
     ASSERT_NE(nullptr, publisher);
@@ -169,6 +201,7 @@ TEST_F(Xc2ElectionTest, aHigherTermNewLeadershipTermStartsAnElection)
 TEST_F(Xc2ElectionTest, theLeaderStepsDownWhenItLosesTheFollowerQuorum)
 {
     start_cluster(0);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
     const int leader = leader_index();
     ASSERT_GE(leader, 0) << node_dump();
@@ -212,6 +245,7 @@ TEST_F(Xc2ElectionTest, theFollowersElectWhenTheLeaderHeartbeatStops)
     }
 
     start_cluster(0);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
     const int leader = leader_index();
     ASSERT_GE(leader, 0) << node_dump();
