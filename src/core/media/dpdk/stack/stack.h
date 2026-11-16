@@ -123,6 +123,25 @@ public:
     [[nodiscard]] std::expected<std::size_t, Error> send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
                                                          std::span<const std::span<const std::uint8_t>> parts);
 
+    /// What [`send_datagrams`] did: how many of the datagrams the port took, in
+    /// order, and how many bytes those were.
+    struct DatagramsSent
+    {
+        std::size_t datagrams{0};
+        std::int64_t bytes{0};
+    };
+
+    /// Hand each element to the port as its own datagram, in order, and answer
+    /// how many went. This is the reference's `send_func` contract exactly: one
+    /// iov is one datagram, and the return is the number of them the port took
+    /// (`media/aeron_udp_channel_transport.c:728-773`, `sendv`). A datagram the
+    /// port cannot take stops the run where it is -- what left before it stays
+    /// counted, which is what lets the sender's position advance by those and
+    /// no further (`aeron_network_publication.c:495-580`).
+    [[nodiscard]] std::expected<DatagramsSent, Error> send_datagrams(
+        const ports::Binding& binding, ports::Ipv4Endpoint destination,
+        std::span<const std::span<const std::uint8_t>> datagrams);
+
     /// Copy the next datagram for `binding` into `buffer`; answers its length,
     /// or zero when none is waiting.
     std::size_t receive(const ports::Binding& binding, std::span<std::uint8_t> buffer,
@@ -135,10 +154,6 @@ public:
     // Used by the demultiplexer.
     void count_a_discard(frame::Discard discard) noexcept;
     void count_unclaimed(std::span<const std::uint8_t> payload) noexcept;
-    /// A send the transport had to assemble through its own buffer (more
-    /// iovecs than the stack takes in one pass): counted in 79 with the
-    /// refusals, so the fallback is never invisible.
-    void count_a_transport_copy() noexcept;
     bool deliver(const ports::Binding& binding, ports::Ipv4Endpoint source, std::span<const std::uint8_t> payload);
 
     [[nodiscard]] packet_io::TxPort& sender_tx() noexcept

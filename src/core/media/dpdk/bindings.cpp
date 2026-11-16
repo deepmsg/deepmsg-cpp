@@ -79,7 +79,6 @@ struct TransportState
 {
     std::optional<ports::Binding> binding;
     std::int64_t* counter{nullptr};
-    std::vector<std::uint8_t> scratch;
 };
 
 [[nodiscard]] std::int64_t* allocate_counter(aeron_driver_context_t* context, std::int32_t type_id, const void* key,
@@ -364,7 +363,6 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
     // MTU sent anything larger down the kernel fallback in silence, where the
     // media's own address cannot go; the stack is the one that decides, and it
     // refuses what it cannot frame (counter 79, `EMSGSIZE`).
-    state->scratch.resize(std::max<std::size_t>(g_stack->params().mtu, params->mtu_length));
     transport->bindings_clientd = state.release();
     return 0;
 }
@@ -420,56 +418,27 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
-    // The datagram goes into the frame straight from the driver's iovecs when
-    // there are few enough of them: the stack writes the headers once and
-    // copies each piece into the port's buffer, so nothing assembles the
-    // payload first (the transport's scratch is only the fallback).
-    constexpr std::size_t MAX_SEND_PARTS = 4;
-    std::array<std::span<const std::uint8_t>, MAX_SEND_PARTS> parts{};
-    std::size_t total = 0;
-    std::size_t part_count = 0;
-    bool joined = false;
-    for (std::size_t index = 0; index < iov_length; ++index)
+    // The reference's `send_func` contract: **one iov is one datagram**, and the
+    // return is how many of them went, in order (`media/aeron_udp_channel_
+    // transport.c:728-773`, `sendv`). It is what the sender's accounting stands
+    // on -- `snd-pos` advances only when the whole batch was taken
+    // (`aeron_network_publication.c:495-580`) -- so flattening a batch into one
+    // datagram would both change the wire and read back as a short send.
+    constexpr std::size_t MAX_DATAGRAMS = 16;  // AERON_NETWORK_PUBLICATION_MAX_MESSAGES_PER_SEND
+    std::array<std::span<const std::uint8_t>, MAX_DATAGRAMS> datagrams{};
+    std::size_t count = 0;
+    for (std::size_t index = 0; index < iov_length && count < datagrams.size(); ++index)
     {
-        total += iov[index].iov_len;
-        if (part_count < MAX_SEND_PARTS)
-        {
-            parts[part_count++] = std::span<const std::uint8_t>{static_cast<const std::uint8_t*>(iov[index].iov_base),
-                                                                iov[index].iov_len};
-        }
-        else
-        {
-            joined = true;
-        }
+        datagrams[count++] =
+            std::span<const std::uint8_t>{static_cast<const std::uint8_t*>(iov[index].iov_base), iov[index].iov_len};
     }
-    if (0 == total)
+    if (0 == count)
     {
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
-    std::expected<std::size_t, Error> sent =
-        std::unexpected(make_error(ErrorCode::internal_error, "the datagram was neither scattered nor assembled"));
-    if (!joined)
-    {
-        sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
-                             std::span<const std::span<const std::uint8_t>>{parts.data(), part_count});
-    }
-    else
-    {
-        if (total > state->scratch.size())
-        {
-            return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
-        }
-        std::size_t offset = 0;
-        for (std::size_t index = 0; index < iov_length; ++index)
-        {
-            std::memcpy(state->scratch.data() + offset, iov[index].iov_base, iov[index].iov_len);
-            offset += iov[index].iov_len;
-        }
-        g_stack->count_a_transport_copy();
-        sent = g_stack->send(*state->binding, ports::Ipv4Endpoint{destination, port},
-                             std::span<const std::uint8_t>{state->scratch.data(), total});
-    }
+    const auto sent = g_stack->send_datagrams(*state->binding, ports::Ipv4Endpoint{destination, port},
+                                              std::span<const std::span<const std::uint8_t>>{datagrams.data(), count});
     if (!sent)
     {
         // The stack's 79 already counted it; the driver logs the sender error
@@ -478,13 +447,8 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         AERON_SET_ERR(EMSGSIZE, "%s", std::string{sent.error().message.view()}.c_str());
         return -1;
     }
-    if (0 == *sent)
-    {
-        *bytes_sent = 0;
-        return 0;
-    }
-    *bytes_sent += static_cast<int64_t>(total);
-    return 1;
+    *bytes_sent += sent->bytes;
+    return static_cast<int>(sent->datagrams);
 }
 
 extern "C" int dpdk_get_so_rcvbuf(aeron_udp_channel_transport_t* transport, size_t* so_rcvbuf)
