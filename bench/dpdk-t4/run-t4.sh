@@ -29,7 +29,6 @@ t4_local_a=${AXC_DPDK_BENCH_LOCAL:-10.10.0.1/24}
 t4_local_b=${AXC_DPDK_BENCH_PEER_LOCAL:-10.10.0.2/24}
 t4_test_cpus=${AXC_DPDK_T4_CPUSET_TEST:-6-7}
 t4_work=
-t4_bound=(0 0)
 t4_iface_a=
 t4_iface_b=
 
@@ -44,6 +43,23 @@ iface_of() # iface_of <pci>
 driver_of() # driver_of <pci>
 {
     basename "$(readlink "/sys/bus/pci/devices/$1/driver" 2>/dev/null)" 2>/dev/null || true
+}
+
+# The net interface appears a moment after the port is bound back; reading it
+# too early answers empty and the port would be left down (seen when a run
+# failed while it was binding).
+wait_for_iface() # wait_for_iface <pci>
+{
+    local pci=$1 deadline=$((SECONDS + 10)) iface=
+    while ((SECONDS < deadline)); do
+        iface=$(iface_of "$pci")
+        if [[ -n "$iface" ]]; then
+            printf '%s' "$iface"
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 port_has_no_kernel_interface() # port_has_no_kernel_interface <pci>
@@ -128,7 +144,6 @@ bind_ports()
         ip link set "$iface" down
     done
     dpdk-devbind.py --bind=vfio-pci "$t4_pci_a" "$t4_pci_b"
-    t4_bound=(1 1)
 
     for pci in "$t4_pci_a" "$t4_pci_b"; do
         port_has_no_kernel_interface "$pci" ||
@@ -187,7 +202,7 @@ teardown()
     for pci in "$t4_pci_a" "$t4_pci_b"; do
         dpdk-devbind.py --bind=ixgbe "$pci" >/dev/null 2>&1
         local iface
-        iface=$(iface_of "$pci")
+        iface=$(wait_for_iface "$pci") || iface=
         if [[ -n "$iface" ]]; then
             ip link set "$iface" up 2>/dev/null
             nmcli device set "$iface" managed yes 2>/dev/null
