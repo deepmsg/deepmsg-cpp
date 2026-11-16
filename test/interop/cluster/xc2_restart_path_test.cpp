@@ -115,6 +115,22 @@ protected:
         }
         return false;
     }
+
+    [[nodiscard]] bool wait_for_role(int index, std::int32_t role, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            if (node_counter(index, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID) == role &&
+                node_counter(index, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID) == 17)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
 };
 
 TEST_F(Xc2RestartPathTest, shouldStopFollowerAndRestartFollowerGracefully)
@@ -139,6 +155,32 @@ TEST_F(Xc2RestartPathTest, shouldStopFollowerAndRestartFollowerGracefully)
     ASSERT_TRUE(connect_udp_retry(after)) << node_dump() << after.last_error();
     EXPECT_TRUE(send_echoes(after, 10)) << node_dump();
     after.close();
+
+    stop_round();
+}
+
+TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfter)
+{
+    start_cluster(21);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int original_leader = leader_index();
+    ASSERT_GE(original_leader, 0) << node_dump();
+    const std::int64_t term =
+        node_counter(original_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    stop_node_gracefully(original_leader);
+    const std::vector<int> survivors = {(original_leader + 1) % NODES, (original_leader + 2) % NODES};
+    ASSERT_GE(await_new_leader(term, survivors, std::chrono::seconds(20)), 0) << node_dump();
+
+    restart_node(round_, original_leader, false);
+    ASSERT_TRUE(wait_for_node_active(original_leader, std::chrono::seconds(30))) << node_dump();
+    ASSERT_TRUE(wait_for_role(original_leader, 0, std::chrono::seconds(30))) << node_dump();
+
+    ClusterClientSession session;
+    ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
+    EXPECT_TRUE(send_echoes(session, 10)) << node_dump();
+    session.close();
 
     stop_round();
 }

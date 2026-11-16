@@ -23,6 +23,7 @@
 #include "cluster/consensus/log_publisher.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "io_aeron_cluster_codecs/MessageHeader.h"
+#include "io_aeron_cluster_codecs/NewLeadershipTermEvent.h"
 #include "io_aeron_cluster_codecs/SessionCloseEvent.h"
 #include "io_aeron_cluster_codecs/SessionMessageHeader.h"
 #include "io_aeron_cluster_codecs/SessionOpenEvent.h"
@@ -269,6 +270,30 @@ TEST_F(LogPublisherTest, anExpiredTimerIsATimerEventRecord)
     EXPECT_EQ(LEADERSHIP_TERM_ID, decoder.leadershipTermId());
     EXPECT_EQ(4242, decoder.correlationId());
     EXPECT_EQ(TIMESTAMP, decoder.timestamp());
+}
+
+TEST_F(LogPublisherTest, aNewLeadershipTermEventNamesThePositionAfterItsOwnFrame)
+{
+    const std::int64_t before = publisher_.position();
+    ASSERT_TRUE(publisher_.append_new_leadership_term_event(LEADERSHIP_TERM_ID, TIMESTAMP, 0, 1, 2, 0, 0));
+
+    const std::vector<std::uint8_t> message = next_message();
+    ASSERT_FALSE(message.empty());
+    auto header = deepmsg::cluster::common::message_header(message);
+    ASSERT_TRUE(header);
+    EXPECT_EQ(codecs::NewLeadershipTermEvent::SBE_TEMPLATE_ID, header->templateId());
+    auto decoder = deepmsg::cluster::common::wrap_body<codecs::NewLeadershipTermEvent>(message, *header);
+
+    // `LogPublisher.appendNewLeadershipTermEvent:294`: the field is the end of
+    // this event's own frame, i.e. the position before the claim plus the
+    // aligned frame length. `try_claim` already returns the frame end, so
+    // adding the frame to it again would name a position one frame ahead --
+    // which is what the service container copies into its own log position.
+    const std::int64_t length = static_cast<std::int64_t>(codecs::MessageHeader::encodedLength()) +
+                                codecs::NewLeadershipTermEvent::sbeBlockLength();
+    const std::int64_t aligned_frame_length = (32 + length + 31) & ~31L;
+    EXPECT_EQ(before + aligned_frame_length, decoder.logPosition());
+    EXPECT_EQ(decoder.logPosition(), publisher_.last_append_position());
 }
 
 }  // namespace

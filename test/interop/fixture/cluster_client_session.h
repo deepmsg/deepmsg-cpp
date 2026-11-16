@@ -82,6 +82,11 @@ public:
         config.ingress_endpoints = ingress_endpoints;
         config.egress_channel = egress_channel;
         config.client_name = "c6c-client";
+        // The reference default is 5 s. A full parallel gate (three nodes,
+        // three archives, a client driver) can miss that on a loaded runner and
+        // report a connect timeout on a healthy cluster; the scenario retries
+        // and this budget is per attempt.
+        config.message_timeout_ns = 10'000'000'000;
         return connect(config, aeron_dir, timeout);
     }
 
@@ -93,6 +98,7 @@ public:
         config.ingress_channel = "aeron:ipc";
         config.egress_channel = "aeron:ipc";
         config.client_name = "c6c-ipc-client";
+        config.message_timeout_ns = 10'000'000'000;
         return connect(config, aeron_dir, timeout);
     }
 
