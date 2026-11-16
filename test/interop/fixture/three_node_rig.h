@@ -515,25 +515,47 @@ protected:
         }
     }
 
+    /// Restart several nodes as one group: retire them all, remove the
+    /// cluster/archive directories of the ones that ask for a clean start,
+    /// spawn every node process, then every container, and wait once for the
+    /// new drivers to replace their CnC files. Restarting a quorum's members
+    /// one after the other costs 300 ms + 2 s per member, and the first one
+    /// spends its startup canvass without its peer.
+    void restart_nodes_together(int round, const std::vector<std::pair<int, bool>>& restarts)
+    {
+        for (const auto& [index, clean_start] : restarts)
+        {
+            stop_node_gracefully(index);
+            if (clean_start)
+            {
+                std::error_code error;
+                const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
+                std::filesystem::remove_all(node_dir + "/cluster", error);
+                std::filesystem::remove_all(node_dir + "/archive", error);
+            }
+        }
+        for (const auto& [index, clean_start] : restarts)
+        {
+            (void)clean_start;
+            start_node(round, index);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        for (const auto& [index, clean_start] : restarts)
+        {
+            (void)clean_start;
+            start_container(round, index);
+        }
+        // C6b's stale-CnC rule: do not read counters until the new drivers
+        // have replaced the old CnC files.
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
     /// Restart one node with the reference's `startStaticNode(index, cleanStart)`:
     /// `cleanStart` removes the cluster/archive directories, a plain restart
     /// keeps the recordings.
     void restart_node(int round, int index, bool clean_start)
     {
-        stop_node_gracefully(index);
-        if (clean_start)
-        {
-            std::error_code error;
-            const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
-            std::filesystem::remove_all(node_dir + "/cluster", error);
-            std::filesystem::remove_all(node_dir + "/archive", error);
-        }
-        start_node(round, index);
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        start_container(round, index);
-        // C6b's stale-CnC rule: do not read counters until the new driver has
-        // replaced the old CnC.
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        restart_nodes_together(round, {{index, clean_start}});
     }
 
     [[nodiscard]] bool wait_for_node_active(int index, std::chrono::milliseconds timeout)

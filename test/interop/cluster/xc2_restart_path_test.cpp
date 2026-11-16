@@ -4,8 +4,10 @@
 // `shouldStopLeaderAndRestartAsFollowerWithSendingAfter{ThenStopLeader}`,
 // `shouldAcceptMessagesAfterTwoNodeCleanRestart`,
 // `shouldTolerateMultipleLeaderFailures`,
-// `shouldRecoverAfterTwoLeaderNodesFailAndComeBackUpAtSameTime` and
-// `shouldRecoverQuicklyAfterKillingFollowersThenRestartingOne`.
+// `shouldRecoverAfterTwoLeaderNodesFailAndComeBackUpAtSameTime`,
+// `shouldRecoverQuicklyAfterKillingFollowersThenRestartingOne` and the C6c
+// catch-up batch, including
+// `shouldRecoverWhenFollowerIsMultipleTermsBehindFromEmptyLog`.
 
 #include <gtest/gtest.h>
 
@@ -376,6 +378,81 @@ TEST_F(Xc2RestartPathTest, shouldRecoverWhileMessagesContinue)
     stop_round();
 }
 
+// ClusterTest.shouldRecoverWhenFollowerIsMultipleTermsBehindFromEmptyLog: the
+// reference starts four nodes, so after the original leader stops two
+// leadership terms can pass and the two remaining nodes keep the quorum. With
+// three nodes the clean restart of the second leader is also what restores the
+// quorum; the point stays the same: the original leader comes back from an
+// empty log two terms behind and must catch up through both.
+TEST_F(Xc2RestartPathTest, shouldRecoverWhenFollowerIsMultipleTermsBehindFromEmptyLog)
+{
+    start_cluster(31);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int original_leader = leader_index();
+    ASSERT_GE(original_leader, 0) << node_dump();
+    const int member_a = (original_leader + 1) % NODES;
+    const int member_b = (original_leader + 2) % NODES;
+    const std::int64_t first_term =
+        node_counter(original_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ASSERT_TRUE(send_echoes(first, 10)) << node_dump();
+    first.close();
+
+    // Term two: the original leader goes away and one survivor takes over.
+    stop_node_gracefully(original_leader);
+    const int second_leader = await_new_leader(first_term, {member_a, member_b}, std::chrono::seconds(20));
+    ASSERT_GE(second_leader, 0) << node_dump();
+    const std::int64_t second_term =
+        node_counter(second_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession second;
+    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
+    ASSERT_TRUE(send_echoes(second, 10)) << node_dump();
+    second.close();
+
+    // Term three: the second leader goes away and comes back clean. The only
+    // survivor has no quorum left, so this restart is what lets the remaining
+    // two members elect.
+    stop_node_gracefully(second_leader);
+    restart_node(round_, second_leader, true);
+    const int third_leader = await_new_leader(second_term, {member_a, member_b}, std::chrono::seconds(30));
+    ASSERT_GE(third_leader, 0) << node_dump();
+    const std::int64_t third_term =
+        node_counter(third_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession third;
+    ASSERT_TRUE(connect_udp_retry(third)) << node_dump() << third.last_error();
+    ASSERT_TRUE(send_echoes(third, 10)) << node_dump();
+    third.close();
+
+    // The original leader rejoins from an empty log, two terms behind.
+    restart_node(round_, original_leader, true);
+    ASSERT_TRUE(wait_for_node_active(original_leader, std::chrono::seconds(30))) << node_dump();
+    ASSERT_TRUE(wait_for_role(original_leader, 0, std::chrono::seconds(30)))
+        << "the late joiner did not settle as a follower: " << node_dump();
+
+    ClusterClientSession fourth;
+    ASSERT_TRUE(connect_udp_retry(fourth)) << node_dump() << fourth.last_error();
+    ASSERT_TRUE(send_echoes(fourth, 10)) << node_dump();
+    const std::int64_t commit = node_counter(third_leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    fourth.close();
+
+    ASSERT_TRUE(await_commit(original_leader, commit, std::chrono::seconds(30)))
+        << "the late joiner never reached commit " << commit << ": " << node_dump();
+
+    std::string trace;
+    EXPECT_TRUE(wait_for_settled(std::chrono::seconds(30), third_term - 1, trace))
+        << "members never settled after the late join: \n"
+        << trace << node_dump();
+    EXPECT_GE(node_counter(original_leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID), commit)
+        << node_dump();
+
+    stop_round();
+}
+
 TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfter)
 {
     start_cluster(21);
@@ -537,8 +614,7 @@ TEST_F(Xc2RestartPathTest, shouldRecoverAfterTwoLeaderNodesFailAndComeBackUpAtSa
         node_counter(second_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
 
     stop_node_gracefully(second_leader);
-    restart_node(round_, first_leader, false);
-    restart_node(round_, second_leader, false);
+    restart_nodes_together(round_, {{first_leader, false}, {second_leader, false}});
 
     ASSERT_TRUE(wait_for_node_active(first_leader, std::chrono::seconds(30))) << node_dump();
     ASSERT_TRUE(wait_for_node_active(second_leader, std::chrono::seconds(30))) << node_dump();
