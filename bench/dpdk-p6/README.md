@@ -23,6 +23,7 @@ hugepage files, NetworkManager managed state).
 |---|---|
 | `lib.sh` | topology, preflight, probes, driver start/stop, counters, teardown |
 | `run-perf.sh` | driver-level round trip, `K M M K` per session (the T7 grid) |
+| `run-flood.sh` | one-way flood, 1,000,000 frames, to raise the density of a rare loss (the lost-frame card's arm B) |
 | `run-interop.sh` | a reference client against our driver over the real cable (T5) |
 | `run-archive-suite.sh` | the archive interop suite twice, kernel arm vs media arm (I6) |
 | `probes/` | the C clients (reference C client library): `ping`, `echo`, `send`, `recv` |
@@ -58,10 +59,18 @@ Knobs: `P6_COUNT` (messages per cell, 20,000), `P6_WARMUP` (2,000),
 
 Every cell writes `RUN-INFO.txt` (build type, segments flag, git revision),
 `ours.log`, `peer-before.txt` / `peer-after.txt` (the peer's counters with both
-drivers stopped, so the delta is exact), `rtts.txt`, and the driver's CnC
-counters. A cell fails loudly when a media invariant moves: `dpdk error`,
-`rx receiver discard`, `missed packets`, or a non-zero peer-side NAK count with
-no matching retransmit.
+drivers stopped, so the delta is exact -- NIC counters and its namespace's UDP
+counters, including `Udp InErrors`, which the earlier NAK round did not read),
+`rtts.txt`, and the driver's CnC counters. A cell fails loudly when a media
+invariant moves: `dpdk error`, `rx receiver discard`, `missed packets`, or a
+non-zero peer-side NAK count with no matching retransmit.
+
+The flood arm judges the same way one way only: the publisher offers the count,
+the subscriber receives every message with the payload intact, and neither the
+peer's NIC error/drop counters nor its UDP error counters move. It is the arm
+that found the shared-transmit-queue race (2026-11-16): at 20,000 frames per
+cell the loss was one to six frames, which a flood turns into something a run
+can see.
 
 ## Pitfalls that have bitten
 
