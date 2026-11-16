@@ -40,6 +40,9 @@ cell() # cell <session> <arm> <position>
     mkdir -p "$dir"
     # The build type is part of the reading: see lib.sh's p6_build_info.
     p6_build_info "$dir/RUN-INFO.txt"
+    # Both drivers are stopped here and at the end of the cell, so the peer's
+    # counters are quiescent and the per-cell delta is exact.
+    p6_peer_counters "$dir/peer-before.txt"
 
     p6_setup_ours "$driver_arm"
     p6_ours_pid= p6_ref_pid=
@@ -108,6 +111,7 @@ cell() # cell <session> <arm> <position>
     kill -TERM "$p6_ours_pid" "$p6_ref_pid" 2>/dev/null || true
     p6_wait_pid "$p6_ours_pid" 20 2>/dev/null || true
     p6_wait_pid "$p6_ref_pid" 20 2>/dev/null || true
+    p6_peer_counters "$dir/peer-after.txt"
     p6_ours_pid= p6_ref_pid=
 }
 
