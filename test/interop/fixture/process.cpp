@@ -1,5 +1,6 @@
 #include "fixture/process.h"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -199,7 +200,8 @@ ChildProcess::~ChildProcess()
 
 std::expected<ChildProcess, Error> ChildProcess::spawn(std::string_view executable,
                                                        const std::vector<std::string>& arguments,
-                                                       const std::vector<std::string>& environment) noexcept
+                                                       const std::vector<std::string>& environment,
+                                                       std::string_view output_path) noexcept
 {
     const std::string executable_name{executable};
     const auto arguments_copy = arguments;
@@ -213,6 +215,19 @@ std::expected<ChildProcess, Error> ChildProcess::spawn(std::string_view executab
 
     if (0 == pid)
     {
+        if (!output_path.empty())
+        {
+            const int output = ::open(std::string{output_path}.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (output >= 0)
+            {
+                ::dup2(output, STDOUT_FILENO);
+                ::dup2(output, STDERR_FILENO);
+                if (output > STDERR_FILENO)
+                {
+                    ::close(output);
+                }
+            }
+        }
         apply_environment(environment);
         ::execvp(executable_name.c_str(), argv.data());
         ::_exit(127);
