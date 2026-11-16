@@ -79,6 +79,10 @@ struct TransportState
 {
     std::optional<ports::Binding> binding;
     std::int64_t* counter{nullptr};
+    // The agent that owns this transport: the reference initialises one
+    // transport per affinity, and the sender and receiver agents must burst on
+    // their own DPDK queues (a tx queue is not thread-safe).
+    aeron_udp_channel_transport_affinity_t affinity{AERON_UDP_CHANNEL_TRANSPORT_AFFINITY_SENDER};
 };
 
 [[nodiscard]] std::int64_t* allocate_counter(aeron_driver_context_t* context, std::int32_t type_id, const void* key,
@@ -295,6 +299,7 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
     }
 
     auto state = std::make_unique<TransportState>();
+    state->affinity = affinity;
     bool capable = false;
     std::optional<std::uint32_t> address;
     std::optional<ports::Ipv4Endpoint> peer;
@@ -410,6 +415,14 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
+    // The name resolver's transport is the conductor's (DNS to a resolver); it
+    // has a kernel socket of its own and no DPDK queue, and it is the one
+    // affinity that is not one of the two sending agents.
+    if (AERON_UDP_CHANNEL_TRANSPORT_AFFINITY_CONDUCTOR == state->affinity)
+    {
+        return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
+    }
+
     const std::uint32_t destination = address_of(address);
     const std::uint16_t port = port_of(address);
     if (is_loopback(destination) || is_multicast(destination) || is_broadcast(destination) ||
@@ -437,8 +450,11 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
-    const auto sent = g_stack->send_datagrams(*state->binding, ports::Ipv4Endpoint{destination, port},
-                                              std::span<const std::span<const std::uint8_t>>{datagrams.data(), count});
+    const auto role = AERON_UDP_CHANNEL_TRANSPORT_AFFINITY_RECEIVER == state->affinity ? stack::Stack::TxRole::receiver
+                                                                                       : stack::Stack::TxRole::sender;
+    const auto sent =
+        g_stack->send_datagrams(*state->binding, ports::Ipv4Endpoint{destination, port},
+                                std::span<const std::span<const std::uint8_t>>{datagrams.data(), count}, role);
     if (!sent)
     {
         // The stack's 79 already counted it; the driver logs the sender error

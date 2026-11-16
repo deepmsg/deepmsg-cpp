@@ -123,6 +123,19 @@ public:
     [[nodiscard]] std::expected<std::size_t, Error> send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
                                                          std::span<const std::span<const std::uint8_t>> parts);
 
+    /// Which of the driver's two sending agents is asking. The reference
+    /// initialises a transport once per affinity (the last argument of
+    /// `aeron_udp_channel_transport_init`) and its sender and receiver agents
+    /// share nothing on the wire; a DPDK transmit queue is not thread-safe, so
+    /// each agent must burst on its own. Routing both through one queue lost
+    /// frames under a race (measured on the bench, 2026-11-16: the receiver
+    /// agent's SM/NAK through the sender's queue).
+    enum class TxRole
+    {
+        sender,
+        receiver
+    };
+
     /// What [`send_datagrams`] did: how many of the datagrams the port took, in
     /// order, and how many bytes those were.
     struct DatagramsSent
@@ -140,7 +153,7 @@ public:
     /// no further (`aeron_network_publication.c:495-580`).
     [[nodiscard]] std::expected<DatagramsSent, Error> send_datagrams(
         const ports::Binding& binding, ports::Ipv4Endpoint destination,
-        std::span<const std::span<const std::uint8_t>> datagrams);
+        std::span<const std::span<const std::uint8_t>> datagrams, TxRole role = TxRole::sender);
 
     /// Copy the next datagram for `binding` into `buffer`; answers its length,
     /// or zero when none is waiting.
@@ -166,6 +179,12 @@ public:
     }
 
 private:
+    /// The send above, on a named transmit port: the sender agent's queue or
+    /// the receiver agent's (see `TxRole`).
+    [[nodiscard]] std::expected<std::size_t, Error> send_to(packet_io::TxPort& port, const ports::Binding& binding,
+                                                            ports::Ipv4Endpoint destination,
+                                                            std::span<const std::span<const std::uint8_t>> parts);
+
     struct Datagram
     {
         ports::Ipv4Endpoint source{};
