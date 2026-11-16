@@ -50,13 +50,26 @@ kernel arm never crossed the cable. Moving the far side into a namespace takes
 K to 31.7–31.9 µs, which matches the Rust track's independent kernel-over-cable
 measurement of 31–34 µs.
 
-Open, and what makes the media arm unstable: a few times per 20,000 messages the
-last frame of a burst never leaves our NIC, the driver's idle heartbeat then
-pushes the reference's high-water mark past it, the rebuild scan reads a zero
-frame length and the reference NAKs exactly that frame — **Aeron's recovery
-working**, not a lost frame on the wire (the ~100 ms stall is the heartbeat
-period). Both ends' error and drop counters are zero, and the per-cell
-`opackets` vs the peer's `rx_packets` agree to the frame. So the loss point is
-inside our own transmit path, between `rte_eth_tx_burst` returning success and
-the NIC sending; the next card instruments that path
-(`analysis/cpp/notes-2026-11-16-the-outside-is-the-wire.md` §4).
+The NAKs that made the media arm unstable are **closed** (2026-11-16): a few
+times per 20,000 messages a frame the burst answered for never left our NIC,
+the driver's idle heartbeat pushed the reference's high-water mark past it, and
+the reference NAK'd exactly that frame — Aeron's recovery working, with a
+~100 ms heartbeat-period stall. The cause was **one DPDK transmit queue shared
+by two driver threads**: the reference initialises a transport once per
+affinity, and our `dpdk_send` ignored the affinity, so the receiver agent's
+SM/NAK raced the sender agent's data. Each agent now bursts on its own queue
+(#51); four sessions afterwards have **zero NAKs in every media cell**.
+
+**Core placement matters for any quoted number.** Both drivers run their agents
+on `spin`, so our media holds its cores at 100%, and left to the scheduler it
+moves a whole media cell's median by 13 µs in about one cell in twelve (5 of 60
+cells unpinned). Pin the media with `P6_OURS_CPUSET=0-3`: 0 of 32 cells slow.
+Starving the echo alone does not reproduce it, so the contention is with the
+far side's other threads, not the echo.
+
+Re-run at Release with the fix and the media pinned (`analysis/cpp/records/t7-stability.md`):
+media p50 **25.3–25.5 µs**, and a clean session gives **M/K 0.803 / 0.809**
+(the other session's kernel cells ran at 36.8 µs — the same one-cell-in-twelve
+effect, on the kernel arm, which that session does not pin). The P6
+pre-registration did not pin cores; runs that do are a recorded deviation and
+write their core sets into `RUN-INFO.txt`.
