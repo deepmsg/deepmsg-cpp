@@ -237,6 +237,13 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
 std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, ports::Ipv4Endpoint destination,
                                               std::span<const std::span<const std::uint8_t>> parts)
 {
+    return send_to(*sender_tx_, binding, destination, parts);
+}
+
+std::expected<std::size_t, Error> Stack::send_to(packet_io::TxPort& port, const ports::Binding& binding,
+                                                 ports::Ipv4Endpoint destination,
+                                                 std::span<const std::span<const std::uint8_t>> parts)
+{
     std::size_t payload_size = 0;
     for (const auto part : parts)
     {
@@ -309,7 +316,7 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
             std::vector<std::uint8_t> scratch(params_.mtu);
             if (const auto written = arp::write_request(scratch, params_, *next))
             {
-                (void)send_frame(std::span<const std::uint8_t>{scratch}.first(*written), *sender_tx_);
+                (void)send_frame(std::span<const std::uint8_t>{scratch}.first(*written), port);
             }
         }
         counters_.arp_miss.fetch_add(1, std::memory_order_relaxed);
@@ -319,7 +326,7 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
     const frame::Ipv4Write ipv4{*hardware, params_.mac, params_.address, destination.address, next_identification()};
 
     UdpFill fill_context{this, ipv4, binding, destination, parts, payload_size};
-    const packet_io::TxResult sent = sender_tx_->tx_burst(1, &udp_fill, &fill_context);
+    const packet_io::TxResult sent = port.tx_burst(1, &udp_fill, &fill_context);
     if (0 == sent.taken)
     {
         note_tx_result(sent);
@@ -330,12 +337,14 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
 
 std::expected<Stack::DatagramsSent, Error> Stack::send_datagrams(
     const ports::Binding& binding, ports::Ipv4Endpoint destination,
-    std::span<const std::span<const std::uint8_t>> datagrams)
+    std::span<const std::span<const std::uint8_t>> datagrams, TxRole role)
 {
+    packet_io::TxPort& port = TxRole::receiver == role ? *receiver_tx_ : *sender_tx_;
     DatagramsSent sent;
     for (const auto datagram : datagrams)
     {
-        const auto result = send(binding, destination, datagram);
+        const std::span<const std::uint8_t> parts[]{datagram};
+        const auto result = send_to(port, binding, destination, std::span<const std::span<const std::uint8_t>>{parts});
         if (!result)
         {
             // A datagram that cannot travel at all is the caller's to hear

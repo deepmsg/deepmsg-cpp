@@ -513,4 +513,76 @@ TEST(Stack, ASendAnswersWhatThePortTookAndStopsThere)
     EXPECT_EQ(7, sent->bytes);
 }
 
+/// Counts the bursts the stack makes on it: which of the driver's two agents a
+/// send went through is invisible on a wire where both ports agree.
+class CountingTxPort : public axc::core::media::dpdk::packet_io::TxPort
+{
+public:
+    explicit CountingTxPort(axc::core::media::dpdk::packet_io::TxPort& inner) : inner_{inner} {}
+
+    axc::core::media::dpdk::packet_io::TxResult tx_burst(std::size_t count,
+                                                         axc::core::media::dpdk::packet_io::TxFill fill,
+                                                         void* context) override
+    {
+        ++bursts;
+        return inner_.tx_burst(count, fill, context);
+    }
+    [[nodiscard]] axc::core::media::dpdk::frame::L4Checksum checksums() const noexcept override
+    {
+        return inner_.checksums();
+    }
+    [[nodiscard]] Mac mac() const noexcept override
+    {
+        return inner_.mac();
+    }
+    [[nodiscard]] std::size_t mtu() const noexcept override
+    {
+        return inner_.mtu();
+    }
+
+    std::size_t bursts{0};
+
+private:
+    axc::core::media::dpdk::packet_io::TxPort& inner_;
+};
+
+// The receiver agent's sends must burst on its own port. DPDK transmit queues
+// are not thread-safe, and the reference initialises one transport per affinity
+// (the last argument of `aeron_udp_channel_transport_init`); routing both agents
+// through one queue lost frames on the bench (2026-11-16: the receiver agent's
+// SM/NAK through the sender's queue, and the frame the reference then NAK'd).
+TEST(Stack, TheReceiverAgentBurstsOnItsOwnPort)
+{
+    Wire wire;
+    auto settings = params(OWN, MAC_A);
+    settings.static_neighbours.emplace_back(PEER, MAC_B);
+    const std::size_t frame_capacity = settings.mtu + axc::core::media::dpdk::frame::ETHERNET_HEADER_LENGTH;
+    auto rx = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    auto sender_fake = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    auto receiver_fake = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    auto sender = std::make_unique<CountingTxPort>(*sender_fake);
+    auto receiver = std::make_unique<CountingTxPort>(*receiver_fake);
+    CountingTxPort* sender_seen = sender.get();
+    CountingTxPort* receiver_seen = receiver.get();
+    Stack a{settings, std::move(rx), std::move(sender), std::move(receiver)};
+
+    const auto binding = a.bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    ASSERT_TRUE(binding.has_value());
+
+    const std::array<std::uint8_t, 4> payload{1, 2, 3, 4};
+    const std::span<const std::uint8_t> datagrams[]{payload};
+
+    const auto by_sender = a.send_datagrams(*binding, endpoint(PEER, 5001), datagrams, Stack::TxRole::sender);
+    ASSERT_TRUE(by_sender.has_value());
+    EXPECT_EQ(1u, by_sender->datagrams);
+    EXPECT_EQ(1u, sender_seen->bursts);
+    EXPECT_EQ(0u, receiver_seen->bursts);
+
+    const auto by_receiver = a.send_datagrams(*binding, endpoint(PEER, 5001), datagrams, Stack::TxRole::receiver);
+    ASSERT_TRUE(by_receiver.has_value());
+    EXPECT_EQ(1u, by_receiver->datagrams);
+    EXPECT_EQ(1u, sender_seen->bursts) << "a receiver send must not touch the sender's queue";
+    EXPECT_EQ(1u, receiver_seen->bursts);
+}
+
 }  // namespace
