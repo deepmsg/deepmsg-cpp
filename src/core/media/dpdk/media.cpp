@@ -682,7 +682,13 @@ std::expected<void, Error> Media::close() noexcept
     return {};
 }
 
-std::expected<Media, Error> open_media(const Settings& settings) noexcept
+std::uint16_t transmit_queues_for(aeron_threading_mode_t mode, std::uint16_t device_maximum) noexcept
+{
+    const std::uint16_t wanted = AERON_THREADING_MODE_DEDICATED == mode ? 2 : 1;
+    return std::min<std::uint16_t>(wanted, device_maximum);
+}
+
+std::expected<Media, Error> open_media(const Settings& settings, aeron_threading_mode_t mode) noexcept
 {
 #if !defined(AXC_WITH_DPDK)
     (void)settings;
@@ -768,14 +774,24 @@ std::expected<Media, Error> open_media(const Settings& settings) noexcept
     const bool rx_checksums = (info->rx_offloads & rx_bits) == rx_bits;
     const bool tx_checksums = (info->tx_offloads & tx_bits) == tx_bits;
 
-    // DEDICATED wants one receive queue and two transmit queues. A virtual
-    // device reports one of each; the single-queue fallback is for tests and
-    // for a media that is driven by one thread.
+    // One receive queue, and one transmit queue per sending thread: two for a
+    // DEDICATED driver, one for the modes that run both sending agents on a
+    // thread (see `transmit_queues_for`). A virtual device reports one of each,
+    // so a DEDICATED driver over one is the single-queue fallback -- and that
+    // is the 2026-11-16 lost-frame shape (two agents, one queue), which the
+    // warning below names instead of leaving it to the bench to find again.
     const std::uint16_t rx_queues = std::min<std::uint16_t>(1, info->max_rx_queues);
-    const std::uint16_t tx_queues = std::min<std::uint16_t>(2, info->max_tx_queues);
+    const std::uint16_t tx_queues = transmit_queues_for(mode, info->max_tx_queues);
     if (0 == rx_queues || 0 == tx_queues)
     {
         return fail(make_error(ErrorCode::config_error, "the DPDK port has no queue to open"));
+    }
+    if (AERON_THREADING_MODE_DEDICATED == mode && tx_queues < 2)
+    {
+        std::fprintf(stdout,
+                     "dpdk media warning: this port offers one transmit queue, so the DEDICATED sender and "
+                     "receiver agents share it; a DPDK transmit queue is not thread-safe (see "
+                     "AERON_THREADING_MODE=SHARED for a single-threaded driver)\n");
     }
 
     if (auto configured =
@@ -875,9 +891,10 @@ std::expected<Media, Error> open_media(const Settings& settings) noexcept
     // frames themselves.
     const std::string port_name = impl->port.name();
     const std::string address_text = ipv4_prefix_text(*settings.ipv4_address);
-    std::fprintf(stdout, "dpdk media on %s (%s), address %s, mtu %u, link up (%u Mb/s)\n", port_name.c_str(),
-                 info->driver.c_str(), address_text.c_str(), static_cast<unsigned>(*mtu),
-                 static_cast<unsigned>(link->speed_mbps));
+    std::fprintf(stdout, "dpdk media on %s (%s), address %s, mtu %u, link up (%u Mb/s), queues %u rx %u tx\n",
+                 port_name.c_str(), info->driver.c_str(), address_text.c_str(), static_cast<unsigned>(*mtu),
+                 static_cast<unsigned>(link->speed_mbps), static_cast<unsigned>(rx_queues),
+                 static_cast<unsigned>(tx_queues));
     std::fflush(stdout);
 
     Media media;
@@ -936,8 +953,6 @@ std::expected<void, Error> apply_reference_media_alias(PropertySource& propertie
 std::expected<Media, Error> install_if_configured(aeron_driver_context_t* context,
                                                   const PropertySource& properties) noexcept
 {
-    (void)context;
-
     auto settings = parse_settings(properties);
     if (!settings)
     {
@@ -949,7 +964,14 @@ std::expected<Media, Error> install_if_configured(aeron_driver_context_t* contex
     }
 
 #if defined(AXC_WITH_DPDK)
-    auto media = open_media(*settings);
+    if (nullptr == context)
+    {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "null driver context"));
+    }
+    // The context's mode is the parsed one (`AERON_THREADING_MODE`, read in
+    // `aeron_driver_context_init`, `aeron_driver_context.c:450`); it decides
+    // how many transmit queues the port needs.
+    auto media = open_media(*settings, aeron_driver_context_get_threading_mode(context));
     if (!media)
     {
         return std::unexpected(media.error());
@@ -967,6 +989,7 @@ std::expected<Media, Error> install_if_configured(aeron_driver_context_t* contex
     }
     return media;
 #else
+    (void)context;
     return std::unexpected(make_error(ErrorCode::config_error,
                                       "deepmsg.dpdk.enabled=true but this build has no DPDK media; "
                                       "configure with -DAXC_WITH_DPDK=ON"));

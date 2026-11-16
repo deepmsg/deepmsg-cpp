@@ -450,6 +450,11 @@ extern "C" int dpdk_send(aeron_udp_channel_data_paths_t* data_paths, aeron_udp_c
         return g_default->send_func(data_paths, transport, address, iov, iov_length, bytes_sent);
     }
 
+    // The affinity names the sending agent, and the agent picks the queue. In
+    // DEDICATED they are two threads and two queues; in SHARED,
+    // SHARED_NETWORK and INVOKER both agents run on one thread and the media
+    // opened one transmit queue for it, so the two roles name the same queue
+    // and the choice costs nothing.
     const auto role = AERON_UDP_CHANNEL_TRANSPORT_AFFINITY_RECEIVER == state->affinity ? stack::Stack::TxRole::receiver
                                                                                        : stack::Stack::TxRole::sender;
     const auto sent =
@@ -612,11 +617,14 @@ std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack
     {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "null driver context"));
     }
-    if (AERON_THREADING_MODE_DEDICATED != context->threading_mode)
-    {
-        return std::unexpected(
-            make_error(ErrorCode::config_error, "the DPDK media needs aeron.threading.mode=DEDICATED"));
-    }
+    // Every threading mode is served. Which thread calls which slot is the
+    // driver's business (`aeron_driver.c:1043-1170`); the media's only
+    // mode-dependent choice is how many transmit queues the port was opened
+    // with, and `open_media` made it from this same context before the driver
+    // started. In DEDICATED the sender and receiver agents each send on their
+    // own queue; in the other three modes both send from one thread, so both
+    // affinities map to that one queue (the port reports one transmit queue
+    // and `Media`'s single-queue layout is what `dpdk_send` below finds).
 
     // Nobody else drains the port: an idle strategy that sleeps leaves the
     // frames in the NIC ring (counter 84) with no hint of why. A warning, not a
@@ -625,6 +633,12 @@ std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack
     // The strategy's name is not printed: `aeron_driver_context_init` loads the
     // function from `AERON_*_IDLE_STRATEGY` but leaves the name at `backoff`,
     // so the name would read "backoff" for a strategy that sleeps.
+    //
+    // The agent that drains the ring is the one whose strategy is read: the
+    // receiver and the sender in DEDICATED (two runners); one agent for both in
+    // SHARED and INVOKER (`aeron_driver_shared_do_work`, `aeron_driver.c:753-
+    // 761`); the shared network agent in SHARED_NETWORK (`:776-782`). The
+    // strategies of agents that do not exist in the mode are not consulted.
     const auto warn_if_idle_starves_the_ring = [](const char* role, aeron_idle_strategy_func_t strategy)
     {
         if (idle_strategy_can_starve_the_ring(strategy))
@@ -635,8 +649,21 @@ std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack
                          role);
         }
     };
-    warn_if_idle_starves_the_ring("receiver", context->receiver_idle_strategy_func);
-    warn_if_idle_starves_the_ring("sender", context->sender_idle_strategy_func);
+    switch (context->threading_mode)
+    {
+        case AERON_THREADING_MODE_SHARED:
+        case AERON_THREADING_MODE_INVOKER:
+            warn_if_idle_starves_the_ring("shared", context->shared_idle_strategy_func);
+            break;
+        case AERON_THREADING_MODE_SHARED_NETWORK:
+            warn_if_idle_starves_the_ring("shared network", context->shared_network_idle_strategy_func);
+            break;
+        case AERON_THREADING_MODE_DEDICATED:
+        default:
+            warn_if_idle_starves_the_ring("receiver", context->receiver_idle_strategy_func);
+            warn_if_idle_starves_the_ring("sender", context->sender_idle_strategy_func);
+            break;
+    }
     if (nullptr != g_stack && g_stack != &target)
     {
         return std::unexpected(

@@ -34,8 +34,11 @@ namespace bindings
 
 /// Install the composite vtable into `context`, over `target`.
 ///
-/// Only DEDICATED drivers: the receiver thread pumps the port and pushes into
-/// the per-slot rings, and the sender thread drains its own transports' rings.
+/// Every threading mode is served. The receiver agent's thread pumps the port
+/// and pushes into the per-slot rings; each poller's thread drains its own
+/// transports' rings. In DEDICATED those are two threads with a transmit queue
+/// each; in SHARED, SHARED_NETWORK and INVOKER the sender and receiver agents
+/// run on one thread and the media opened one transmit queue for it.
 [[nodiscard]] std::expected<void, Error> install(aeron_driver_context_t* context, stack::Stack& target, Port* port,
                                                  Mempool* pool) noexcept;
 

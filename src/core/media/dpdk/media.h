@@ -107,7 +107,7 @@ public:
     [[nodiscard]] std::expected<void, Error> close() noexcept;
 
 private:
-    friend std::expected<Media, Error> open_media(const Settings& settings) noexcept;
+    friend std::expected<Media, Error> open_media(const Settings& settings, aeron_threading_mode_t mode) noexcept;
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -115,10 +115,29 @@ private:
     bool closed_{false};
 };
 
+/// How many transmit queues the media asks the port for.
+///
+/// A DEDICATED driver sends from two agents on two threads -- the sender's
+/// DATA/SETUP and the receiver's SM, NAK and ARP (`aeron_driver_sender_do_work`
+/// and `aeron_driver_receiver_do_work` run on runners of their own,
+/// `aeron_driver.c:1106-1170`) -- and a DPDK transmit queue is not
+/// thread-safe: sharing one lost frames on the bench (2026-11-16, `records/
+/// lost-frame.md`). SHARED, SHARED_NETWORK and INVOKER run both sending agents
+/// on one thread (`aeron_driver_shared_do_work`, `aeron_driver.c:753-761`;
+/// `aeron_driver_shared_network_do_work`, `:776-782`), so one queue is all they
+/// need, and asking for two would be a reading that disagrees with the design.
+///
+/// The answer never exceeds what the device offers (`max_tx_queues`).
+[[nodiscard]] std::uint16_t transmit_queues_for(aeron_threading_mode_t mode, std::uint16_t device_maximum) noexcept;
+
 /// Open the media the settings describe (EAL, port, pool and the stack) without
 /// installing anything into a driver context. `install_if_configured` uses it
-/// once the bindings exist; tests use it directly.
-[[nodiscard]] std::expected<Media, Error> open_media(const Settings& settings) noexcept;
+/// once the bindings exist; tests use it directly. `mode` is the driver's
+/// threading mode, which decides how many transmit queues the port is opened
+/// with (see [`transmit_queues_for`]); it defaults to the reference's default,
+/// DEDICATED (`aeron_driver_context.c:450`).
+[[nodiscard]] std::expected<Media, Error> open_media(
+    const Settings& settings, aeron_threading_mode_t mode = AERON_THREADING_MODE_DEDICATED) noexcept;
 
 /// Parse and open in one step.
 [[nodiscard]] std::expected<Media, Error> open_media(const PropertySource& properties) noexcept;

@@ -103,16 +103,24 @@ environment form is `DEEPMSG_DPDK_*` (`DEEPMSG_DPDK_IPV4_ADDRESS` ->
   10GBASE-T link was measured at ~20 s after start, and frames sent before it
   is up are lost without an error.
 - On success it writes one line to **stdout** — `dpdk media on <port>
-  (<driver>), address <address>/<prefix>, mtu <mtu>, link up (<speed> Mb/s)` —
-  and `dpdk media closed` on close. The reference's closed media says nothing;
-  this line is deliberate, because "configured" and "open on the media" must
-  not look alike. Nothing is written to stderr by our own code.
+  (<driver>), address <address>/<prefix>, mtu <mtu>, link up (<speed> Mb/s),
+  queues <rx> rx <tx> tx` — and `dpdk media closed` on close. The reference's
+  closed media says nothing; this line is deliberate, because "configured" and
+  "open on the media" must not look alike. The queue counts are the ones the
+  port was opened with (next bullet). Nothing is written to stderr by our own
+  code.
 - Receives: every transport keeps its kernel socket; a wildcard or this-port
   bind is also entered in the stack's table, which is how the DPDK port acts as
   an extra NIC. Sends are routed per destination: loopback, multicast,
   broadcast and unreachable destinations fall back to the kernel; everything
-  else leaves through the DPDK port. Only `aeron.threading.mode=DEDICATED` is
-  accepted.
+  else leaves through the DPDK port. All four of the reference's threading
+  modes are served: DEDICATED asks the port for one transmit queue per sending
+  agent (two — the sender's DATA/SETUP and the receiver's SM/NAK/ARP — because
+  a DPDK transmit queue is not thread-safe), SHARED, SHARED_NETWORK and
+  INVOKER run both agents on one thread and ask for one. A DEDICATED driver on
+  a port that offers only one transmit queue gets a warning on stdout: its two
+  agents then share a queue, which is the shape that lost frames on the bench
+  (`records/lost-frame.md`, 2026-11-16).
 - A datagram the port cannot frame (larger than its MTU allows) is refused with
   `EMSGSIZE` from the send function, counted in 79 and logged by the driver's
   sender (`aeron_driver_sender.c:433-437`): it is not back pressure, because no
