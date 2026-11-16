@@ -53,9 +53,14 @@ public:
     ChildProcess(const ChildProcess&) = delete;
     ChildProcess& operator=(const ChildProcess&) = delete;
 
+    /// Spawns a long-running child. `output_path`, when not empty, redirects the
+    /// child's stdout and stderr into that file. A pipe would be left undrained
+    /// (nothing here reads it), and a bench case that must read a driver's
+    /// startup line while the driver is still running needs a file it can open.
     static std::expected<ChildProcess, Error> spawn(std::string_view executable,
                                                     const std::vector<std::string>& arguments,
-                                                    const std::vector<std::string>& environment = {}) noexcept;
+                                                    const std::vector<std::string>& environment = {},
+                                                    std::string_view output_path = {}) noexcept;
 
     [[nodiscard]] bool running() const noexcept;
     void terminate(std::chrono::milliseconds grace = std::chrono::seconds(5)) noexcept;
