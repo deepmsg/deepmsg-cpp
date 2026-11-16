@@ -32,7 +32,11 @@ axc_add_executable(axc_unit_tests
         aeron_driver_static
         aeron_static)
 
-target_compile_definitions(axc_unit_tests PRIVATE "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
+target_compile_definitions(axc_unit_tests PRIVATE
+    "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
+    # The DPDK cases run the real launcher (the binary the T6 rig substitutes
+    # for `aeronmd`); the case skips when a partial build has not made it yet.
+    "AXC_MEDIA_DRIVER_BIN=\"${PROJECT_BINARY_DIR}/apps/deepmsg-media-driver/deepmsg-media-driver\"")
 
 # Separate binary so the enabled StageTimer path is compiled and measured even
 # though AXC_STAGE_TIMING is off for normal builds.
