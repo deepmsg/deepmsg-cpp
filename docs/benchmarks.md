@@ -23,6 +23,15 @@ namespace**, our driver on `10.10.0.1` in both arms, and both drivers on the
 default parks up to 1 ms and measured 1.07 ms here). Strict ping-pong of 64-byte
 messages, 2,000 warmup, 20,000 measured, `K M M K` over two sessions.
 
+**Build type: Debug (`-O0`).** These cells were measured before anyone checked
+`CMAKE_BUILD_TYPE`; the `dpdk` preset is Debug, and the reference driver in the
+same build directory is too. Every cell now records its build type in
+`RUN-INFO.txt` and a non-Release arm says so. Re-measured with the same grid on
+the same tree at Release (`analysis/cpp/records/dpdk-release.md`): the media's
+p50 is **25.2–25.6 µs**, M/K **0.80–0.82**; our own per-frame cost falls from
+5.26 µs (Debug) to **1.21 µs**. Cite the Release numbers for anything outside
+this note.
+
 | arm | p50 | p99 | p99.9 |
 |---|---|---|---|
 | kernel UDP (K) | 31.69–31.88 µs | 40.9–41.6 µs | 94–128 µs |
@@ -41,7 +50,13 @@ kernel arm never crossed the cable. Moving the far side into a namespace takes
 K to 31.7–31.9 µs, which matches the Rust track's independent kernel-over-cable
 measurement of 31–34 µs.
 
-Open, and what makes the media arm unstable: the reference's image NAKs a few
-times per 20,000 messages and Aeron recovers with ~100–190 ms stalls. A capture
-on the peer port shows every frame present, in order, with valid UDP checksums,
-and no counter records a drop (`analysis/cpp/records/dpdk-p6.md` §2.4).
+Open, and what makes the media arm unstable: a few times per 20,000 messages the
+last frame of a burst never leaves our NIC, the driver's idle heartbeat then
+pushes the reference's high-water mark past it, the rebuild scan reads a zero
+frame length and the reference NAKs exactly that frame — **Aeron's recovery
+working**, not a lost frame on the wire (the ~100 ms stall is the heartbeat
+period). Both ends' error and drop counters are zero, and the per-cell
+`opackets` vs the peer's `rx_packets` agree to the frame. So the loss point is
+inside our own transmit path, between `rte_eth_tx_burst` returning success and
+the NIC sending; the next card instruments that path
+(`analysis/cpp/notes-2026-11-16-the-outside-is-the-wire.md` §4).
