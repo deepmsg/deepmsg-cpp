@@ -226,6 +226,156 @@ TEST_F(Xc2RestartPathTest, shouldStopFollowerAndRestartFollowerGracefully)
     stop_round();
 }
 
+TEST_F(Xc2RestartPathTest, shouldCatchupFromEmptyLog)
+{
+    start_cluster(27);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const int follower = (leader + 2) % NODES;
+    ASSERT_TRUE(wait_for_role(follower, 0, std::chrono::seconds(30))) << node_dump();
+    const std::int64_t term = node_counter(leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ASSERT_TRUE(send_echoes(first, 10)) << node_dump();
+
+    stop_node_gracefully(follower);
+    ASSERT_TRUE(send_echoes(first, 10, 10)) << node_dump();
+    const std::int64_t commit = node_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    first.close();
+
+    restart_node(round_, follower, true);
+    ASSERT_TRUE(wait_for_node_active(follower, std::chrono::seconds(30))) << node_dump();
+
+    std::string trace;
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(30), term - 1, trace)) << "the empty follower never caught up: \n"
+                                                                             << trace << node_dump();
+    EXPECT_GE(node_counter(follower, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID), commit) << node_dump();
+
+    ClusterClientSession second;
+    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
+    EXPECT_TRUE(send_echoes(second, 5)) << node_dump();
+    second.close();
+
+    stop_round();
+}
+
+TEST_F(Xc2RestartPathTest, shouldRecoverWhenFollowerArrivesPartWayThroughTerm)
+{
+    start_cluster(28);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const int follower = (leader + 2) % NODES;
+    ASSERT_TRUE(wait_for_role(follower, 0, std::chrono::seconds(30))) << node_dump();
+    const std::int64_t term = node_counter(leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ASSERT_TRUE(send_echoes(first, 5)) << node_dump();
+    stop_node_gracefully(follower);
+    ASSERT_TRUE(send_echoes(first, 5, 5)) << node_dump();
+    const std::int64_t commit = node_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    first.close();
+
+    restart_node(round_, follower, false);
+    ASSERT_TRUE(wait_for_node_active(follower, std::chrono::seconds(30))) << node_dump();
+
+    std::string trace;
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(30), term - 1, trace))
+        << "the part-way follower never caught up: \n"
+        << trace << node_dump();
+    EXPECT_GE(node_counter(follower, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID), commit) << node_dump();
+
+    ClusterClientSession second;
+    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
+    EXPECT_TRUE(send_echoes(second, 5)) << node_dump();
+    second.close();
+
+    stop_round();
+}
+
+TEST_F(Xc2RestartPathTest, shouldCatchUpTwoFreshNodesAfterRestart)
+{
+    start_cluster(29);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const int follower_a = (leader + 1) % NODES;
+    const int follower_b = (leader + 2) % NODES;
+    const std::int64_t term = node_counter(leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ASSERT_TRUE(send_echoes(first, 20)) << node_dump();
+    const std::int64_t commit = node_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    first.close();
+
+    stop_node_gracefully(leader);
+    stop_node_gracefully(follower_a);
+    stop_node_gracefully(follower_b);
+
+    restart_node(round_, leader, false);
+    restart_node(round_, follower_a, true);
+    restart_node(round_, follower_b, true);
+
+    for (int i = 0; i < NODES; ++i)
+    {
+        ASSERT_TRUE(wait_for_node_active(i, std::chrono::seconds(30))) << node_dump();
+    }
+
+    std::string trace;
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(30), term - 1, trace))
+        << "the two fresh nodes never caught up: \n"
+        << trace << node_dump();
+    for (int i = 0; i < NODES; ++i)
+    {
+        EXPECT_GE(node_counter(i, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID), commit) << node_dump();
+    }
+
+    ClusterClientSession second;
+    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
+    EXPECT_TRUE(send_echoes(second, 5)) << node_dump();
+    second.close();
+
+    stop_round();
+}
+
+TEST_F(Xc2RestartPathTest, shouldRecoverWhileMessagesContinue)
+{
+    start_cluster(30);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const int follower = (leader + 2) % NODES;
+    const std::int64_t term = node_counter(leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ASSERT_TRUE(send_echoes(first, 5)) << node_dump();
+    stop_node_gracefully(follower);
+
+    restart_node(round_, follower, true);
+    ASSERT_TRUE(wait_for_node_active(follower, std::chrono::seconds(30))) << node_dump();
+    // Keep sending while the restarted follower is catching up.
+    ASSERT_TRUE(send_echoes(first, 10, 5)) << node_dump();
+    const std::int64_t commit = node_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    first.close();
+
+    std::string trace;
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(30), term - 1, trace))
+        << "members never settled while messages continued: \n"
+        << trace << node_dump();
+    EXPECT_GE(node_counter(follower, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID), commit) << node_dump();
+
+    stop_round();
+}
+
 TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfter)
 {
     start_cluster(21);
