@@ -328,6 +328,36 @@ std::expected<std::size_t, Error> Stack::send(const ports::Binding& binding, por
     return payload_size;
 }
 
+std::expected<Stack::DatagramsSent, Error> Stack::send_datagrams(
+    const ports::Binding& binding, ports::Ipv4Endpoint destination,
+    std::span<const std::span<const std::uint8_t>> datagrams)
+{
+    DatagramsSent sent;
+    for (const auto datagram : datagrams)
+    {
+        const auto result = send(binding, destination, datagram);
+        if (!result)
+        {
+            // A datagram that cannot travel at all is the caller's to hear
+            // about, but only while nothing has gone: once one has, the run is
+            // a short send and the reference answers with the count it took
+            // (`sendv` returns `num_sent`, `aeron_udp_channel_transport.c:728`).
+            if (0 == sent.datagrams)
+            {
+                return std::unexpected(result.error());
+            }
+            break;
+        }
+        if (0 == *result)
+        {
+            break;
+        }
+        sent.datagrams += 1;
+        sent.bytes += static_cast<std::int64_t>(datagram.size());
+    }
+    return sent;
+}
+
 std::size_t Stack::receive(const ports::Binding& binding, std::span<std::uint8_t> buffer, ports::Ipv4Endpoint* source)
 {
     Ring& ring = rings_[binding.slot];
@@ -401,11 +431,6 @@ void Stack::count_unclaimed(std::span<const std::uint8_t> payload) noexcept
 {
     (void)payload;
     counters_.rx_receiver_discard.fetch_add(1, std::memory_order_relaxed);
-}
-
-void Stack::count_a_transport_copy() noexcept
-{
-    counters_.errors.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool Stack::deliver(const ports::Binding& binding, ports::Ipv4Endpoint source, std::span<const std::uint8_t> payload)

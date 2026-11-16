@@ -401,4 +401,116 @@ TEST(Stack, TheLargestDatagramLeavesAndOneByteMoreDoesNot)
     EXPECT_EQ(1u, wire.take(Side::b, 10).size());
 }
 
+/// A transmit port with room for `budget` frames in all: what it takes comes
+/// off the budget, and once that is gone it refuses, which is how a NIC answers
+/// while its ring waits for room.
+class PartlyRefusingTxPort : public axc::core::media::dpdk::packet_io::TxPort
+{
+public:
+    PartlyRefusingTxPort(std::size_t budget, std::size_t mtu) : budget_{budget}, mtu_{mtu} {}
+
+    axc::core::media::dpdk::packet_io::TxResult tx_burst(std::size_t count,
+                                                         axc::core::media::dpdk::packet_io::TxFill fill,
+                                                         void* context) override
+    {
+        std::size_t taken = 0;
+        for (; taken < count && taken < budget_; ++taken)
+        {
+            std::array<std::uint8_t, 2048> frame{};
+            const auto [length, offloads] = fill(context, frame);
+            EXPECT_GT(length, 0u);
+            EXPECT_FALSE(offloads.compute) << "the in-memory wire computes no checksums";
+        }
+        budget_ -= taken;
+        return axc::core::media::dpdk::packet_io::TxResult{taken, 0};
+    }
+
+    [[nodiscard]] axc::core::media::dpdk::frame::L4Checksum checksums() const noexcept override
+    {
+        return axc::core::media::dpdk::frame::L4Checksum::software;
+    }
+    [[nodiscard]] Mac mac() const noexcept override
+    {
+        return MAC_A;
+    }
+    [[nodiscard]] std::size_t mtu() const noexcept override
+    {
+        return mtu_;
+    }
+
+private:
+    std::size_t budget_;
+    std::size_t mtu_;
+};
+
+// The reference's `send_func` contract: one iov is one datagram, and the return
+// is how many of them went (`media/aeron_udp_channel_transport.c:728-773`). A
+// batch flattened into one datagram would read back as a short send and hold
+// the sender's position where it was (`aeron_network_publication.c:495-580`).
+TEST(Stack, EveryDatagramOfASendIsItsOwnFrameOnTheWire)
+{
+    Wire wire;
+    auto settings_a = params(OWN, MAC_A);
+    settings_a.static_neighbours.emplace_back(PEER, MAC_B);
+    auto a = make_stack(wire, Side::a, settings_a);
+    auto b = make_stack(wire, Side::b, params(PEER, MAC_B));
+
+    const auto binding_a = a->bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    const auto binding_b = b->bind(PEER, 5001, std::nullopt, endpoint(PEER, 5001));
+    ASSERT_TRUE(binding_a.has_value());
+    ASSERT_TRUE(binding_b.has_value());
+
+    const std::array<std::uint8_t, 4> first{1, 2, 3, 4};
+    const std::array<std::uint8_t, 3> second{5, 6, 7};
+    const std::array<std::uint8_t, 2> third{8, 9};
+    const std::span<const std::uint8_t> datagrams[]{first, second, third};
+
+    const auto sent = a->send_datagrams(*binding_a, endpoint(PEER, 5001), datagrams);
+    ASSERT_TRUE(sent.has_value());
+    EXPECT_EQ(3u, sent->datagrams);
+    EXPECT_EQ(9, sent->bytes);
+
+    EXPECT_EQ(3u, b->pump());
+
+    std::array<std::uint8_t, 64> received{};
+    EXPECT_EQ(4u, b->receive(*binding_b, received));
+    EXPECT_EQ(1u, received[0]);
+    EXPECT_EQ(4u, received[3]);
+    EXPECT_EQ(3u, b->receive(*binding_b, received));
+    EXPECT_EQ(5u, received[0]);
+    EXPECT_EQ(7u, received[2]);
+    EXPECT_EQ(2u, b->receive(*binding_b, received));
+    EXPECT_EQ(8u, received[0]);
+    EXPECT_EQ(9u, received[1]);
+    EXPECT_EQ(0u, b->receive(*binding_b, received));
+}
+
+// What the port refuses stays the caller's to send: the answer is the count it
+// took, in order, and the bytes are those datagrams' only.
+TEST(Stack, ASendAnswersWhatThePortTookAndStopsThere)
+{
+    Wire wire;
+    auto settings = params(OWN, MAC_A);
+    settings.static_neighbours.emplace_back(PEER, MAC_B);
+
+    const std::size_t frame_capacity = settings.mtu + axc::core::media::dpdk::frame::ETHERNET_HEADER_LENGTH;
+    auto rx = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    auto sender = std::make_unique<PartlyRefusingTxPort>(2, settings.mtu);
+    auto receiver = std::make_unique<FakePort>(wire.port(Side::a, MAC_A, frame_capacity));
+    Stack a{settings, std::move(rx), std::move(sender), std::move(receiver)};
+
+    const auto binding_a = a.bind(OWN, 5000, std::nullopt, endpoint(OWN, 5000));
+    ASSERT_TRUE(binding_a.has_value());
+
+    const std::array<std::uint8_t, 4> first{1, 2, 3, 4};
+    const std::array<std::uint8_t, 3> second{5, 6, 7};
+    const std::array<std::uint8_t, 2> third{8, 9};
+    const std::span<const std::uint8_t> datagrams[]{first, second, third};
+
+    const auto sent = a.send_datagrams(*binding_a, endpoint(PEER, 5001), datagrams);
+    ASSERT_TRUE(sent.has_value());
+    EXPECT_EQ(2u, sent->datagrams);
+    EXPECT_EQ(7, sent->bytes);
+}
+
 }  // namespace
