@@ -93,14 +93,20 @@ p6_warn_if_debug()
     p6_say "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 }
 
-# p6_peer_counters <file>: the peer NIC's counters, taken while the drivers are
-# stopped. Comparing a cell's delta with our own port's opackets says whether a
-# frame our driver counted as sent ever left the NIC (2026-11-16: the NAK hunt).
+# p6_peer_counters <file>: the peer NIC's counters and its namespace's UDP
+# counters, taken while the drivers are stopped. Comparing a cell's delta with
+# our own port's opackets says whether a frame our driver counted as sent ever
+# left the NIC (2026-11-16: the NAK hunt), and the UDP line says whether the
+# kernel dropped what the NIC did deliver -- a counter the P6 round did not read.
 p6_peer_counters()
 {
     local file=$1
-    ip netns exec "$p6_netns" ethtool -S "$(p6_peer_iface_name)" 2>/dev/null |
-        grep -E ' (rx_packets|rx_errors|rx_crc_errors|rx_no_buffer_count|rx_missed_errors|rx_over_errors|rx_fifo_errors|rx_length_errors|rx_dropped|tx_dropped):' >"$file"
+    p6_on_peer ethtool -S "$(p6_peer_iface_name)" 2>/dev/null |
+        grep -E ' (rx_packets|rx_errors|rx_crc_errors|rx_csum_err|rx_fcoe_crc_err|rx_no_buffer_count|rx_missed_errors|rx_over_errors|rx_fifo_errors|rx_length_errors|rx_dropped|tx_dropped):' >"$file"
+    p6_on_peer awk '/^Udp:/ { if (++n == 2) {
+            print "udp_InDatagrams: " $2; print "udp_NoPorts: " $3; print "udp_InErrors: " $4;
+            print "udp_OutDatagrams: " $5; print "udp_RcvbufErrors: " $6; print "udp_SndbufErrors: " $7;
+            print "udp_InCsumErrors: " $8; print "udp_Ignored: " $9 } }' /proc/net/snmp >>"$file"
 }
 
 p6_compile_probes()
