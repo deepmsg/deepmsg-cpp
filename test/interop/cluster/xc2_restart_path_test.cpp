@@ -116,6 +116,73 @@ protected:
         return false;
     }
 
+    /// Wait until the live members have settled: every live member is ACTIVE
+    /// and its election is CLOSED (17), all live members are at one term, and
+    /// exactly one of them is LEADER. `min_term` requires that term to be above
+    /// the one before the event under test. `trace` keeps the distinct snapshots
+    /// so a failure says whether the members were moving or parked.
+    [[nodiscard]] bool wait_for_settled(std::chrono::milliseconds timeout, std::int64_t min_term, std::string& trace)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::string last;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            int live = 0;
+            int leaders = 0;
+            bool all_active = true;
+            std::int64_t term = -1;
+            std::string line;
+            for (int i = 0; i < NODES; ++i)
+            {
+                line.append(" n").append(std::to_string(i)).append("=");
+                if (!nodes_[i])
+                {
+                    line.append("stopped");
+                    continue;
+                }
+                ++live;
+                const std::int64_t state =
+                    node_counter(i, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID);
+                const std::int64_t role = node_counter(i, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID);
+                const std::int64_t member_term =
+                    node_counter(i, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+                const std::int64_t election = node_counter(i, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID);
+                line.append(std::to_string(state))
+                    .append("/")
+                    .append(std::to_string(role))
+                    .append("/")
+                    .append(std::to_string(member_term))
+                    .append("/")
+                    .append(std::to_string(election));
+                all_active = all_active && 1 == state && 17 == election;
+                leaders += 2 == role ? 1 : 0;
+                if (-1 == term)
+                {
+                    term = member_term;
+                }
+                else if (term != member_term)
+                {
+                    all_active = false;
+                }
+            }
+            if (line != last)
+            {
+                if (trace.size() < 8192)
+                {
+                    trace.append(line).append("\n");
+                }
+                last = line;
+            }
+            if (live > 0 && all_active && 1 == leaders && term > min_term)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
     [[nodiscard]] bool wait_for_role(int index, std::int32_t role, std::chrono::milliseconds timeout)
     {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -176,6 +243,82 @@ TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfter)
     restart_node(round_, original_leader, false);
     ASSERT_TRUE(wait_for_node_active(original_leader, std::chrono::seconds(30))) << node_dump();
     ASSERT_TRUE(wait_for_role(original_leader, 0, std::chrono::seconds(30))) << node_dump();
+
+    ClusterClientSession session;
+    ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
+    EXPECT_TRUE(send_echoes(session, 10)) << node_dump();
+    session.close();
+
+    stop_round();
+}
+
+TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfterThenStopLeader)
+{
+    start_cluster(22);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int original_leader = leader_index();
+    ASSERT_GE(original_leader, 0) << node_dump();
+    const std::int64_t first_term =
+        node_counter(original_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    stop_node_gracefully(original_leader);
+    ASSERT_GE(await_new_leader(first_term, {(original_leader + 1) % NODES, (original_leader + 2) % NODES},
+                               std::chrono::seconds(20)),
+              0)
+        << node_dump();
+
+    restart_node(round_, original_leader, false);
+    ASSERT_TRUE(wait_for_node_active(original_leader, std::chrono::seconds(30))) << node_dump();
+    ASSERT_TRUE(wait_for_role(original_leader, 0, std::chrono::seconds(30))) << node_dump();
+
+    ClusterClientSession session;
+    ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
+    ASSERT_TRUE(send_echoes(session, 10)) << node_dump();
+    session.close();
+
+    const int leader_two = leader_index();
+    ASSERT_GE(leader_two, 0) << node_dump();
+    const std::int64_t second_term =
+        node_counter(leader_two, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+    stop_node_gracefully(leader_two);
+    EXPECT_EQ(nullptr, nodes_[leader_two].get()) << "stop_node_gracefully did not retire node " << leader_two;
+
+    std::string trace;
+    EXPECT_TRUE(wait_for_settled(std::chrono::seconds(20), second_term, trace))
+        << "members never settled above term " << second_term << ":\n"
+        << trace << node_dump();
+
+    stop_round();
+}
+
+TEST_F(Xc2RestartPathTest, shouldTolerateMultipleLeaderFailures)
+{
+    start_cluster(24);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int first_leader = leader_index();
+    ASSERT_GE(first_leader, 0) << node_dump();
+    const std::int64_t first_term =
+        node_counter(first_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    stop_node_gracefully(first_leader);
+    const int second_leader = await_new_leader(first_term, {(first_leader + 1) % NODES, (first_leader + 2) % NODES},
+                                               std::chrono::seconds(20));
+    ASSERT_GE(second_leader, 0) << node_dump();
+    const std::int64_t second_term =
+        node_counter(second_leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+    const std::int64_t commit = node_counter(second_leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+
+    restart_node(round_, first_leader, false);
+    ASSERT_TRUE(wait_for_node_active(first_leader, std::chrono::seconds(30))) << node_dump();
+    ASSERT_TRUE(await_commit(first_leader, commit, std::chrono::seconds(30))) << node_dump();
+
+    stop_node_gracefully(second_leader);
+    std::string trace;
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(20), second_term, trace))
+        << "members never settled after the second leader stopped: \n"
+        << trace << node_dump();
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
