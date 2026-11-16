@@ -56,6 +56,21 @@ Knobs: `P6_COUNT` (messages per cell, 20,000), `P6_WARMUP` (2,000),
 `P6_SESSIONS`, `P6_IDLE_STRATEGY`, `AXC_DPDK_BENCH_PCI` / `_LOCAL` / `_PEER`
 (topology overrides).
 
+**Pin the media's cores for any reading you mean to quote**:
+
+```bash
+sudo env P6_OURS_CPUSET=0-3 ... bench/dpdk-p6/run-perf.sh
+```
+
+The two drivers run their agents on `spin`, so our media holds its cores at
+100%. Left to the scheduler it settles on the same cores as the far side
+often enough to move a whole media cell's median by 13 us in about one cell in
+twelve (measured 2026-11-16: 5 of 60 media cells unpinned, 0 of 32 with the
+media pinned to 0-3; the same run's kernel cells were unaffected). `P6_PEER_CPUSET`
+pins the reference driver (and the echo, unless `P6_ECHO_CPUSET` says otherwise)
+and `P6_CLIENT_CPUSET` pins the client probes. Every cell records all four in
+its `RUN-INFO.txt`, so a reading says which cores produced it.
+
 Every cell writes `RUN-INFO.txt` (build type, segments flag, git revision),
 `ours.log`, `peer-before.txt` / `peer-after.txt` (the peer's counters with both
 drivers stopped, so the delta is exact), `rtts.txt`, and the driver's CnC

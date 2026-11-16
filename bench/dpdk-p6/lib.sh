@@ -72,6 +72,10 @@ p6_build_info()
         echo "build_dir=$p6_build"
         echo "build_type=$(p6_build_type)"
         echo "segments=$(sed -n 's/^AXC_DPDK_SEGMENTS:BOOL=//p' "$p6_build/CMakeCache.txt" 2>/dev/null | head -1)"
+        echo "ours_cpuset=${P6_OURS_CPUSET:-}"
+        echo "peer_cpuset=${P6_PEER_CPUSET:-}"
+        echo "echo_cpuset=${P6_ECHO_CPUSET:-}"
+        echo "client_cpuset=${P6_CLIENT_CPUSET:-}"
         echo "media_sha256=$(sha256sum "$p6_build/apps/deepmsg-media-driver/deepmsg-media-driver" 2>/dev/null | cut -d' ' -f1)"
         echo "aeronmd_sha256=$(sha256sum "$p6_build/aeron/binaries/aeronmd" 2>/dev/null | cut -d' ' -f1)"
         grep -h '^CXX_FLAGS' "$p6_build/apps/deepmsg-media-driver/CMakeFiles/deepmsg-media-driver.dir/flags.make" 2>/dev/null |
@@ -210,6 +214,12 @@ p6_wait_pid() # p6_wait_pid <pid> <seconds>
 }
 
 # p6_start_ours <arm> <aeron-dir> [extra properties file]
+# The spin strategies this rig needs (a DPDK port cannot wake a parked thread)
+# mean our agents hold their cores at 100%; left to the scheduler they displace
+# the far side's threads often enough to move a media cell's median by 13 us in
+# about one cell in twelve (measured 2026-11-16: 0 of 32 cells pinned to 0-3,
+# 5 of 60 unpinned). Pin the media with `P6_OURS_CPUSET`; the far side and the
+# probes take what is left.
 p6_start_ours()
 {
     local arm=$1 aeron_dir=$2 extras=${3:-}
@@ -227,7 +237,9 @@ p6_start_ours()
     } >"$p6_work/ours.properties"
     local cell_dir=${aeron_dir%/*}
     local log="$cell_dir/ours.log"
-    p6_start p6_ours_pid "$log" "$p6_build/apps/deepmsg-media-driver/deepmsg-media-driver" \
+    local prefix=()
+    [[ -n "${P6_OURS_CPUSET:-}" ]] && prefix=(taskset -c "$P6_OURS_CPUSET")
+    p6_start p6_ours_pid "$log" "${prefix[@]}" "$p6_build/apps/deepmsg-media-driver/deepmsg-media-driver" \
         "$p6_work/ours.properties"
     p6_wait_until 30 test -f "$aeron_dir/cnc.dat" || { echo "our driver did not start" >&2; tail -5 "$log"; exit 1; }
     if [[ "$arm" == media ]]; then
@@ -242,11 +254,13 @@ p6_start_reference()
     mkdir -p "$aeron_dir"
     local cell_dir=${aeron_dir%/*}
     local log="$cell_dir/reference.log"
+    local prefix=()
+    [[ -n "${P6_PEER_CPUSET:-}" ]] && prefix=(taskset -c "$P6_PEER_CPUSET")
     if [[ "$p6_peer_in_netns" == 1 ]]; then
-        p6_start p6_ref_pid "$log" ip netns exec "$p6_netns" "$p6_build/aeron/binaries/aeronmd" \
-            "-Daeron.dir=$aeron_dir"
+        p6_start p6_ref_pid "$log" ip netns exec "$p6_netns" "${prefix[@]}" \
+            "$p6_build/aeron/binaries/aeronmd" "-Daeron.dir=$aeron_dir"
     else
-        p6_start p6_ref_pid "$log" "$p6_build/aeron/binaries/aeronmd" "-Daeron.dir=$aeron_dir"
+        p6_start p6_ref_pid "$log" "${prefix[@]}" "$p6_build/aeron/binaries/aeronmd" "-Daeron.dir=$aeron_dir"
     fi
     p6_wait_until 30 test -f "$aeron_dir/cnc.dat" ||
         { echo "the reference driver did not start" >&2; tail -5 "$log"; exit 1; }

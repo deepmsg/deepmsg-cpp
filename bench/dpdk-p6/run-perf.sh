@@ -58,8 +58,12 @@ cell() # cell <session> <arm> <position>
     # existed before our subscription did, its SETUP frames would land on a port
     # with no binding and count as data-plane discards (the invariant).
     local trigger=$dir/trigger
-    p6_on_peer "$p6_work/bin/echo" "$dir/ref-aeron" "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" \
-        "$STREAM" "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" 0 "$trigger" \
+    local peer_prefix=()
+    local echo_set=${P6_ECHO_CPUSET:-${P6_PEER_CPUSET:-}}
+    [[ -n "$echo_set" ]] && peer_prefix=(taskset -c "$echo_set")
+    p6_on_peer "${peer_prefix[@]}" "$p6_work/bin/echo" "$dir/ref-aeron" \
+        "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" "$STREAM" \
+        "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" 0 "$trigger" \
         >"$dir/echo.log" 2>&1 &
     local echo_pid=$!
     local deadline=$((SECONDS + 30))
@@ -67,7 +71,9 @@ cell() # cell <session> <arm> <position>
 
     local ping_log=$dir/ping.log
     local status=0
-    P6_DUMP_RTTS=$dir/rtts.txt "$p6_work/bin/ping" "$dir/ours-aeron" \
+    local client_prefix=()
+    [[ -n "${P6_CLIENT_CPUSET:-}" ]] && client_prefix=(taskset -c "$P6_CLIENT_CPUSET")
+    P6_DUMP_RTTS=$dir/rtts.txt "${client_prefix[@]}" "$p6_work/bin/ping" "$dir/ours-aeron" \
         "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" "$STREAM" \
         "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" "$COUNT" "$WARMUP" \
         >"$ping_log" 2>&1 &
