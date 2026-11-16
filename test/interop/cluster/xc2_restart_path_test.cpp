@@ -292,6 +292,42 @@ TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfterT
     stop_round();
 }
 
+TEST_F(Xc2RestartPathTest, shouldAcceptMessagesAfterTwoNodeCleanRestart)
+{
+    start_cluster(23);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const int follower_a = (leader + 1) % NODES;
+    const int follower_b = (leader + 2) % NODES;
+    const std::int64_t term = node_counter(leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ASSERT_TRUE(send_echoes(first, 10)) << node_dump();
+    first.close();
+
+    stop_node_gracefully(follower_a);
+    stop_node_gracefully(follower_b);
+    restart_node(round_, follower_a, true);
+    restart_node(round_, follower_b, true);
+
+    ASSERT_TRUE(wait_for_node_active(follower_a, std::chrono::seconds(30))) << node_dump();
+    ASSERT_TRUE(wait_for_node_active(follower_b, std::chrono::seconds(30))) << node_dump();
+
+    std::string trace;
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(30), term, trace)) << "clean-restarted members never settled: \n"
+                                                                         << trace << node_dump();
+
+    ClusterClientSession second;
+    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
+    EXPECT_TRUE(send_echoes(second, 10)) << node_dump();
+    second.close();
+
+    stop_round();
+}
+
 TEST_F(Xc2RestartPathTest, shouldTolerateMultipleLeaderFailures)
 {
     start_cluster(24);
