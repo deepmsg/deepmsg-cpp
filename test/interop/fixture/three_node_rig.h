@@ -243,7 +243,13 @@ protected:
 
     [[nodiscard]] Ports ports_for(int round) const
     {
-        const int base = 22000 + ((static_cast<int>(::getpid()) % 200) * 100) + (round * 50);
+        // Everything a node binds stays below the ephemeral range
+        // (`/proc/sys/net/ipv4/ip_local_port_range`, 32768-60999): a port in
+        // that range can be handed to any outbound connection on the host and
+        // then the node's bind fails with `(98) Address already in use`
+        // (2026-11-17: two CI failures, one node dead at start-up). The old
+        // base (22000 + pid%200 * 100) reached 44000 and did exactly that.
+        const int base = 12000 + ((static_cast<int>(::getpid()) % 64) * 100) + (round * 50);
         Ports ports;
         for (int i = 0; i < NODES; ++i)
         {

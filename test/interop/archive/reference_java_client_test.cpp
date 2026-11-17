@@ -404,7 +404,11 @@ protected:
 
     [[nodiscard]] static std::uint16_t control_port()
     {
-        return static_cast<std::uint16_t>(34010 + (::getpid() % 400) * 2);
+        // Below the ephemeral range (32768-60999): a port in it can be taken
+        // by any outbound connection on the host, and the bind then fails with
+        // `(98) Address already in use` (the three-node rig hit this on
+        // 2026-11-17; this block was inside the range too).
+        return static_cast<std::uint16_t>(11000 + (::getpid() % 400) * 2);
     }
 
     void run_probe(bool segment_ops)
