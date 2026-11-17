@@ -505,6 +505,10 @@ private:
     axc::core::CounterPtr timed_out_client_counter_{};
     axc::core::CounterPtr max_cycle_time_counter_{};
     axc::core::CounterPtr cycle_threshold_exceeded_counter_{};
+    /// `totalSnapshotDurationTracker` (`ConsensusModule.Context:2064-2080`).
+    axc::core::CounterPtr max_snapshot_duration_counter_{};
+    axc::core::CounterPtr snapshot_threshold_exceeded_counter_{};
+    std::int64_t snapshot_start_ns_{0};
 
     aeron_distinct_error_log_t error_log_{};
     bool error_log_initialised_{false};

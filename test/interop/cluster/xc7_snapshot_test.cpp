@@ -569,6 +569,129 @@ TEST_F(Xc7SnapshotTest, shouldTerminateNodeWithInvalidSnapshotAndRecoveryAfterIn
     stop_round();
 }
 
+TEST_F(Xc7SnapshotTest, shouldTrackSnapshotDuration)
+{
+    // `ClusterTest.shouldTrackSnapshotDuration`: the service sleeps inside
+    // `on_take_snapshot`, so both the container's per-service tracker (236/237)
+    // and the consensus module's total tracker (234/235) must see the time.
+    // The reference runs two services (111/222 ms); one service per container
+    // here, and the total duration threshold is lowered to make the breach
+    // deterministic.
+    use_tracking_service();
+    for (int i = 0; i < NODES; ++i)
+    {
+        snapshot_sleep_micros_[i] = 300'000;
+        node_property_overrides_[i]["aeron.cluster.total.snapshot.threshold"] = "100ms";
+        container_property_overrides_[i]["aeron.cluster.service.snapshot.threshold"] = "100ms";
+    }
+    start_cluster(87);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    // The counter may already have moved (recovery snapshots); compare with
+    // the value before the toggle.
+    const auto snapshots_before = node_counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    ASSERT_TRUE(take_snapshot(leader, snapshots_before + 1)) << "the snapshot never completed: " << node_dump();
+
+    EXPECT_GE(node_counter(leader, deepmsg::cluster::common::CLUSTER_TOTAL_MAX_SNAPSHOT_DURATION_TYPE_ID), 300'000'000)
+        << "the total snapshot duration missed the service's 300 ms: " << node_dump();
+    EXPECT_GE(node_counter(leader, deepmsg::cluster::common::CLUSTERED_SERVICE_MAX_SNAPSHOT_DURATION_TYPE_ID),
+              300'000'000)
+        << "the service's snapshot duration was not tracked: " << node_dump();
+    EXPECT_GE(
+        node_counter(leader, deepmsg::cluster::common::CLUSTER_TOTAL_SNAPSHOT_DURATION_THRESHOLD_EXCEEDED_TYPE_ID), 1)
+        << "the total threshold breach was not counted: " << node_dump();
+    EXPECT_GE(
+        node_counter(leader, deepmsg::cluster::common::CLUSTERED_SERVICE_SNAPSHOT_DURATION_THRESHOLD_EXCEEDED_TYPE_ID),
+        1)
+        << "the service threshold breach was not counted: " << node_dump();
+
+    stop_round();
+}
+
+TEST_F(Xc7SnapshotTest, shouldAddCommittedNextSessionIdToTheConsensusModuleSnapshot)
+{
+    // `ClusterTest.shouldAddCommittedNextSessionIdToTheConsensusModuleSnapshot`.
+    // The reference drives it with an authenticator supplier that rejects the
+    // third connection; the authenticator seam is not ours, so the arm here is
+    // the session id itself: after a snapshot and a full restart the next
+    // session must not reuse an id the snapshot committed.
+    use_tracking_service();
+    start_cluster(88);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+
+    ClusterClientSession first;
+    ASSERT_TRUE(connect_udp_retry(first)) << node_dump() << first.last_error();
+    ClusterClientSession second;
+    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
+    const std::int64_t highest = std::max(first.cluster_session_id(), second.cluster_session_id());
+    ASSERT_GT(highest, 0) << node_dump();
+
+    const auto snapshots_before = node_counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    ASSERT_TRUE(take_snapshot(leader, snapshots_before + 1)) << "the snapshot never completed: " << node_dump();
+    first.close();
+    second.close();
+
+    for (int i = 0; i < NODES; ++i)
+    {
+        stop_node_gracefully(i);
+    }
+    restart_nodes_together(round_, {{0, false}, {1, false}, {2, false}});
+    ASSERT_TRUE(wait_for_cluster()) << "the restarted cluster never elected: " << node_dump();
+
+    ClusterClientSession third;
+    ASSERT_TRUE(connect_udp_retry(third)) << node_dump() << third.last_error();
+    EXPECT_GT(third.cluster_session_id(), highest)
+        << "the snapshot did not carry the committed next session id: " << node_dump();
+
+    stop_round();
+}
+
+TEST_F(Xc7SnapshotTest, shouldHandleReusingCorrelationIdsAcrossASnapshot)
+{
+    // `ClusterTest.shouldHandleReusingCorrelationIdsAcrossASnapshot`: the same
+    // timer correlation id registered twice schedules one timer, not two. The
+    // echo service turns a 16-byte payload into a timer command and echoes the
+    // correlation id when it fires.
+    start_cluster(89);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    ClusterClientSession session;
+    ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
+
+    const auto schedule = [](std::int64_t correlation_id, std::int32_t delay_millis)
+    {
+        std::string payload(16, '\0');
+        const std::int32_t command = 1;  // EchoService.TIMER_SCHEDULE
+        std::memcpy(payload.data(), &command, sizeof(command));
+        std::memcpy(payload.data() + sizeof(command), &correlation_id, sizeof(correlation_id));
+        std::memcpy(payload.data() + sizeof(command) + sizeof(correlation_id), &delay_millis, sizeof(delay_millis));
+        return payload;
+    };
+
+    // Both registrations land before the timer fires, so the second must
+    // update the first rather than add another.
+    ASSERT_TRUE(session.offer_only(schedule(4242, 600), std::chrono::seconds(10))) << node_dump();
+    ASSERT_TRUE(session.offer_only(schedule(4242, 600), std::chrono::seconds(10))) << node_dump();
+    ASSERT_TRUE(session.pump_until([&session] { return !session.messages().empty(); }, std::chrono::seconds(20)))
+        << "the timer never fired: " << node_dump();
+
+    // Give the duplicate a full timer window: a second event would show up.
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    (void)session.pump_until([] { return false; }, std::chrono::milliseconds(50));
+    ASSERT_EQ(1U, session.messages().size()) << "the reused correlation id scheduled a second timer: " << node_dump();
+    const std::int64_t correlation_id = 4242;
+    ASSERT_EQ(sizeof(correlation_id), session.messages()[0].size());
+    EXPECT_EQ(0, std::memcmp(session.messages()[0].data(), &correlation_id, sizeof(correlation_id)));
+
+    session.close();
+    stop_round();
+}
+
 TEST_F(Xc7SnapshotTest, shouldInvalidateSnapshotsThatHaveBeenRemoved)
 {
     // `ClusterTest.shouldInvalidateSnapshotsThatHaveBeenRemoved`: the snapshot

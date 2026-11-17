@@ -773,6 +773,25 @@ std::expected<void, Error> ConsensusModuleAgent::allocate_counters()
     }
     cycle_threshold_exceeded_counter_ = std::move(*exceeded);
 
+    // `ConsensusModule.Context.totalSnapshotDurationTracker` (`:2064-2080`):
+    // the total snapshot duration is the whole cycle, services included.
+    auto max_snapshot_duration =
+        await_label("Cluster total max snapshot duration in ns", common::CLUSTER_TOTAL_MAX_SNAPSHOT_DURATION_TYPE_ID);
+    if (!max_snapshot_duration)
+    {
+        return std::unexpected(max_snapshot_duration.error());
+    }
+    max_snapshot_duration_counter_ = std::move(*max_snapshot_duration);
+
+    auto snapshot_exceeded = await_label("Cluster total snapshot duration exceeded count: threshold=" +
+                                             format_duration_ns(config_.total_snapshot_duration_threshold_ns),
+                                         common::CLUSTER_TOTAL_SNAPSHOT_DURATION_THRESHOLD_EXCEEDED_TYPE_ID);
+    if (!snapshot_exceeded)
+    {
+        return std::unexpected(snapshot_exceeded.error());
+    }
+    snapshot_threshold_exceeded_counter_ = std::move(*snapshot_exceeded);
+
     // `RecoveryState.allocate` (`service/RecoveryState.java`): the container's
     // second handshake. A first start has no snapshot, so the key is the term,
     // a zero log position and timestamp, the cluster id and zero snapshot
@@ -2461,6 +2480,8 @@ std::expected<void, Error> ConsensusModuleAgent::on_replay_cluster_action(std::i
     else if (CLUSTER_ACTION_SNAPSHOT == action && CLUSTER_ACTION_FLAGS_DEFAULT == flags)
     {
         state(ConsensusModuleState::snapshot, "ReplayClusterAction.SNAPSHOT");
+        // `totalSnapshotDurationTracker.onSnapshotBegin` (`:1597-1601`).
+        snapshot_start_ns_ = axc::core::NanoClock::now();
         if (0 == config_.service_count)
         {
             auto taken = snapshot_on_service_ack(log_position, timestamp, {});
@@ -3520,6 +3541,9 @@ int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
                 {
                     offer_position_and_previous_state(log_publisher_->position(), state_);
                     state(ConsensusModuleState::snapshot, "ClusterControl.SNAPSHOT");
+                    // `ClusterControl.SNAPSHOT` (`ConsensusModuleAgent:2596`):
+                    // the leader times the cycle from the toggle.
+                    snapshot_start_ns_ = axc::core::NanoClock::now();
                 }
                 return 1;
             }
@@ -3545,6 +3569,8 @@ int ConsensusModuleAgent::check_cluster_control_toggle(std::int64_t now_ns)
                                                                leadership_term_id_, position);
                     offer_position_and_previous_state(position, state_);
                     state(ConsensusModuleState::snapshot, "ClusterControl.SHUTDOWN");
+                    // `ClusterControl.SHUTDOWN` (`ConsensusModuleAgent:2631`).
+                    snapshot_start_ns_ = axc::core::NanoClock::now();
                 }
                 return 1;
             }
@@ -4091,6 +4117,34 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
     (void)recording_log_.append_snapshot(recording_id, leadership_term_id_, term_base_log_position, log_position,
                                          timestamp, static_cast<std::int32_t>(NULL_VALUE));
     (void)recording_log_.force(config_.file_sync_level);
+
+    // `totalSnapshotDurationTracker.onSnapshotEnd` (`:3207`): the whole cycle
+    // from the action to the appended entries, services included.
+    if (0 != snapshot_start_ns_)
+    {
+        const std::int64_t duration_ns = axc::core::NanoClock::now() - snapshot_start_ns_;
+        if (nullptr != max_snapshot_duration_counter_)
+        {
+            if (std::int64_t* address = aeron_counter_addr(max_snapshot_duration_counter_.get()); nullptr != address)
+            {
+                std::int64_t current = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+                while (duration_ns > current && !__atomic_compare_exchange_n(address, &current, duration_ns, false,
+                                                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                {
+                }
+            }
+        }
+        if (nullptr != snapshot_threshold_exceeded_counter_ &&
+            duration_ns > config_.total_snapshot_duration_threshold_ns)
+        {
+            if (std::int64_t* address = aeron_counter_addr(snapshot_threshold_exceeded_counter_.get());
+                nullptr != address)
+            {
+                (void)__atomic_add_fetch(address, 1, __ATOMIC_RELEASE);
+            }
+        }
+        snapshot_start_ns_ = 0;
+    }
     counter_increment(snapshot_counter_);
     return {};
 }

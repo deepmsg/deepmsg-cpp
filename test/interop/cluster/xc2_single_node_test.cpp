@@ -294,10 +294,24 @@ protected:
             (void)::unsetenv("AXC_TEST_TRACKING_NODE_INDEX");
             (void)::unsetenv("AXC_TEST_TRACKING_MODE");
         }
-        auto node = spawn_logged(AXC_CLUSTER_NODE_BIN, {"--embedded-driver", directory_ + "/node.properties"},
-                                 directory_ + "/node.log");
-        ASSERT_TRUE(node) << node.error().message.view();
-        node_ = std::make_unique<ChildProcess>(std::move(*node));
+        // A driver left active by a control-toggle shutdown (its CnC mark is
+        // still fresh) makes the next start refuse the directory until the
+        // 10 s liveness window passes; respawn instead of failing.
+        for (int attempt = 0; attempt < 15; ++attempt)
+        {
+            auto node = spawn_logged(AXC_CLUSTER_NODE_BIN, {"--embedded-driver", directory_ + "/node.properties"},
+                                     directory_ + "/node.log");
+            ASSERT_TRUE(node) << node.error().message.view();
+            node_ = std::make_unique<ChildProcess>(std::move(*node));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (node_->running())
+            {
+                break;
+            }
+            node_.reset();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        ASSERT_TRUE(node_ && node_->running()) << log_text("node");
 
         // The container connects to the CnC file, so wait for the embedded
         // driver before spawning it. It also needs the CM's control publication
@@ -314,13 +328,16 @@ protected:
         {
             (void)::unsetenv("AXC_TEST_ROLE_FILE");
         }
-        for (int attempt = 0; attempt < 20; ++attempt)
+        // The container needs the consensus module's control publication (105)
+        // and a live driver; a loaded runner can take several seconds to get
+        // there, so the retry window is 20 s rather than 6.
+        for (int attempt = 0; attempt < 40; ++attempt)
         {
             auto container = spawn_logged(AXC_CONTAINER_BINARY, {directory_ + "/container.properties"},
                                           directory_ + "/container.log");
             ASSERT_TRUE(container) << container.error().message.view();
             container_ = std::make_unique<ChildProcess>(std::move(*container));
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             if (container_->running())
             {
                 break;

@@ -351,6 +351,11 @@ protected:
                 out << "deepmsg.cluster.service.library=" << service_library_ << "\n"
                     << "deepmsg.cluster.service=" << service_name_ << "\n";
             }
+            // C7: per-container overrides (e.g. the service snapshot threshold).
+            for (const auto& [name, value] : container_property_overrides_[i])
+            {
+                out << name << "=" << value << "\n";
+            }
         }
     }
 
@@ -1138,6 +1143,7 @@ protected:
     std::int32_t snapshot_sleep_micros_[MAX_NODES]{};
     bool snapshot_load_throw_[MAX_NODES]{};
     std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
+    std::map<int, std::map<std::string, std::string>> container_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[MAX_NODES]{};
     std::unique_ptr<ChildProcess> containers_[MAX_NODES]{};
