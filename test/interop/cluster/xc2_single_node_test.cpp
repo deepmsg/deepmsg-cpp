@@ -768,6 +768,20 @@ protected:
     }
 };
 
+/// The C7 snapshot cases drive the in-process client and the tracking service
+/// like the replay fixture, and read the node's own `recording.log`.
+class Xc7SingleNodeSnapshotTest : public Xc2SingleNodeTest
+{
+protected:
+    void SetUp() override
+    {
+        if (!set_up_environment())
+        {
+            return;
+        }
+    }
+};
+
 /// The election-trigger cases only read counters; they run without the fork's
 /// Java probes.
 class Xc2SingleNodeElectionTest : public Xc2SingleNodeTest
@@ -1175,6 +1189,90 @@ TEST_F(Xc2SingleNodeReplayTest, shouldReplayLogWithPaddingAtEndOfRecording)
     }
 
     EXPECT_EQ(1, cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID)) << log_text("node");
+}
+
+// Reference `ClusterTest.shouldRecoverWhenLastSnapshotForShutdownIsMarkedInvalid`:
+// an orderly shutdown takes a snapshot; with that snapshot entry invalidated
+// the restarted node recovers from the log instead, and every message is still
+// applied once. The tracking service, in `record` mode, is the witness.
+TEST_F(Xc7SingleNodeSnapshotTest, shouldRecoverWhenLastSnapshotForShutdownIsMarkedInvalid)
+{
+    use_tracking_service();
+    start();
+
+    const auto payload_of = [](std::int32_t value)
+    {
+        std::string bytes(sizeof(value), '\0');
+        std::memcpy(bytes.data(), &value, sizeof(value));
+        return bytes;
+    };
+
+    ClusterClientSession session;
+    ASSERT_TRUE(session.connect_ipc(aeron_dir_, std::chrono::seconds(30))) << log_text("node") << log_text("container");
+    for (int i = 1; i <= 3; ++i)
+    {
+        ASSERT_TRUE(session.offer_and_await(payload_of(i), static_cast<std::size_t>(i), std::chrono::seconds(20)))
+            << "message " << i << log_text("node") << log_text("container");
+    }
+    session.close();
+
+    // `ClusterControl.ToggleState.SHUTDOWN`: the cluster snapshots and stops.
+    set_control_toggle(5);
+    const auto stop_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < stop_deadline)
+    {
+        if (node_ && !node_->running() && container_ && !container_->running())
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(node_ && !node_->running()) << "the node did not stop" << log_text("node");
+    ASSERT_TRUE(container_ && !container_->running()) << "the container did not stop" << log_text("container");
+    ASSERT_FALSE(recording_log_entries(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_SNAPSHOT).empty())
+        << "the shutdown took no snapshot" << log_text("node");
+
+    {
+        auto log = deepmsg::cluster::common::RecordingLog::open(cluster_dir_, false);
+        ASSERT_TRUE(log) << log.error().message.view();
+        auto invalidated = log->invalidate_latest_snapshot();
+        ASSERT_TRUE(invalidated) << invalidated.error().message.view();
+        ASSERT_TRUE(*invalidated) << "no valid snapshot left to invalidate";
+    }
+
+    start();
+
+    ClusterClientSession second;
+    ASSERT_TRUE(second.connect_ipc(aeron_dir_, std::chrono::seconds(30))) << log_text("node") << log_text("container");
+    for (int i = 4; i <= 6; ++i)
+    {
+        ASSERT_TRUE(second.offer_and_await(payload_of(i), static_cast<std::size_t>(i - 3), std::chrono::seconds(20)))
+            << "message " << i << log_text("node") << log_text("container");
+    }
+    second.close();
+
+    // The restarted service truncates its file in `on_start`, replays the log
+    // (1..3) and then applies the new messages (4..6).
+    const auto settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    std::size_t replayed = 0;
+    std::size_t previous = std::string::npos;
+    while (std::chrono::steady_clock::now() < settle_deadline)
+    {
+        std::size_t count = 0;
+        for (const std::string& line : tracking_lines())
+        {
+            count += (!line.empty() && 'M' == line[0]) ? 1 : 0;
+        }
+        if (count == previous && count > 0)
+        {
+            replayed = count;
+            break;
+        }
+        previous = count;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    EXPECT_EQ(6U, replayed) << "the recovery from the invalidated shutdown snapshot diverged" << log_text("node")
+                            << log_text("container");
 }
 
 TEST_F(Xc2SingleNodeTest, shutdownTerminatesBothProcesses)

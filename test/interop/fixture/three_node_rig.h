@@ -60,6 +60,11 @@ using axc::interop::ProcessResult;
 
 inline constexpr std::int32_t CLUSTER_ID = 7;
 constexpr int NODES = 3;
+
+/// The rig can run up to five members: C7's uncommitted-tail cases follow the
+/// reference's five-node shape (`node_count_` is three unless a test says
+/// otherwise).
+constexpr int MAX_NODES = 5;
 constexpr int ROUNDS = 9;
 
 [[nodiscard]] inline int rounds_to_run()
@@ -209,7 +214,7 @@ protected:
             const std::string kept = "/tmp/c6a-failure-" + std::to_string(::getpid());
             std::filesystem::remove_all(kept, error);
             std::filesystem::create_directories(kept, error);
-            for (int i = 0; i < NODES; ++i)
+            for (int i = 0; i < node_count_; ++i)
             {
                 const std::string node_dir = round_dir(round_) + "/node" + std::to_string(i);
                 for (const char* const name : {"/node.log", "/container.log"})
@@ -234,10 +239,10 @@ protected:
 
     struct Ports
     {
-        int ingress[NODES]{};
-        int consensus[NODES]{};
-        int log[NODES]{};
-        int archive_control[NODES]{};
+        int ingress[MAX_NODES]{};
+        int consensus[MAX_NODES]{};
+        int log[MAX_NODES]{};
+        int archive_control[MAX_NODES]{};
         int client_egress{0};
     };
 
@@ -251,7 +256,7 @@ protected:
         // base (22000 + pid%200 * 100) reached 44000 and did exactly that.
         const int base = 12000 + ((static_cast<int>(::getpid()) % 64) * 100) + (round * 50);
         Ports ports;
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             ports.ingress[i] = base + i;
             ports.consensus[i] = base + 10 + i;
@@ -271,7 +276,7 @@ protected:
     {
         const Ports ports = ports_for(round);
         std::string members;
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             if (0 != i)
             {
@@ -291,7 +296,7 @@ protected:
     {
         const Ports ports = ports_for(round);
         const std::string dir = round_dir(round);
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             const std::string node_dir = dir + "/node" + std::to_string(i);
             std::filesystem::create_directories(node_dir);
@@ -329,7 +334,7 @@ protected:
     void write_container_properties(int round)
     {
         const std::string dir = round_dir(round);
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             const std::string node_dir = dir + "/node" + std::to_string(i);
             std::ofstream out{node_dir + "/container.properties"};
@@ -561,6 +566,25 @@ protected:
                 std::filesystem::remove(item.path(), error);
             }
         }
+    }
+
+    /// `ClusterTool.invalidateLatestSnapshot`: mark the last snapshot entry
+    /// of a stopped node's `recording.log` invalid, the way the reference's
+    /// operator tool does before a restart. Returns false when there is no
+    /// valid snapshot left.
+    [[nodiscard]] bool invalidate_latest_snapshot(int round, int index)
+    {
+        namespace common = deepmsg::cluster::common;
+        const std::string cluster_dir = round_dir(round) + "/node" + std::to_string(index) + "/cluster";
+        auto log = common::RecordingLog::open(cluster_dir, false);
+        EXPECT_TRUE(log) << "node " << index << ": " << log.error().message.view();
+        if (!log)
+        {
+            return false;
+        }
+        auto invalidated = log->invalidate_latest_snapshot();
+        EXPECT_TRUE(invalidated) << invalidated.error().message.view();
+        return invalidated.has_value() && *invalidated;
     }
 
     /// Restart several nodes as one group: retire them all, remove the
@@ -798,7 +822,7 @@ protected:
             std::int64_t term = -2;
             int leaders = 0;
             bool all_active = true;
-            for (int i = 0; i < NODES; ++i)
+            for (int i = 0; i < node_count_; ++i)
             {
                 const std::int64_t state =
                     node_counter(i, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID);
@@ -828,7 +852,7 @@ protected:
     [[nodiscard]] std::string node_dump() const
     {
         std::string dump;
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             auto* self = const_cast<ThreeNodeRig*>(this);
             dump.append(" node")
@@ -854,7 +878,7 @@ protected:
 
     [[nodiscard]] int leader_index()
     {
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             if (2 == node_counter(i, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID))
             {
@@ -896,7 +920,7 @@ protected:
     {
         const Ports ports = ports_for(round);
         std::string endpoints;
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             if (0 != i)
             {
@@ -1039,7 +1063,7 @@ protected:
         // subscriptions must exist before the election starts sending
         // NewLeadershipTerm, or a late follower can miss the only position where
         // the leader publishes it before closing on quorum.
-        for (int i = 0; i < NODES; ++i)
+        for (int i = 0; i < node_count_; ++i)
         {
             start_node(round, i);
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -1062,7 +1086,7 @@ protected:
 
         const int leader = leader_index();
         ASSERT_GE(leader, 0);
-        const int follower = (leader + 1) % NODES;
+        const int follower = (leader + 1) % node_count_;
         const std::int64_t leader_commit_before =
             node_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
 
@@ -1098,6 +1122,9 @@ protected:
         stop_round();
     }
 
+    /// Three members unless the test asks for more (C7's five-node cases).
+    int node_count_{NODES};
+
     std::string jar_{};
     std::string root_dir_{};
     std::string classes_dir_{};
@@ -1107,14 +1134,14 @@ protected:
     std::string role_dir_{};
     std::string tracking_dir_{};
     std::string tracking_mode_{"full"};
-    std::int32_t slow_service_micros_[NODES]{};
-    std::int32_t snapshot_sleep_micros_[NODES]{};
-    bool snapshot_load_throw_[NODES]{};
+    std::int32_t slow_service_micros_[MAX_NODES]{};
+    std::int32_t snapshot_sleep_micros_[MAX_NODES]{};
+    bool snapshot_load_throw_[MAX_NODES]{};
     std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
-    std::unique_ptr<ChildProcess> nodes_[NODES]{};
-    std::unique_ptr<ChildProcess> containers_[NODES]{};
-    std::unique_ptr<DeepmsgClient> node_clients_[NODES]{};
+    std::unique_ptr<ChildProcess> nodes_[MAX_NODES]{};
+    std::unique_ptr<ChildProcess> containers_[MAX_NODES]{};
+    std::unique_ptr<DeepmsgClient> node_clients_[MAX_NODES]{};
     std::unique_ptr<ChildProcess> client_driver_{};
 };
 
