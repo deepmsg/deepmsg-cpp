@@ -579,7 +579,12 @@ TEST_F(Xc2RestartPathTest, shouldTolerateMultipleLeaderFailures)
 
     stop_node_gracefully(second_leader);
     std::string trace;
-    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(20), second_term, trace))
+    // The reference's own case is a @SlowTest one, and the two remaining
+    // members have to elect after two leaders have gone. 20 s was enough on
+    // this machine (10.6 s for the whole case) but not on the 4-vCPU CI
+    // runner, where the case ran 77 s and the leader appeared right after the
+    // deadline (2026-11-17, the first CI run of the branch).
+    ASSERT_TRUE(wait_for_settled(std::chrono::seconds(60), second_term, trace))
         << "members never settled after the second leader stopped: \n"
         << trace << node_dump();
 
