@@ -134,6 +134,7 @@ void ReplicationSession::close()
 
     // `:196-213`: stop the destination subscription and the source replay,
     // release the source client, then signal `REPLICATE_END` exactly once.
+    const bool had_recording_session = NULL_VALUE != recording_subscription_id_;
     stop_recording();
     stop_replay_session();
 
@@ -144,6 +145,21 @@ void ReplicationSession::close()
         extend_token_ = 0;
     }
     source_.reset();
+
+    // A replication that had nothing to replay -- its descriptor's start and
+    // stop are the same position, the "in sync" branch of `replicate_descriptor`
+    // -- never opens a destination recording session, and `STOP` is what that
+    // session sends when it closes. The follower's election completes only on
+    // `has_replication_ended() && has_stopped()` (`Election.java:897-958`), so
+    // without this signal it waits in FOLLOWER_LOG_REPLICATION for ever
+    // (2026-11-17, `Xc2RestartPathTest.shouldTolerateMultipleLeaderFailures`
+    // settled on one member that had seen `SYNC` and `REPLICATE_END` but no
+    // `STOP`). The destination recording is already at its stop, so the
+    // position sent is the catalog's.
+    if (!had_recording_session && NULL_VALUE != dst_recording_id_)
+    {
+        signal(control_->catalog_stop_position(dst_recording_id_), archive_codecs::RecordingSignal::STOP);
+    }
 
     signal(NULL_POSITION, archive_codecs::RecordingSignal::REPLICATE_END);
 }

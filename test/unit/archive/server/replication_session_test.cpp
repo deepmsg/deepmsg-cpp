@@ -485,6 +485,43 @@ TEST(ReplicationSessionTest, connectThenDescriptorBuildsTheDestinationRowAndRepl
     EXPECT_EQ(3, fixture.control.signals[0].replication_id);
 }
 
+TEST(ReplicationSessionTest, aReplicationWithNothingToReplayStillTellsTheClientItStopped)
+{
+    Fixture fixture;
+    fixture.source->descriptors.push_back(descriptor(0, 0));  // start == stop: nothing to replay
+
+    fixture.session->do_work();  // CONNECT
+    fixture.session->do_work();  // listRecording
+    fixture.session->do_work();  // descriptor → row and REPLICATE; in sync → SYNC, DONE
+    ASSERT_EQ(State::done, fixture.session->state());
+    EXPECT_EQ(0, fixture.control.extend_correlation_id);  // no destination recording session was opened
+
+    // `STOP` is what the destination recording session sends when it closes,
+    // and a replication that had nothing to replay never has one. The
+    // follower's election completes only on `has_replication_ended() &&
+    // has_stopped()` (`Election.java:897-958`), so the replication has to say
+    // it: without this, `Xc2RestartPathTest.shouldTolerateMultipleLeaderFailures`
+    // settled on a member that had seen SYNC and REPLICATE_END but no STOP
+    // (2026-11-17).
+    fixture.session->close();
+
+    const auto begin = fixture.control.signals.begin();
+    const auto stop_it =
+        std::find_if(begin, fixture.control.signals.end(), [](const FakeControl::SignalEvent& event)
+                     { return event.signal == deepmsg::archive::server::archive_codecs::RecordingSignal::STOP; });
+    ASSERT_NE(fixture.control.signals.end(), stop_it);
+    EXPECT_EQ(3, stop_it->replication_id);
+    EXPECT_EQ(100, stop_it->recording_id);
+    EXPECT_EQ(NULL_VALUE, stop_it->subscription_id);
+    EXPECT_EQ(0, stop_it->position);
+
+    const auto end_it = std::find_if(
+        begin, fixture.control.signals.end(), [](const FakeControl::SignalEvent& event)
+        { return event.signal == deepmsg::archive::server::archive_codecs::RecordingSignal::REPLICATE_END; });
+    ASSERT_NE(fixture.control.signals.end(), end_it);
+    EXPECT_LT(stop_it - begin, end_it - begin);  // STOP first, then REPLICATE_END
+}
+
 TEST(ReplicationSessionTest, extendStartsTheDestinationSubscriptionAndReplayFollowsTheSource)
 {
     Fixture fixture;
