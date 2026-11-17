@@ -52,7 +52,11 @@ int EgressPoller::poll(aeron_subscription_t* subscription)
         return 0;
     }
 
-    return aeron_subscription_controlled_poll(subscription, &EgressPoller::on_fragment, this, fragment_limit_);
+    // `EgressPoller.poll` polls through the controlled fragment assembler: a
+    // large egress message arrives in pieces and its `MessageHeader` is only
+    // readable once reassembled.
+    return aeron_subscription_controlled_poll(subscription, aeron_controlled_fragment_assembler_handler, assembler_,
+                                              fragment_limit_);
 }
 
 void EgressPoller::reset_slot()

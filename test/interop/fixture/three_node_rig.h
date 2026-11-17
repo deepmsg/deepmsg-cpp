@@ -393,11 +393,25 @@ protected:
             const std::string file = tracking_dir_ + "/tracking-" + std::to_string(index) + ".txt";
             (void)::setenv("AXC_TEST_TRACKING_FILE", file.c_str(), 1);
             (void)::setenv("AXC_TEST_TRACKING_SERVICE_ID", "1", 1);
+            // The pause command names the member by index, and the padding
+            // case needs a log with client messages only.
+            (void)::setenv("AXC_TEST_TRACKING_NODE_INDEX", std::to_string(index).c_str(), 1);
+            (void)::setenv("AXC_TEST_TRACKING_MODE", tracking_mode_.c_str(), 1);
         }
         else
         {
             (void)::unsetenv("AXC_TEST_TRACKING_FILE");
             (void)::unsetenv("AXC_TEST_TRACKING_SERVICE_ID");
+            (void)::unsetenv("AXC_TEST_TRACKING_NODE_INDEX");
+            (void)::unsetenv("AXC_TEST_TRACKING_MODE");
+        }
+        if (slow_service_micros_[index] > 0)
+        {
+            (void)::setenv("AXC_TEST_SLOW_SERVICE_MICROS", std::to_string(slow_service_micros_[index]).c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_SLOW_SERVICE_MICROS");
         }
         auto container =
             spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
@@ -1069,6 +1083,8 @@ protected:
     std::string service_name_{"role-change"};
     std::string role_dir_{};
     std::string tracking_dir_{};
+    std::string tracking_mode_{"full"};
+    std::int32_t slow_service_micros_[NODES]{};
     std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[NODES]{};

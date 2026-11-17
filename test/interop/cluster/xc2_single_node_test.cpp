@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -33,6 +34,7 @@
 #include "cluster/common/cluster_counters.h"
 #include "cluster/common/recording_log.h"
 #include "core/deepmsg/deepmsg_client.h"
+#include "fixture/cluster_client_session.h"
 #include "fixture/process.h"
 
 #ifndef AXC_CLUSTER_NODE_BIN
@@ -47,12 +49,19 @@
 #ifndef AXC_ROLE_CHANGE_SERVICE_LIBRARY
 #define AXC_ROLE_CHANGE_SERVICE_LIBRARY ""
 #endif
+#ifndef AXC_TRACKING_SERVICE_LIBRARY
+#define AXC_TRACKING_SERVICE_LIBRARY ""
+#endif
+#ifndef AXC_ARCHIVE_SERVER_BIN
+#define AXC_ARCHIVE_SERVER_BIN ""
+#endif
 
 namespace
 {
 
 using axc::core::DeepmsgClient;
 using axc::interop::ChildProcess;
+using axc::interop::ClusterClientSession;
 using axc::interop::ProcessResult;
 
 constexpr std::int32_t CLUSTER_ID = 7;
@@ -212,6 +221,15 @@ protected:
 
     void write_properties(const std::string& supplier = {})
     {
+        // The reference's `LOG_CHANNEL` is `aeron:udp?term-length=512k`; the
+        // padding case pins it so the log recording's term length is known.
+        std::string log_channel = "aeron:udp?endpoint=localhost:" + std::to_string(log_port_);
+        if (log_term_length_ > 0)
+        {
+            log_channel = "aeron:udp?term-length=" + std::to_string(log_term_length_) +
+                          "|endpoint=localhost:" + std::to_string(log_port_);
+        }
+
         const std::string node = directory_ + "/node.properties";
         std::ofstream out{node};
         ASSERT_TRUE(out.good());
@@ -223,7 +241,7 @@ protected:
             << "aeron.cluster.members=" << MEMBERS << "\n"
             << "aeron.cluster.ingress.channel=aeron:ipc\n"
             << "aeron.cluster.consensus.channel=aeron:ipc\n"
-            << "aeron.cluster.log.channel=aeron:udp?endpoint=localhost:" << log_port_ << "\n"
+            << "aeron.cluster.log.channel=" << log_channel << "\n"
             << "aeron.cluster.replication.channel=aeron:udp\n"
             << "aeron.cluster.control.channel=aeron:ipc?term-length=128k\n"
             << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << archive_control_port_ << "\n"
@@ -247,7 +265,7 @@ protected:
         if (!service_library_.empty())
         {
             cout << "deepmsg.cluster.service.library=" << service_library_ << "\n"
-                 << "deepmsg.cluster.service=role-change\n";
+                 << "deepmsg.cluster.service=" << service_name_ << "\n";
         }
     }
 
@@ -258,6 +276,23 @@ protected:
         {
             std::error_code error;
             std::filesystem::create_directories(role_dir_, error);
+        }
+        if (!tracking_dir_.empty())
+        {
+            std::error_code error;
+            std::filesystem::create_directories(tracking_dir_, error);
+            const std::string file = tracking_dir_ + "/tracking-0.txt";
+            (void)::setenv("AXC_TEST_TRACKING_FILE", file.c_str(), 1);
+            (void)::setenv("AXC_TEST_TRACKING_SERVICE_ID", "1", 1);
+            (void)::setenv("AXC_TEST_TRACKING_NODE_INDEX", "0", 1);
+            (void)::setenv("AXC_TEST_TRACKING_MODE", tracking_mode_.c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_TRACKING_FILE");
+            (void)::unsetenv("AXC_TEST_TRACKING_SERVICE_ID");
+            (void)::unsetenv("AXC_TEST_TRACKING_NODE_INDEX");
+            (void)::unsetenv("AXC_TEST_TRACKING_MODE");
         }
         auto node = spawn_logged(AXC_CLUSTER_NODE_BIN, {"--embedded-driver", directory_ + "/node.properties"},
                                  directory_ + "/node.log");
@@ -452,6 +487,195 @@ protected:
         return connected && stopped;
     }
 
+    /// The log recording's position and term length through the node's own
+    /// archive control channel (the connection `stop_log_recording` uses). A
+    /// live recording's catalog stop position is `NULL_POSITION`, so the
+    /// position comes from the recorder (`getRecordingPosition`). The padding
+    /// case reads it while the cluster runs, so the filler message that does
+    /// not fit is chosen from the real position, not an assumed frame prefix.
+    [[nodiscard]] bool log_recording_extent(std::int64_t& stop_position, std::int64_t& term_length)
+    {
+        aeron_archive_context_t* context = nullptr;
+        if (0 != aeron_archive_context_init(&context))
+        {
+            return false;
+        }
+        const std::string request = "aeron:udp?endpoint=localhost:" + std::to_string(archive_control_port_);
+        const std::string response = "aeron:udp?endpoint=localhost:" + std::to_string(archive_control_port_ + 100);
+        (void)aeron_archive_context_set_aeron_directory_name(context, aeron_dir_.c_str());
+        (void)aeron_archive_context_set_control_request_channel(context, request.c_str());
+        (void)aeron_archive_context_set_control_request_stream_id(context, 10);
+        (void)aeron_archive_context_set_control_response_channel(context, response.c_str());
+        (void)aeron_archive_context_set_control_response_stream_id(context, 10);
+        (void)aeron_archive_context_set_message_timeout_ns(context, 10'000'000'000ULL);
+
+        aeron_archive_t* archive = nullptr;
+        bool ok = false;
+        if (0 == aeron_archive_connect(&archive, context))
+        {
+            std::vector<aeron_archive_recording_descriptor_t> descriptors;
+            const auto collect = [](aeron_archive_recording_descriptor_t* descriptor, void* clientd)
+            { static_cast<std::vector<aeron_archive_recording_descriptor_t>*>(clientd)->push_back(*descriptor); };
+            std::int32_t listed = 0;
+            ok = 0 == aeron_archive_list_recordings(&listed, archive, 0, 100, collect, &descriptors) &&
+                 1 == descriptors.size();
+            if (ok)
+            {
+                term_length = descriptors[0].term_buffer_length;
+                stop_position = descriptors[0].stop_position;
+                if (AERON_NULL_POSITION == stop_position)
+                {
+                    ok =
+                        0 == aeron_archive_get_recording_position(&stop_position, archive, descriptors[0].recording_id);
+                }
+            }
+        }
+        if (nullptr != archive)
+        {
+            (void)aeron_archive_close(archive);
+        }
+        (void)aeron_archive_context_close(context);
+        return ok;
+    }
+
+    /// The tracking test service, in `record` mode: it records and echoes the
+    /// client messages but offers no service messages and schedules no timers,
+    /// so the log carries one frame per client message (the reference's
+    /// `TestService` shape, which the padding case counts).
+    void use_tracking_service()
+    {
+        service_library_ = AXC_TRACKING_SERVICE_LIBRARY;
+        service_name_ = "tracking";
+        tracking_dir_ = directory_ + "/tracking";
+        tracking_mode_ = "record";
+    }
+
+    /// Lines appended by the tracking service (`M <id>` etc.).
+    [[nodiscard]] std::vector<std::string> tracking_lines() const
+    {
+        std::ifstream in{tracking_dir_ + "/tracking-0.txt"};
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (!line.empty())
+            {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
+
+    /// `SingleNodeTest.truncateRecordingToTermLength`: with the node stopped,
+    /// open its archive directory through our archive server, find the one
+    /// cluster log recording and cut it at its term length. The recording
+    /// then ends on the padding frame the log publication wrote when the term
+    /// filled.
+    [[nodiscard]] bool truncate_log_recording_to_term_length(std::int64_t& term_length, std::string& trace)
+    {
+        if (std::string{AXC_ARCHIVE_SERVER_BIN}.empty() || !std::filesystem::exists(AXC_ARCHIVE_SERVER_BIN))
+        {
+            trace = "archive server not built: " + std::string{AXC_ARCHIVE_SERVER_BIN};
+            return false;
+        }
+
+        const std::string driver_dir = directory_ + "/truncate-aeron";
+        std::error_code error;
+        std::filesystem::remove_all(driver_dir, error);
+        const std::string request = "aeron:udp?endpoint=localhost:" + std::to_string(archive_control_port_);
+        const std::string response = "aeron:udp?endpoint=localhost:" + std::to_string(archive_control_port_ + 100);
+
+        auto spawned = spawn_logged(AXC_ARCHIVE_SERVER_BIN,
+                                    {"-Daeron.dir=" + driver_dir, "-Daeron.archive.dir=" + archive_dir_,
+                                     "-Daeron.archive.control.channel=" + request,
+                                     "-Daeron.archive.threading.mode=SHARED", "-Daeron.spies.simulate.connection=true"},
+                                    directory_ + "/truncate-archive.log");
+        if (!spawned)
+        {
+            trace = spawned.error().message.view();
+            return false;
+        }
+        ChildProcess server = std::move(*spawned);
+
+        aeron_archive_t* archive = nullptr;
+        aeron_archive_context_t* context = nullptr;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (nullptr == archive && std::chrono::steady_clock::now() < deadline)
+        {
+            // A failed connect leaves its context unusable, so every attempt
+            // builds a fresh one (`ContentParity.wait_for_control`).
+            context = nullptr;
+            if (0 != aeron_archive_context_init(&context))
+            {
+                break;
+            }
+            (void)aeron_archive_context_set_aeron_directory_name(context, driver_dir.c_str());
+            (void)aeron_archive_context_set_control_request_channel(context, request.c_str());
+            (void)aeron_archive_context_set_control_request_stream_id(context, 10);
+            (void)aeron_archive_context_set_control_response_channel(context, response.c_str());
+            (void)aeron_archive_context_set_control_response_stream_id(context, 10);
+            (void)aeron_archive_context_set_message_timeout_ns(context, 5'000'000'000ULL);
+            if (0 != aeron_archive_connect(&archive, context))
+            {
+                archive = nullptr;
+                (void)aeron_archive_context_close(context);
+                context = nullptr;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        if (nullptr == archive)
+        {
+            trace = "the archive never answered on " + request + "\n" + log_text("truncate-archive");
+            server.terminate(std::chrono::seconds(5));
+            return false;
+        }
+
+        std::vector<aeron_archive_recording_descriptor_t> descriptors;
+        const auto collect = [](aeron_archive_recording_descriptor_t* descriptor, void* clientd)
+        { static_cast<std::vector<aeron_archive_recording_descriptor_t>*>(clientd)->push_back(*descriptor); };
+        std::int32_t listed = 0;
+        const bool ok = 0 == aeron_archive_list_recordings(&listed, archive, 0, 100, collect, &descriptors);
+        bool truncated = false;
+        if (!ok)
+        {
+            trace = "list_recordings failed: " + std::string{aeron_errmsg()};
+        }
+        else if (1 != descriptors.size())
+        {
+            trace = "expected one recording, found " + std::to_string(descriptors.size());
+        }
+        else
+        {
+            const aeron_archive_recording_descriptor_t& descriptor = descriptors[0];
+            term_length = descriptor.term_buffer_length;
+            trace = "id=" + std::to_string(descriptor.recording_id) +
+                    " term=" + std::to_string(descriptor.term_buffer_length) +
+                    " stop=" + std::to_string(descriptor.stop_position);
+            if (descriptor.stop_position <= descriptor.term_buffer_length)
+            {
+                trace.append(" (the recording never passed one term)");
+            }
+            else
+            {
+                std::int64_t deleted = 0;
+                truncated = 0 == aeron_archive_truncate_recording(&deleted, archive, descriptor.recording_id,
+                                                                  descriptor.term_buffer_length);
+                if (!truncated)
+                {
+                    trace.append(" truncate failed: ").append(aeron_errmsg());
+                }
+            }
+        }
+
+        (void)aeron_archive_close(archive);
+        if (nullptr != context)
+        {
+            (void)aeron_archive_context_close(context);
+        }
+        server.terminate(std::chrono::seconds(5));
+        return truncated;
+    }
+
     [[nodiscard]] ProcessResult run_probe(const std::string& main_class, const std::vector<std::string>& arguments,
                                           std::chrono::milliseconds timeout = std::chrono::seconds(90))
     {
@@ -520,10 +744,28 @@ protected:
     std::int32_t log_port_{0};
     std::int32_t archive_control_port_{0};
     std::string service_library_{};
+    std::string service_name_{"role-change"};
+    std::string tracking_dir_{};
+    std::string tracking_mode_{"full"};
+    std::int32_t log_term_length_{0};
     std::string role_dir_{};
     std::unique_ptr<ChildProcess> node_{};
     std::unique_ptr<ChildProcess> container_{};
     std::unique_ptr<DeepmsgClient> client_{};
+};
+
+/// The replay cases drive the in-process client and the tracking service; they
+/// run without the fork's Java probes (whose checkout is optional here).
+class Xc2SingleNodeReplayTest : public Xc2SingleNodeTest
+{
+protected:
+    void SetUp() override
+    {
+        if (!set_up_environment())
+        {
+            return;
+        }
+    }
 };
 
 /// The election-trigger cases only read counters; they run without the fork's
@@ -766,6 +1008,173 @@ TEST_F(Xc2SingleNodeTest, aShutdownRestartsAndReplays)
     EXPECT_GE(recording_log_entries(deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_SNAPSHOT).size(),
               snapshots_before);
     EXPECT_EQ(1, cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID));
+}
+
+// Reference `SingleNodeTest.shouldReplayLogWithPaddingAtEndOfRecording`: 481
+// one KiB messages nearly fill the 512 KiB log term; the message that cannot
+// fit makes the log publication pad the rest of the term, and the recording is
+// then cut at exactly the term length so it ends on that padding frame. The
+// restarted node must replay everything before the padding, skip the padding
+// frame itself, and not read past the truncated stop position (the filler that
+// went into the next term is cut away).
+TEST_F(Xc2SingleNodeReplayTest, shouldReplayLogWithPaddingAtEndOfRecording)
+{
+    use_tracking_service();
+    log_term_length_ = 512 * 1024;
+    start();
+
+    ClusterClientSession session;
+    ASSERT_TRUE(session.connect_ipc(aeron_dir_, std::chrono::seconds(30))) << log_text("node") << log_text("container");
+
+    constexpr int large_message_count = 481;
+    const std::string large_tail(1024 - sizeof(std::int32_t), 'a');
+    std::vector<std::int32_t> expected_ids;
+    for (int i = 1; i <= large_message_count; ++i)
+    {
+        std::int32_t id = i;
+        std::string payload(sizeof(id), '\0');
+        std::memcpy(payload.data(), &id, sizeof(id));
+        payload.append(large_tail);
+        ASSERT_TRUE(session.offer_and_await(payload, expected_ids.size() + 1, std::chrono::seconds(20)))
+            << "message " << i << log_text("node") << log_text("container");
+        expected_ids.push_back(id);
+    }
+
+    // Offer one message that cannot fit: the log publication fills the rest of
+    // the term with a padding frame and the message lands in the next term.
+    // The archive's catalog trails the recorder, so wait until the stop
+    // position is within one log frame of the term's end; a stale (smaller)
+    // stop position only makes the filler larger than the true remainder, and
+    // a frame of `remaining + 64` never fits in `remaining` bytes either way.
+    std::int64_t stop_position = 0;
+    std::int64_t term_length_probe = 0;
+    std::int64_t remaining = 0;
+    const auto extent_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (std::chrono::steady_clock::now() < extent_deadline)
+    {
+        ASSERT_TRUE(log_recording_extent(stop_position, term_length_probe))
+            << "the log recording was not listed" << log_text("node") << log_text("container");
+        ASSERT_EQ(512 * 1024, term_length_probe);
+        remaining = term_length_probe - (stop_position % term_length_probe);
+        // The log publication's maximum message length is termLength / 8.
+        if (remaining > 0 && remaining <= 60'000)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_GT(remaining, 0) << "the catalog never came near the end of the term";
+    ASSERT_LE(remaining, 60'000) << "the catalog never came near the end of the term";
+
+    const std::int32_t filler_id = 9001;
+    std::string filler(static_cast<std::size_t>(remaining), 'p');
+    if (static_cast<std::size_t>(remaining) < sizeof(filler_id))
+    {
+        filler.assign(sizeof(filler_id), 'p');
+    }
+    std::memcpy(filler.data(), &filler_id, sizeof(filler_id));
+    ASSERT_TRUE(session.offer_and_await(filler, expected_ids.size() + 1, std::chrono::seconds(20)))
+        << "filler " << filler_id << " remaining=" << remaining << log_text("node") << log_text("container");
+    // The filler itself is in the next term: the truncation cuts it away, so it
+    // is not part of the expected replay.
+    session.close();
+
+    stop();
+
+    // The case is only about padding if the recording really ends on a padding
+    // frame: the frame at `termLength - remaining` is PAD (`HDR_TYPE_PAD`) and
+    // fills the rest of the term.
+    {
+        std::string recording_file;
+        for (const auto& item : std::filesystem::directory_iterator(archive_dir_))
+        {
+            const std::string name = item.path().filename().string();
+            if (name.size() > 4 && 0 == name.compare(name.size() - 4, 4, ".rec"))
+            {
+                recording_file = item.path().string();
+            }
+        }
+        ASSERT_FALSE(recording_file.empty()) << log_text("node");
+        std::ifstream in{recording_file, std::ios::binary};
+        ASSERT_TRUE(in.good()) << recording_file;
+        const std::int64_t pad_offset = 512 * 1024 - remaining;
+        char header[8]{};
+        in.seekg(pad_offset);
+        in.read(header, sizeof(header));
+        ASSERT_TRUE(in.good()) << recording_file;
+        std::int32_t frame_length = 0;
+        std::memcpy(&frame_length, header, sizeof(frame_length));
+        // `HDR_TYPE_PAD` is 0x00 in the data header; the frame length is what
+        // separates a written padding frame from the unwritten zeros after it.
+        EXPECT_EQ(0x00, static_cast<unsigned char>(header[6])) << "no padding frame at " << pad_offset;
+        EXPECT_EQ(remaining, frame_length) << "the padding frame is " << pad_offset;
+
+        // The filler that forced the padding is the first frame of the next
+        // term (`HDR_TYPE_DATA` is 0x01).
+        char next_term[8]{};
+        in.seekg(512 * 1024);
+        in.read(next_term, sizeof(next_term));
+        ASSERT_TRUE(in.good()) << recording_file;
+        EXPECT_EQ(0x01, static_cast<unsigned char>(next_term[6])) << "the filler is not in the next term";
+        std::int32_t filler_frame_length = 0;
+        std::memcpy(&filler_frame_length, next_term, sizeof(filler_frame_length));
+        EXPECT_EQ(remaining + 64, filler_frame_length) << "header + session header + the filler payload";
+    }
+
+    std::int64_t term_length = 0;
+    std::string trace;
+    ASSERT_TRUE(truncate_log_recording_to_term_length(term_length, trace)) << trace;
+    EXPECT_EQ(512 * 1024, term_length) << trace;
+
+    start();
+
+    // The restarted service truncates its tracking file in `on_start` and the
+    // replay appends the messages it re-applies; settle when the count has
+    // stopped moving.
+    const auto count_replayed_messages = [this]()
+    {
+        std::size_t count = 0;
+        for (const std::string& line : tracking_lines())
+        {
+            count += (!line.empty() && 'M' == line[0]) ? 1 : 0;
+        }
+        return count;
+    };
+    std::size_t replayed = 0;
+    std::size_t previous = std::string::npos;
+    const auto settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (std::chrono::steady_clock::now() < settle_deadline)
+    {
+        const std::size_t count = count_replayed_messages();
+        if (count == previous && count > 0)
+        {
+            replayed = count;
+            break;
+        }
+        previous = count;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    ASSERT_GT(replayed, 0U) << "the replay never reached the service" << log_text("node") << log_text("container");
+
+    // Every message before the padding frame is replayed, in order and once;
+    // the padding frame itself is skipped, and the filler that went into the
+    // next term was cut away with the truncation.
+    std::vector<std::int32_t> ids;
+    for (const std::string& line : tracking_lines())
+    {
+        if (!line.empty() && 'M' == line[0])
+        {
+            ids.push_back(static_cast<std::int32_t>(std::stoll(line.substr(2))));
+        }
+    }
+    ASSERT_EQ(replayed, ids.size()) << trace;
+    EXPECT_EQ(expected_ids.size(), ids.size()) << trace;
+    for (std::size_t i = 0; i < std::min(ids.size(), expected_ids.size()); ++i)
+    {
+        ASSERT_EQ(expected_ids[i], ids[i]) << "the replay diverged at index " << i << ": " << trace;
+    }
+
+    EXPECT_EQ(1, cluster_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID)) << log_text("node");
 }
 
 TEST_F(Xc2SingleNodeTest, shutdownTerminatesBothProcesses)

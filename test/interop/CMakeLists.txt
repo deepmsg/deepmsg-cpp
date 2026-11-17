@@ -78,6 +78,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc2_restart_path_test.cpp
         cluster/xc2_admin_client_test.cpp
         cluster/xc2_service_ipc_test.cpp
+        cluster/xc2_bounds_test.cpp
         cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
@@ -137,11 +138,12 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
     "AXC_ROLE_CHANGE_SERVICE_LIBRARY=\"$<TARGET_FILE:role_change_service_dynamic>\""
     "AXC_TRACKING_SERVICE_LIBRARY=\"$<TARGET_FILE:tracking_service_dynamic>\""
-    "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\"")
+    "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\""
+    "AXC_ARCHIVE_SERVER_BIN=\"${PROJECT_BINARY_DIR}/apps/deepmsg-archive-server/deepmsg-archive-server\"")
 
 add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container deepmsg-cluster-node
     deepmsg-consensus-module echo_service_dynamic role_change_service_dynamic tracking_service_dynamic
-    deepmsg-cluster-client-smoke)
+    deepmsg-cluster-client-smoke axc_archive_server)
 
 # The tool under test is an executable of its own; build it with the suite.
 add_dependencies(axc_archive_interop_tests archive-tool-ro)

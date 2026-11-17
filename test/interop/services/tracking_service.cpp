@@ -9,13 +9,18 @@
 // appended to `AXC_TEST_TRACKING_FILE` (`M <id>`, `S <id>`, `T <correlation>`),
 // and a snapshot restore rewrites the restored lists.
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "cluster/service/cluster.h"
@@ -53,6 +58,22 @@ public:
         next_service_message_number_ = 1'000'000 * service_id_;
         next_timer_correlation_id_ = -1'000'000LL * service_id_;
         file_ = std::getenv("AXC_TEST_TRACKING_FILE");
+        if (const char* node = std::getenv("AXC_TEST_TRACKING_NODE_INDEX"); nullptr != node)
+        {
+            node_index_ = std::atoi(node);
+        }
+        if (const char* slow = std::getenv("AXC_TEST_SLOW_SERVICE_MICROS"); nullptr != slow)
+        {
+            slow_service_micros_ = std::atoi(slow);
+        }
+        // C6c-2 S5's padding case: the log must hold only the client messages,
+        // so the service answers each one but offers no service messages and
+        // schedules no timers (the reference's `TestService` shape).
+        if (const char* mode = std::getenv("AXC_TEST_TRACKING_MODE");
+            nullptr != mode && 0 == std::strcmp(mode, "record"))
+        {
+            record_only_ = true;
+        }
     }
 
     std::expected<void, service::Error> on_start(service::Cluster& cluster, service::SnapshotImage* snapshot)
@@ -127,25 +148,71 @@ public:
                                                            std::span<const std::uint8_t> payload,
                                                            const service::LogHeader&)
     {
-        std::int32_t id = 0;
-        std::memcpy(&id, payload.data(), sizeof(id));
-
         if (nullptr == session)
         {
+            std::int32_t id = 0;
+            std::memcpy(&id, payload.data(), sizeof(id));
             service_messages_.push_back(id);
             write_line('S', id);
             ++message_count_;
             return {};
         }
 
+        // `ClusterTest.shouldRemainStableWhenThereIsASlowFollower`: the pause
+        // command names the member whose service must stall; on every other
+        // member it is a plain no-op, and it is never a tracked client message
+        // (`TestNode.TestService.onSessionMessage`).
+        if (auto pausing = pause_duration_for(payload))
+        {
+            if (pausing->second)
+            {
+                std::this_thread::sleep_for(std::chrono::nanoseconds{pausing->first});
+            }
+            return {};
+        }
+
+        // `ClusterTest.shouldCatchupFollowerWithSlowService`: this service is
+        // deliberately slow to apply each client message.
+        if (slow_service_micros_ > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds{slow_service_micros_});
+        }
+
+        std::int32_t id = 0;
+        std::memcpy(&id, payload.data(), sizeof(id));
         client_messages_.push_back(id);
         write_line('M', id);
+
+        if (record_only_)
+        {
+            auto* view = session;
+            while (true)
+            {
+                auto offered = view->offer(payload);
+                if (!offered)
+                {
+                    return std::unexpected(offered.error());
+                }
+                if (*offered > 0)
+                {
+                    break;
+                }
+                auto idled = cluster.idle(0);
+                if (!idled)
+                {
+                    return std::unexpected(idled.error());
+                }
+            }
+            ++message_count_;
+            return {};
+        }
 
         for (std::int32_t i = 0; i < SERVICE_MESSAGES_PER_INGRESS; ++i)
         {
             const std::int32_t service_message = ++next_service_message_number_;
             const std::span<const std::uint8_t> bytes{reinterpret_cast<const std::uint8_t*>(&service_message),
                                                       sizeof(service_message)};
+            std::int64_t refusals = 0;
             while (true)
             {
                 auto offered = cluster.offer(bytes);
@@ -156,6 +223,10 @@ public:
                 if (*offered > 0)
                 {
                     break;
+                }
+                if (0 == (refusals++ % 100'000))
+                {
+                    write_line('W', *offered);
                 }
                 auto idled = cluster.idle(0);
                 if (!idled)
@@ -387,6 +458,33 @@ private:
         return offer(writer, record);
     }
 
+    /// `PAUSE + "|" + index + "|" + durationNs` (`ClusterTests.PAUSE`,
+    /// `TestCluster.sendMessageToSlowDownService`). Returns the duration and
+    /// whether this member is the one that must stall.
+    [[nodiscard]] std::optional<std::pair<std::int64_t, bool>> pause_duration_for(
+        std::span<const std::uint8_t> payload) const
+    {
+        constexpr std::string_view prefix = "Please pause when processing message";
+        if (payload.size() <= prefix.size() || 0 != std::memcmp(payload.data(), prefix.data(), prefix.size()))
+        {
+            return std::nullopt;
+        }
+        const std::string_view text{reinterpret_cast<const char*>(payload.data()), payload.size()};
+        const std::size_t first = text.find('|', prefix.size());
+        if (std::string_view::npos == first)
+        {
+            return std::nullopt;
+        }
+        const std::size_t second = text.find('|', first + 1);
+        if (std::string_view::npos == second)
+        {
+            return std::nullopt;
+        }
+        const int index = std::atoi(std::string{text.substr(first + 1, second - first - 1)}.c_str());
+        const std::int64_t duration_ns = std::atoll(std::string{text.substr(second + 1)}.c_str());
+        return std::pair<std::int64_t, bool>{duration_ns, index == node_index_};
+    }
+
     void write_line(char type, std::int64_t value)
     {
         if (nullptr == file_)
@@ -399,6 +497,9 @@ private:
     }
 
     const char* file_{nullptr};
+    std::int32_t node_index_{-1};
+    std::int32_t slow_service_micros_{0};
+    bool record_only_{false};
     std::int32_t service_id_{1};
     std::int32_t message_count_{0};
     std::int32_t timer_count_{0};

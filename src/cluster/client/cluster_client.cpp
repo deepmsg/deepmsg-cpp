@@ -510,8 +510,16 @@ std::expected<int, Error> ClusterClient::poll_egress(std::size_t fragment_limit)
         return 0;
     }
 
-    const int fragments =
-        aeron_subscription_poll(egress_subscription_.get(), &ClusterClient::on_fragment_dispatch, this, fragment_limit);
+    if (nullptr == assembler_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "the egress fragment assembler was not created"));
+    }
+
+    // `AeronCluster.pollEgress()` polls through `egressFragmentAssembler`: a
+    // response that crosses the MTU arrives as several fragments and must be
+    // reassembled before its `MessageHeader` is read.
+    const int fragments = aeron_subscription_poll(egress_subscription_.get(), aeron_fragment_assembler_handler,
+                                                  assembler_, fragment_limit);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
@@ -546,8 +554,16 @@ std::expected<int, Error> ClusterClient::controlled_poll_egress(std::size_t frag
         return 0;
     }
 
-    const int fragments = aeron_subscription_controlled_poll(egress_subscription_.get(), &ClusterClient::on_fragment,
-                                                             this, fragment_limit);
+    if (nullptr == controlled_assembler_)
+    {
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, "the controlled egress fragment assembler was not created"));
+    }
+
+    // `AeronCluster.pollEgress(fragmentLimit)` in the controlled variant polls
+    // through the controlled assembler, for the same reason as `poll_egress`.
+    const int fragments = aeron_subscription_controlled_poll(
+        egress_subscription_.get(), aeron_controlled_fragment_assembler_handler, controlled_assembler_, fragment_limit);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
@@ -1019,7 +1035,14 @@ EgressAdapter::~EgressAdapter()
 
 std::expected<int, Error> EgressAdapter::poll(aeron_subscription_t* subscription)
 {
-    const int fragments = aeron_subscription_poll(subscription, &EgressAdapter::on_fragment, this, fragment_limit_);
+    if (nullptr == assembler_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "the egress fragment assembler was not created"));
+    }
+    // `EgressAdapter.poll` (`EgressAdapter.java:66`) polls through the
+    // fragment assembler, not the raw fragment handler.
+    const int fragments =
+        aeron_subscription_poll(subscription, aeron_fragment_assembler_handler, assembler_, fragment_limit_);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
@@ -1162,8 +1185,13 @@ ControlledEgressAdapter::~ControlledEgressAdapter()
 
 std::expected<int, Error> ControlledEgressAdapter::poll(aeron_subscription_t* subscription)
 {
-    const int fragments =
-        aeron_subscription_controlled_poll(subscription, &ControlledEgressAdapter::on_fragment, this, fragment_limit_);
+    if (nullptr == assembler_)
+    {
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, "the controlled egress fragment assembler was not created"));
+    }
+    const int fragments = aeron_subscription_controlled_poll(subscription, aeron_controlled_fragment_assembler_handler,
+                                                             assembler_, fragment_limit_);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
