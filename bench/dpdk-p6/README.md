@@ -115,6 +115,31 @@ that found the shared-transmit-queue race (2026-11-16): at 20,000 frames per
 cell the loss was one to six frames, which a flood turns into something a run
 can see.
 
+## The reading, by rate (2026-11-17)
+
+Size and medians in microseconds, Release + DPDK build, cores pinned
+`0-3 / 4-5 / 6 / 7`, two sessions of `K M M K` per rate (`N=20,000`):
+
+| rate | kernel p50 | media p50 | M/K |
+|---|---|---|---|
+| 0 (self-paced, ~31–32K/s) | 31.1–31.6 | 25.2–25.7 | **0.811–0.816** |
+| 25K/s | 34.6–35.2 | 30.3–30.9 | **0.871–0.881** |
+| 101K/s | 43.5–44.8 | 30.8–30.9 | **0.687–0.708** |
+| 301K/s | 132–172 | 88–96 | **0.555–0.671** |
+| 501K/s | saturated: one cell paced 430,730/s, another 564 | 83–109 | not a reading |
+
+- At 25K/s the link idles ~8 us between messages and the 10GBASE-T low-power
+  state adds ~3.5 us to both arms; the media's absolute advantage stays about
+  the same, so its ratio shrinks. **A quoted M/K is meaningless without the
+  rate.**
+- Above the self-paced rate the median includes queueing (a publish queue at
+  the client, the port's rings below it) — that is what the rate asks for.
+- At 501K/s the kernel arm runs out: one cell made 86% of the asked pace and
+  one collapsed to 564 us, while the media held ~485–496K/s.
+
+Full record and raw logs: `analysis/cpp/records/dpdk-rates.md` and its
+`dpdk-rates-2026-11-17/` sibling.
+
 ## Pitfalls that have bitten
 
 - Each cell leaves a ~48 MB `cnc.dat` under `/tmp/axc-p6-*`; a few dozen fills
