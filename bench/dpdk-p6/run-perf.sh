@@ -19,6 +19,8 @@ source "$p6_repo/bench/dpdk-p6/lib.sh"
 
 COUNT=${P6_COUNT:-20000}
 WARMUP=${P6_WARMUP:-2000}
+# Messages per second; 0 is the strict ping-pong (one outstanding).
+RATE=${P6_RATE:-0}
 SESSIONS=${P6_SESSIONS:-2}
 ECHO_IN_PORT=24630
 ECHO_OUT_PORT=24631
@@ -75,7 +77,7 @@ cell() # cell <session> <arm> <position>
     [[ -n "${P6_CLIENT_CPUSET:-}" ]] && client_prefix=(taskset -c "$P6_CLIENT_CPUSET")
     P6_DUMP_RTTS=$dir/rtts.txt "${client_prefix[@]}" "$p6_work/bin/ping" "$dir/ours-aeron" \
         "aeron:udp?endpoint=$p6_peer_addr:$ECHO_IN_PORT" "$STREAM" \
-        "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" "$COUNT" "$WARMUP" \
+        "aeron:udp?endpoint=$p6_local_addr:$ECHO_OUT_PORT" "$STREAM" "$COUNT" "$WARMUP" "$RATE" \
         >"$ping_log" 2>&1 &
     local ping_pid=$!
     sleep 1
@@ -85,7 +87,7 @@ cell() # cell <session> <arm> <position>
     kill -TERM "$echo_pid" 2>/dev/null || true
     wait "$echo_pid" 2>/dev/null || true
 
-    local sent received p50 p99 p999 min max packets bytes error missed discard naks gaps
+    local sent received p50 p99 p999 min max packets bytes error missed discard naks gaps achieved
     sent=$(awk '/^SENT / {print $2}' "$ping_log" | tail -1)
     received=$(awk '/^SENT / {print $4}' "$ping_log" | tail -1)
     p50=$(awk '/^P50 / {print $2}' "$ping_log" | tail -1)
@@ -100,6 +102,7 @@ cell() # cell <session> <arm> <position>
     discard=$(p6_counter "$dir/ours-aeron/cnc.dat" "dpdk rx receiver discard")
     naks=$(p6_counter "$dir/ref-aeron/cnc.dat" "NAKs sent")
     gaps=$(p6_counter "$dir/ref-aeron/cnc.dat" "Loss gap fills")
+    achieved=$(awk '/^RATE / {print $4}' "$ping_log" | tail -1)
 
     if [[ "$status" -ne 0 || "${sent:-0}" -ne $((COUNT + WARMUP)) || "${received:-0}" -ne $((COUNT + WARMUP)) ||
         -z "$p50" ]]; then
@@ -108,11 +111,13 @@ cell() # cell <session> <arm> <position>
         fail "cell $session/$position ($arm): media counters error=${error:-?} missed=${missed:-?} discard=${discard:-?}"
     elif [[ "$arm" == K && -n "${packets}" ]]; then
         fail "cell $session/$position (kernel): the driver has dpdk counters"
+    elif [[ "$RATE" -gt 0 ]] && [[ "${achieved:-0}" -lt $((RATE * 9 / 10)) ]]; then
+        fail "cell $session/$position ($arm): asked for ${RATE}/s, achieved ${achieved:-?}/s"
     else
-        pass "cell $session/$position ($arm): p50 $p50 ns, p99 $p99 ns, p999 $p999 ns"
+        pass "cell $session/$position ($arm): p50 $p50 ns, p99 $p99 ns, p999 $p999 ns (asked ${RATE}/s, sent ${achieved:-?}/s)"
     fi
     say "     packets=${packets:-<none>} bytes=${bytes:-<none>} error=${error:-<none>} missed=${missed:-<none>} discard=${discard:-<none>} domain NAKs=${naks:-?} gaps=${gaps:-?}"
-    csv+="$session,$position,$arm,$p50,$p99,$p999,$min,$max,$sent,$received,${packets:-},${error:-},${missed:-},${discard:-},${naks:-},${gaps:-}"$'\n'
+    csv+="$session,$position,$arm,$p50,$p99,$p999,$min,$max,$sent,$received,${packets:-},${error:-},${missed:-},${discard:-},${naks:-},${gaps:-},$RATE,${achieved:-}"$'\n'
 
     kill -TERM "$p6_ours_pid" "$p6_ref_pid" 2>/dev/null || true
     p6_wait_pid "$p6_ours_pid" 20 2>/dev/null || true
