@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include <io_aeron_cluster_codecs/AdminRequest.h>
+
 #include "cluster/client/async_connect.h"
 #include "cluster/client/client_config.h"
 #include "cluster/client/cluster_client.h"
@@ -33,7 +35,19 @@ using deepmsg::cluster::client::EgressListener;
 
 struct RecordingEgressListener final : EgressListener
 {
+    struct AdminResponse
+    {
+        std::int64_t session_id;
+        std::int64_t correlation_id;
+        deepmsg::cluster::common::codecs::AdminRequestType::Value request_type;
+        deepmsg::cluster::common::codecs::AdminResponseCode::Value code;
+        std::string message;
+        std::size_t payload_length;
+    };
+
     std::vector<std::string> messages{};
+    std::vector<deepmsg::cluster::common::codecs::EventCode::Value> events{};
+    std::vector<AdminResponse> admin_responses{};
     std::int32_t new_leader_events{0};
     std::int64_t last_leadership_term_id{0};
 
@@ -43,8 +57,9 @@ struct RecordingEgressListener final : EgressListener
     }
 
     void on_session_event(std::int64_t, std::int64_t, std::int64_t, std::int32_t,
-                          deepmsg::cluster::common::codecs::EventCode::Value, std::string_view) override
+                          deepmsg::cluster::common::codecs::EventCode::Value code, std::string_view) override
     {
+        events.push_back(code);
     }
 
     void on_new_leader(std::int64_t, std::int64_t leadership_term_id, std::int32_t, std::string_view) override
@@ -53,10 +68,13 @@ struct RecordingEgressListener final : EgressListener
         last_leadership_term_id = leadership_term_id;
     }
 
-    void on_admin_response(std::int64_t, std::int64_t, deepmsg::cluster::common::codecs::AdminRequestType::Value,
-                           deepmsg::cluster::common::codecs::AdminResponseCode::Value, std::string_view,
-                           std::span<const std::uint8_t>) override
+    void on_admin_response(std::int64_t session_id, std::int64_t correlation_id,
+                           deepmsg::cluster::common::codecs::AdminRequestType::Value request_type,
+                           deepmsg::cluster::common::codecs::AdminResponseCode::Value code, std::string_view message,
+                           std::span<const std::uint8_t> payload) override
     {
+        admin_responses.push_back(
+            AdminResponse{session_id, correlation_id, request_type, code, std::string{message}, payload.size()});
     }
 };
 
@@ -75,13 +93,19 @@ public:
     /// UDP ingress with the member endpoint list and the rig's egress channel.
     [[nodiscard]] bool connect_udp(const std::string& aeron_dir, const std::string& ingress_endpoints,
                                    const std::string& egress_channel,
-                                   std::chrono::milliseconds timeout = std::chrono::seconds(30))
+                                   std::chrono::milliseconds timeout = std::chrono::seconds(30),
+                                   std::chrono::milliseconds new_leader_timeout = std::chrono::milliseconds::zero())
     {
         ClientConfig config;
         config.ingress_channel = "aeron:udp?term-length=128k";
         config.ingress_endpoints = ingress_endpoints;
         config.egress_channel = egress_channel;
         config.client_name = "c6c-client";
+        if (new_leader_timeout > std::chrono::milliseconds::zero())
+        {
+            config.new_leader_timeout_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(new_leader_timeout).count();
+        }
         // The reference default is 5 s. A full parallel gate (three nodes,
         // three archives, a client driver) can miss that on a loaded runner and
         // report a connect timeout on a healthy cluster; the scenario retries
@@ -105,6 +129,16 @@ public:
     [[nodiscard]] bool is_open() const noexcept
     {
         return cluster_.has_value() && !cluster_->is_closed();
+    }
+
+    [[nodiscard]] std::int64_t cluster_session_id() const noexcept
+    {
+        return cluster_ ? cluster_->cluster_session_id() : -1;
+    }
+
+    [[nodiscard]] const std::vector<deepmsg::cluster::common::codecs::EventCode::Value>& events() const noexcept
+    {
+        return listener_.events;
     }
 
     [[nodiscard]] const std::vector<std::string>& messages() const noexcept
@@ -144,6 +178,83 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         return false;
+    }
+
+    /// `sendAdminRequestToTakeASnapshot` with the same connect-time retry:
+    /// the ingress publication may not be connected at DONE.
+    [[nodiscard]] bool send_admin_request_to_take_a_snapshot(
+        std::int64_t correlation_id, std::chrono::milliseconds timeout = std::chrono::seconds(5))
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (cluster_)
+            {
+                auto sent = cluster_->send_admin_request_to_take_a_snapshot(correlation_id);
+                if (sent.has_value() && *sent)
+                {
+                    return true;
+                }
+            }
+            if (!pump_once())
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    }
+
+    /// Write an `AdminRequest` straight onto the ingress publication, the way
+    /// `ClusterTest.shouldRejectAnInvalidAdminRequest` writes NULL_VAL (the
+    /// client API only sends SNAPSHOT).
+    [[nodiscard]] bool offer_admin_request(deepmsg::cluster::common::codecs::AdminRequestType::Value type,
+                                           std::int64_t correlation_id)
+    {
+        if (!cluster_)
+        {
+            return false;
+        }
+        namespace codecs = deepmsg::cluster::common::codecs;
+        const std::size_t length = deepmsg::cluster::common::MESSAGE_HEADER_LENGTH +
+                                   codecs::AdminRequest::sbeBlockLength() + codecs::AdminRequest::payloadHeaderLength();
+        aeron_buffer_claim_t claim{};
+        const std::int64_t position = cluster_->ingress_publication().try_claim(length, claim);
+        if (position <= 0)
+        {
+            return false;
+        }
+        codecs::AdminRequest encoder;
+        encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+        encoder.leadershipTermId(cluster_->leadership_term_id())
+            .clusterSessionId(cluster_->cluster_session_id())
+            .correlationId(correlation_id)
+            .requestType(type)
+            .putPayload("", 0);
+        return 0 == aeron_buffer_claim_commit(&claim);
+    }
+
+    void set_controlled_listener(deepmsg::cluster::client::ControlledEgressListener* listener)
+    {
+        if (cluster_)
+        {
+            cluster_->set_controlled_egress_listener(listener);
+        }
+    }
+
+    [[nodiscard]] bool controlled_pump_once()
+    {
+        if (!client_ || !cluster_)
+        {
+            return false;
+        }
+        (void)client_->do_work();
+        return cluster_->controlled_poll_egress().has_value();
+    }
+
+    [[nodiscard]] const std::vector<RecordingEgressListener::AdminResponse>& admin_responses() const noexcept
+    {
+        return listener_.admin_responses;
     }
 
     /// Offer `payload` once, then pump until `expected` egress messages exist.

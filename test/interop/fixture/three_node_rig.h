@@ -690,6 +690,44 @@ protected:
         return nullptr == address ? -1 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
     }
 
+    struct CounterInfo
+    {
+        std::int32_t id;
+        std::int32_t type_id;
+        std::int64_t value;
+        std::vector<std::uint8_t> key;
+        std::string label;
+    };
+
+    /// Every counter of `type_id` in one node's driver. The per-session
+    /// counters need this: there is one per connected client, so
+    /// `find_cluster_counter` (first match) is not enough.
+    [[nodiscard]] std::vector<CounterInfo> counters_of_type(int index, std::int32_t type_id)
+    {
+        std::vector<CounterInfo> counters;
+        auto* client = node_client(index);
+        if (nullptr == client)
+        {
+            return counters;
+        }
+        (void)client->do_work();
+        const auto collect = [](std::int64_t value, std::int32_t id, std::int32_t counter_type, const std::uint8_t* key,
+                                std::size_t key_length, const char* label, std::size_t label_length, void* clientd)
+        {
+            auto* context = static_cast<std::pair<std::int32_t, std::vector<CounterInfo>*>*>(clientd);
+            if (counter_type != context->first)
+            {
+                return;
+            }
+            context->second->push_back(CounterInfo{id, counter_type, value,
+                                                   std::vector<std::uint8_t>(key, key + key_length),
+                                                   std::string(label, label_length)});
+        };
+        std::pair<std::int32_t, std::vector<CounterInfo>*> context{type_id, &counters};
+        aeron_counters_reader_foreach_counter(client->counters_reader(), collect, &context);
+        return counters;
+    }
+
     void set_control_toggle(int index, std::int32_t value)
     {
         auto* client = node_client(index);
