@@ -189,6 +189,16 @@ std::int64_t IngressPublication::try_claim(std::size_t length, aeron_buffer_clai
     return AERON_PUBLICATION_NOT_CONNECTED;
 }
 
+std::string IngressPublication::channel() const
+{
+    if (nullptr == concurrent_)
+    {
+        return {};
+    }
+    const char* value = aeron_publication_channel(concurrent_.get());
+    return nullptr == value ? std::string{} : std::string{value};
+}
+
 ClusterClient::ClusterClient(axc::core::DeepmsgClient& client, ClientConfig config,
                              axc::core::SubPtr egress_subscription, IngressPublication ingress_publication,
                              aeron_image_t* egress_image, std::int64_t cluster_session_id,

@@ -180,6 +180,10 @@ public:
     /// `Publication.termBufferLength()` for the max-position message.
     [[nodiscard]] std::int32_t term_buffer_length() const noexcept;
 
+    /// `Publication.channel()`; the C API has no exclusive-publication channel
+    /// accessor, so an exclusive publication reports an empty channel.
+    [[nodiscard]] std::string channel() const;
+
     [[nodiscard]] aeron_publication_t* concurrent() const noexcept
     {
         return concurrent_.get();

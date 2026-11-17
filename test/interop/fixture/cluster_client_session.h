@@ -94,13 +94,15 @@ public:
     [[nodiscard]] bool connect_udp(const std::string& aeron_dir, const std::string& ingress_endpoints,
                                    const std::string& egress_channel,
                                    std::chrono::milliseconds timeout = std::chrono::seconds(30),
-                                   std::chrono::milliseconds new_leader_timeout = std::chrono::milliseconds::zero())
+                                   std::chrono::milliseconds new_leader_timeout = std::chrono::milliseconds::zero(),
+                                   bool ingress_exclusive = true)
     {
         ClientConfig config;
         config.ingress_channel = "aeron:udp?term-length=128k";
         config.ingress_endpoints = ingress_endpoints;
         config.egress_channel = egress_channel;
         config.client_name = "c6c-client";
+        config.is_ingress_exclusive = ingress_exclusive;
         if (new_leader_timeout > std::chrono::milliseconds::zero())
         {
             config.new_leader_timeout_ns =
@@ -139,6 +141,13 @@ public:
     [[nodiscard]] const std::vector<deepmsg::cluster::common::codecs::EventCode::Value>& events() const noexcept
     {
         return listener_.events;
+    }
+
+    /// `AeronCluster.ingressPublication().channel()`: after a redirect this
+    /// names the member the session actually publishes to.
+    [[nodiscard]] std::string ingress_channel() const
+    {
+        return cluster_ ? cluster_->ingress_publication().channel() : std::string{};
     }
 
     [[nodiscard]] const std::vector<std::string>& messages() const noexcept

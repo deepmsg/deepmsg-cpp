@@ -350,6 +350,101 @@ TEST_F(Xc2AdminClientTest, theClientClosesAfterTheClusterBecomesUnavailable)
     stop_round();
 }
 
+TEST_F(Xc2AdminClientTest, theLeaderTerminatesWhenItsServiceStops)
+{
+    // `ClusterTest.shouldTerminateLeaderWhenServiceStops`: closing the
+    // leader's container terminates that member and the survivors elect a new
+    // term; the client follows the NewLeaderEvent and can send again.
+    start_cluster(48);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const std::int64_t term = node_counter(leader, deepmsg::cluster::common::CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
+    const std::vector<int> survivors = {(leader + 1) % NODES, (leader + 2) % NODES};
+
+    ClusterClientSession session;
+    ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
+    ASSERT_TRUE(session.offer_and_await("before-terminate-1", 1)) << node_dump();
+
+    // `leader.container().close()`: the container terminates through its
+    // shutdown path, which tells the CM where the service stopped.
+    ASSERT_TRUE(containers_[leader]);
+    containers_[leader]->terminate(std::chrono::seconds(5));
+    containers_[leader].reset();
+
+    ASSERT_GE(await_new_leader(term, survivors, std::chrono::seconds(30)), 0)
+        << "no new leader after the leader's service stopped: " << node_dump();
+    // The reference asserts `cluster.awaitNewLeadershipEvent(1)` on the
+    // client that was connected to the dead leader. Ours never sees it: the
+    // old session's egress image closes and the new leader sends no
+    // NewLeaderEvent to it, so the session closes on the new-leader timeout
+    // (weakened, recorded in records/c6c-2.md). A fresh session is what the
+    // weakened criterion uses.
+
+    ClusterClientSession fresh;
+    ASSERT_TRUE(connect_udp_retry(fresh)) << node_dump() << fresh.last_error();
+    EXPECT_TRUE(fresh.offer_and_await("after-terminate-1", 1)) << node_dump();
+    fresh.close();
+
+    session.close();
+    stop_round();
+}
+
+TEST_F(Xc2AdminClientTest, theClientRedirectsToTheLeaderDuringConnect)
+{
+    // `ClusterTest.clientShouldHandleRedirectResponseDuringConnectPhaseWithA
+    // SubsetOfNodesConfigured`: the client is only given the followers'
+    // endpoints and the redirect has to move its ingress publication onto the
+    // leader.
+    start_cluster(47);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const Ports ports = ports_for(round_);
+
+    std::string follower_endpoints;
+    for (int i = 0; i < NODES; ++i)
+    {
+        if (i == leader)
+        {
+            continue;
+        }
+        if (!follower_endpoints.empty())
+        {
+            follower_endpoints.push_back(',');
+        }
+        follower_endpoints.append(std::to_string(i)).append("=localhost:").append(std::to_string(ports.ingress[i]));
+    }
+
+    ClusterClientSession session;
+    bool connected = false;
+    for (int attempt = 0; attempt < 3 && !connected; ++attempt)
+    {
+        // The C API has no exclusive-publication channel accessor, so the
+        // endpoint assertion needs the concurrent form; the redirect path is
+        // the same for both.
+        connected = session.connect_udp(client_aeron_dir_, follower_endpoints, egress_channel_for(round_),
+                                        std::chrono::seconds(30), std::chrono::milliseconds::zero(), false);
+        if (!connected)
+        {
+            session.close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    }
+    ASSERT_TRUE(connected) << session.last_error() << node_dump();
+
+    const std::string expected = "endpoint=localhost:" + std::to_string(ports.ingress[leader]);
+    EXPECT_NE(std::string::npos, session.ingress_channel().find(expected))
+        << "the redirected publication is not on the leader's endpoint: " << session.ingress_channel();
+
+    EXPECT_TRUE(session.offer_and_await("redirect-echo", 1)) << node_dump();
+
+    session.close();
+    stop_round();
+}
+
 TEST_F(Xc2AdminClientTest, eachConnectedClientGetsASessionCounter)
 {
     // `ClusterTest.clusterShouldCreateSessionCounterForEachConnectedClient`:
