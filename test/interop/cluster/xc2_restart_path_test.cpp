@@ -455,12 +455,15 @@ TEST_F(Xc2RestartPathTest, shouldRecoverWhenFollowerIsMultipleTermsBehindFromEmp
 
 TEST_F(Xc2RestartPathTest, shouldStopLeaderAndRestartAsFollowerWithSendingAfter)
 {
-    // QUARANTINED (2026-11-17): flaky on a restarted leader that stays LEADER
-    // at its old term while the cluster has a leader at the next one (local
-    // 1 in 3, CI 1 in 2). The liveness race is tracked in
-    // `analysis/cpp/notes-2026-11-17-the-replication-that-stopped-without-telling.md`;
-    // it is not the replication-STOP race this branch fixes.
-    GTEST_SKIP() << "quarantined: a restarted leader does not step down from its old term";
+    // QUARANTINED (2026-11-17): two failure modes, neither the replication-STOP
+    // race this branch fixes. (1) The restarted leader stays LEADER at its old
+    // term while the cluster has a leader at the next one -- local 1 in 30
+    // after the test-port fix, 1 in 3 before it. (2) While the cluster is
+    // healthy (one leader, one term, elections closed) the test client's
+    // connect times out in `POLL_RESPONSE`, and the rig's node clients report
+    // `unable to keep up with broadcast` first. Evidence and the trace recipe:
+    // `analysis/cpp/notes-2026-11-17-the-replication-that-stopped-without-telling.md`.
+    GTEST_SKIP() << "quarantined: dual leader, and a client connect timeout with a healthy cluster";
     start_cluster(21);
     ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
@@ -563,13 +566,12 @@ TEST_F(Xc2RestartPathTest, shouldAcceptMessagesAfterTwoNodeCleanRestart)
 
 TEST_F(Xc2RestartPathTest, shouldTolerateMultipleLeaderFailures)
 {
-    // QUARANTINED (2026-11-17): the last CI failure of this case was before its
-    // own scenario -- one member hung in start-up (`state=INIT`, no `STARTED
-    // cluster node` line) while the other two formed a cluster. The
-    // replication-STOP race that parked it in FOLLOWER_LOG_REPLICATION is fixed
-    // in the same change; this skip covers the remaining, separate, start-up
-    // hang. Tracked in `analysis/cpp/notes-2026-11-17-the-replication-that-stopped-without-telling.md`.
-    GTEST_SKIP() << "quarantined: a member can hang in start-up before the cluster forms";
+    // Back on (2026-11-17) after two fixes: the replication-STOP race that
+    // parked a member in FOLLOWER_LOG_REPLICATION, and the test ports that sat
+    // inside the kernel's ephemeral range, which made a member die at start-up
+    // (`(98) Address already in use`). 30 consecutive runs green after both;
+    // the evidence is in
+    // `analysis/cpp/notes-2026-11-17-the-replication-that-stopped-without-telling.md`.
     start_cluster(24);
     ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
 
