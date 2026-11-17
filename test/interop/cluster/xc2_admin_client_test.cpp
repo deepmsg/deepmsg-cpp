@@ -502,7 +502,7 @@ TEST_F(Xc2AdminClientTest, eachConnectedClientGetsASessionCounter)
     const auto has_session = [&sessions](std::int64_t session_id)
     {
         return std::any_of(sessions.begin(), sessions.end(),
-                           [&sessions, session_id](const CounterInfo& counter)
+                           [session_id](const CounterInfo& counter)
                            {
                                std::int32_t cluster_id = 0;
                                std::int64_t key_session_id = 0;

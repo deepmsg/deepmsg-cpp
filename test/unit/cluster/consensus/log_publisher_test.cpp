@@ -162,6 +162,19 @@ protected:
         auto subscription = await_handle(*client_, add_subscription);
         ASSERT_TRUE(subscription.has_value());
         subscription_ = std::move(*subscription);
+
+        // The exclusive publication connects asynchronously: an append that
+        // beats the IPC link comes back BACK_PRESSURED. The agent retries; a
+        // test that appends once must wait for the link itself (release builds
+        // lose the race that debug wins).
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!aeron_exclusive_publication_is_connected(publisher_.publication()) &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            (void)client_->do_work();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ASSERT_TRUE(aeron_exclusive_publication_is_connected(publisher_.publication()));
     }
 
     void TearDown() override
