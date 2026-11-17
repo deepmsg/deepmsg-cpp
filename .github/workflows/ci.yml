@@ -13,11 +13,14 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-24.04
-    # The normal gate (debug + release + debug-clang) is ~14 minutes. A hung
-    # interop case (a reference archive that never accepts a client waits 60 s
-    # per case) used to keep a run alive for hours; 30 minutes leaves room for
-    # a slow runner and fails a hang instead of letting it sit.
-    timeout-minutes: 30
+    # The gate (debug + release + debug-clang) was ~14 minutes before the
+    # cluster scenario table landed; the same three presets now run that
+    # suite too and measured 26.3 minutes (2026-11-17, #61), after which the
+    # first run with the table (#62) reached this limit while still in the
+    # final clang-tidy step. 60 minutes keeps the property the limit is for —
+    # a hung interop case (a reference archive that never accepts a client
+    # waits 60 s per case) still fails the job instead of sitting for hours.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,7 +83,9 @@ jobs:
   # only one that turns `AXC_WITH_DPDK` on.
   dpdk:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 1017 cases, 17.5 minutes with the cluster scenario table (2026-11-17);
+    # 45 leaves the same headroom the gate has.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
