@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -125,45 +126,77 @@ class ThreeNodeRig : public ::testing::Test
 protected:
     void SetUp() override
     {
+        if (!set_up_environment())
+        {
+            return;
+        }
+        compile_probes();
+    }
+
+    /// Checks the binaries and creates the round root. C6c's election-trigger
+    /// cases only read counters, so they can skip the Java probe compile.
+    [[nodiscard]] bool set_up_environment()
+    {
+        // `GTEST_SKIP()` expands to a `return`; wrap it so this helper can
+        // report "skipped" and still return a bool.
+        const auto skip = [](const std::string& message) { GTEST_SKIP() << message; };
+
         const std::string jar = aeron_jar();
         if (jar.empty() || !std::filesystem::exists(jar))
         {
-            GTEST_SKIP() << "reference jar not found (set AXC_AERON_JAR): " << jar;
+            skip("reference jar not found (set AXC_AERON_JAR): " + jar);
+            return false;
         }
         jar_ = jar;
+        if (!std::filesystem::exists(AXC_CLUSTER_NODE_BIN) || !std::filesystem::exists(AXC_CONTAINER_BINARY) ||
+            !std::filesystem::exists(AXC_AERONMD_DEFAULT))
+        {
+            skip("cluster binaries or aeronmd not found");
+            return false;
+        }
+
+        std::string pattern = "/tmp/axc-c6a-three-XXXXXX";
+        const char* created = ::mkdtemp(pattern.data());
+        EXPECT_NE(nullptr, created);
+        if (nullptr == created)
+        {
+            return false;
+        }
+        root_dir_ = created;
+        classes_dir_ = root_dir_ + "/classes";
+        std::filesystem::create_directories(classes_dir_);
+        return true;
+    }
+
+    void compile_probes()
+    {
         if (!std::filesystem::exists("/usr/bin/javac") && !std::filesystem::exists("/usr/local/bin/javac"))
         {
             GTEST_SKIP() << "javac not found: the probes cannot be compiled";
+            return;
         }
         const std::string root = tests_root();
         if (root.empty())
         {
             GTEST_SKIP() << "AXC_AERON_TESTS is not set; the fork's probe sources are required";
+            return;
         }
         const std::string probe = find_probe(root, "ClusterEchoClientProbe.java");
         if (probe.empty())
         {
             GTEST_SKIP() << "ClusterEchoClientProbe.java not found under " << root;
+            return;
         }
-        if (!std::filesystem::exists(AXC_CLUSTER_NODE_BIN) || !std::filesystem::exists(AXC_CONTAINER_BINARY) ||
-            !std::filesystem::exists(AXC_AERONMD_DEFAULT))
-        {
-            GTEST_SKIP() << "cluster binaries or aeronmd not found";
-        }
-
-        std::string pattern = "/tmp/axc-c6a-three-XXXXXX";
-        const char* created = ::mkdtemp(pattern.data());
-        ASSERT_NE(nullptr, created);
-        root_dir_ = created;
-        classes_dir_ = root_dir_ + "/classes";
-        std::filesystem::create_directories(classes_dir_);
 
         axc::interop::ProcessOptions compile;
         compile.arguments = {"-proc:none", "-cp", jar_, "-d", classes_dir_, probe};
         compile.timeout = std::chrono::seconds(120);
         auto compiled = axc::interop::run_process("javac", compile);
-        ASSERT_TRUE(compiled) << compiled.error().message.view();
-        ASSERT_EQ(0, compiled->exit_code) << compiled->output;
+        EXPECT_TRUE(compiled) << compiled.error().message.view();
+        if (compiled)
+        {
+            EXPECT_EQ(0, compiled->exit_code) << compiled->output;
+        }
     }
 
     void TearDown() override
@@ -277,6 +310,13 @@ protected:
                 << "aeron.cluster.log.control.enable=true\n"
                 << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << ports.archive_control[i] << "\n"
                 << "aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0\n";
+
+            // C6c: per-node overrides (e.g. `aeron.image.liveness.timeout` for
+            // the silent-leader test). Later names win in the property source.
+            for (const auto& [name, value] : node_property_overrides_[i])
+            {
+                out << name << "=" << value << "\n";
+            }
         }
     }
 
@@ -295,6 +335,11 @@ protected:
                 << "aeron.cluster.service.id=0\n"
                 << "aeron.cluster.service.name=clustered-service-" << CLUSTER_ID << "-0\n"
                 << "deepmsg.cluster.service=echo\n";
+            if (!service_library_.empty())
+            {
+                out << "deepmsg.cluster.service.library=" << service_library_ << "\n"
+                    << "deepmsg.cluster.service=" << service_name_ << "\n";
+            }
         }
     }
 
@@ -334,6 +379,40 @@ protected:
     void start_container(int round, int index)
     {
         const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
+        if (!role_dir_.empty())
+        {
+            const std::string file = role_dir_ + "/role-" + std::to_string(index) + ".txt";
+            (void)::setenv("AXC_TEST_ROLE_FILE", file.c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_ROLE_FILE");
+        }
+        if (!tracking_dir_.empty())
+        {
+            const std::string file = tracking_dir_ + "/tracking-" + std::to_string(index) + ".txt";
+            (void)::setenv("AXC_TEST_TRACKING_FILE", file.c_str(), 1);
+            (void)::setenv("AXC_TEST_TRACKING_SERVICE_ID", "1", 1);
+            // The pause command names the member by index, and the padding
+            // case needs a log with client messages only.
+            (void)::setenv("AXC_TEST_TRACKING_NODE_INDEX", std::to_string(index).c_str(), 1);
+            (void)::setenv("AXC_TEST_TRACKING_MODE", tracking_mode_.c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_TRACKING_FILE");
+            (void)::unsetenv("AXC_TEST_TRACKING_SERVICE_ID");
+            (void)::unsetenv("AXC_TEST_TRACKING_NODE_INDEX");
+            (void)::unsetenv("AXC_TEST_TRACKING_MODE");
+        }
+        if (slow_service_micros_[index] > 0)
+        {
+            (void)::setenv("AXC_TEST_SLOW_SERVICE_MICROS", std::to_string(slow_service_micros_[index]).c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_SLOW_SERVICE_MICROS");
+        }
         auto container =
             spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
         ASSERT_TRUE(container) << container.error().message.view();
@@ -461,6 +540,80 @@ protected:
         }
     }
 
+    /// Restart several nodes as one group: retire them all, remove the
+    /// cluster/archive directories of the ones that ask for a clean start,
+    /// spawn every node process, then every container, and wait once for the
+    /// new drivers to replace their CnC files. Restarting a quorum's members
+    /// one after the other costs 300 ms + 2 s per member, and the first one
+    /// spends its startup canvass without its peer.
+    void restart_nodes_together(int round, const std::vector<std::pair<int, bool>>& restarts)
+    {
+        for (const auto& [index, clean_start] : restarts)
+        {
+            stop_node_gracefully(index);
+            if (clean_start)
+            {
+                std::error_code error;
+                const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
+                std::filesystem::remove_all(node_dir + "/cluster", error);
+                std::filesystem::remove_all(node_dir + "/archive", error);
+            }
+        }
+        for (const auto& [index, clean_start] : restarts)
+        {
+            (void)clean_start;
+            start_node(round, index);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        for (const auto& [index, clean_start] : restarts)
+        {
+            (void)clean_start;
+            start_container(round, index);
+        }
+        // C6b's stale-CnC rule: do not read counters until the new drivers
+        // have replaced the old CnC files.
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
+    /// Restart one node with the reference's `startStaticNode(index, cleanStart)`:
+    /// `cleanStart` removes the cluster/archive directories, a plain restart
+    /// keeps the recordings.
+    void restart_node(int round, int index, bool clean_start)
+    {
+        restart_nodes_together(round, {{index, clean_start}});
+    }
+
+    [[nodiscard]] bool wait_for_node_active(int index, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            if (1 == node_counter(index, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) &&
+                node_counter(index, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID) >= 0)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool await_commit(int index, std::int64_t position, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            drive_node_clients();
+            if (node_counter(index, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID) >= position)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
     /// SIGKILL a process without the graceful path: the follower must look
     /// crashed, not stopped.
     void kill_hard(std::unique_ptr<ChildProcess>& process)
@@ -476,6 +629,25 @@ protected:
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         process.reset();
+    }
+
+    /// SIGSTOP/SIGCONT a node: the process and its driver stay alive, but the
+    /// consensus module stops sending or answering. C6c's election triggers
+    /// need exactly this shape (a silent leader/follower, not a dead one).
+    void pause_node(int index)
+    {
+        if (nodes_[index])
+        {
+            (void)::kill(nodes_[index]->pid(), SIGSTOP);
+        }
+    }
+
+    void resume_node(int index)
+    {
+        if (nodes_[index])
+        {
+            (void)::kill(nodes_[index]->pid(), SIGCONT);
+        }
     }
 
     [[nodiscard]] DeepmsgClient* node_client(int index)
@@ -541,6 +713,44 @@ protected:
         }
         std::int64_t* address = aeron_counters_reader_addr(reader, id);
         return nullptr == address ? -1 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
+    }
+
+    struct CounterInfo
+    {
+        std::int32_t id;
+        std::int32_t type_id;
+        std::int64_t value;
+        std::vector<std::uint8_t> key;
+        std::string label;
+    };
+
+    /// Every counter of `type_id` in one node's driver. The per-session
+    /// counters need this: there is one per connected client, so
+    /// `find_cluster_counter` (first match) is not enough.
+    [[nodiscard]] std::vector<CounterInfo> counters_of_type(int index, std::int32_t type_id)
+    {
+        std::vector<CounterInfo> counters;
+        auto* client = node_client(index);
+        if (nullptr == client)
+        {
+            return counters;
+        }
+        (void)client->do_work();
+        const auto collect = [](std::int64_t value, std::int32_t id, std::int32_t counter_type, const std::uint8_t* key,
+                                std::size_t key_length, const char* label, std::size_t label_length, void* clientd)
+        {
+            auto* context = static_cast<std::pair<std::int32_t, std::vector<CounterInfo>*>*>(clientd);
+            if (counter_type != context->first)
+            {
+                return;
+            }
+            context->second->push_back(CounterInfo{id, counter_type, value,
+                                                   std::vector<std::uint8_t>(key, key + key_length),
+                                                   std::string(label, label_length)});
+        };
+        std::pair<std::int32_t, std::vector<CounterInfo>*> context{type_id, &counters};
+        aeron_counters_reader_foreach_counter(client->counters_reader(), collect, &context);
+        return counters;
     }
 
     void set_control_toggle(int index, std::int32_t value)
@@ -744,6 +954,38 @@ protected:
         return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     }
 
+    /// Lines appended by the tracking test service: `M <id>` for a client
+    /// message, `S <id>` for a service message, `T <correlationId>` for a
+    /// timer event.
+    [[nodiscard]] std::vector<std::string> tracking_lines(int index) const
+    {
+        std::ifstream in{tracking_dir_ + "/tracking-" + std::to_string(index) + ".txt"};
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (!line.empty())
+            {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
+
+    /// `on_role_change` records written by the role-change test service, one
+    /// role code per line.
+    [[nodiscard]] std::vector<std::int32_t> role_records(int index) const
+    {
+        std::ifstream in{role_dir_ + "/role-" + std::to_string(index) + ".txt"};
+        std::vector<std::int32_t> roles;
+        std::int32_t role = 0;
+        while (in >> role)
+        {
+            roles.push_back(role);
+        }
+        return roles;
+    }
+
     void start_cluster(int round)
     {
         round_ = round;
@@ -758,6 +1000,16 @@ protected:
     {
         write_node_properties(round);
         write_container_properties(round);
+        if (!role_dir_.empty())
+        {
+            std::error_code error;
+            std::filesystem::create_directories(role_dir_, error);
+        }
+        if (!tracking_dir_.empty())
+        {
+            std::error_code error;
+            std::filesystem::create_directories(tracking_dir_, error);
+        }
         start_client_driver(round);
 
         // Start each node with its container, staggered: the consensus and log
@@ -827,6 +1079,13 @@ protected:
     std::string root_dir_{};
     std::string classes_dir_{};
     std::string client_aeron_dir_{};
+    std::string service_library_{};
+    std::string service_name_{"role-change"};
+    std::string role_dir_{};
+    std::string tracking_dir_{};
+    std::string tracking_mode_{"full"};
+    std::int32_t slow_service_micros_[NODES]{};
+    std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[NODES]{};
     std::unique_ptr<ChildProcess> containers_[NODES]{};

@@ -211,25 +211,31 @@ bool LogPublisher::append_new_leadership_term_event(std::int64_t leadership_term
     const std::size_t length =
         codecs::MessageHeader::encodedLength() + codecs::NewLeadershipTermEvent::sbeBlockLength();
 
+    const long aligned_frame_length = (32 + static_cast<long>(length) + 31) & ~31L;
     for (int attempts = SEND_ATTEMPTS; attempts > 0; attempts--)
     {
+        // `LogPublisher.appendNewLeadershipTermEvent:294`: the event's end is the
+        // publication position *before* the claim plus the aligned frame. The
+        // value `try_claim` returns is already the end; adding the frame to it
+        // again put every event's `logPosition` one frame ahead of the log.
+        const long log_position =
+            static_cast<long>(aeron_exclusive_publication_position(publication_.get())) + aligned_frame_length;
         aeron_buffer_claim_t claim{};
         const long position =
             static_cast<long>(aeron_exclusive_publication_try_claim(publication_.get(), length, &claim));
         if (position > 0)
         {
-            const long aligned_frame_length = (32 + static_cast<long>(length) + 31) & ~31L;
             codecs::NewLeadershipTermEvent encoder;
             encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
             encoder.leadershipTermId(leadership_term_id)
-                .logPosition(position + aligned_frame_length)
+                .logPosition(log_position)
                 .timestamp(timestamp)
                 .termBaseLogPosition(term_base_log_position)
                 .leaderMemberId(leader_member_id)
                 .logSessionId(log_session_id)
                 .timeUnit(static_cast<codecs::ClusterTimeUnit::Value>(time_unit_code))
                 .appVersion(app_version);
-            last_append_position_ = position + aligned_frame_length;
+            last_append_position_ = log_position;
             aeron_buffer_claim_commit(&claim);
             return true;
         }

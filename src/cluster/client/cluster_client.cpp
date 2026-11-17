@@ -8,6 +8,8 @@
 #include "cluster/client/channel_util.h"
 #include "core/error/error.h"
 #include "core/time/clock.h"
+#include "io_aeron_cluster_codecs/AdminRequest.h"
+#include "io_aeron_cluster_codecs/AdminRequestType.h"
 #include "io_aeron_cluster_codecs/AdminResponse.h"
 #include "io_aeron_cluster_codecs/NewLeaderEvent.h"
 #include "io_aeron_cluster_codecs/SessionCloseRequest.h"
@@ -185,6 +187,16 @@ std::int64_t IngressPublication::try_claim(std::size_t length, aeron_buffer_clai
         return aeron_publication_try_claim(concurrent_.get(), length, &claim);
     }
     return AERON_PUBLICATION_NOT_CONNECTED;
+}
+
+std::string IngressPublication::channel() const
+{
+    if (nullptr == concurrent_)
+    {
+        return {};
+    }
+    const char* value = aeron_publication_channel(concurrent_.get());
+    return nullptr == value ? std::string{} : std::string{value};
 }
 
 ClusterClient::ClusterClient(axc::core::DeepmsgClient& client, ClientConfig config,
@@ -429,6 +441,47 @@ std::expected<bool, Error> ClusterClient::send_keep_alive()
     return false;
 }
 
+std::expected<bool, Error> ClusterClient::send_admin_request_to_take_a_snapshot(std::int64_t correlation_id)
+{
+    // `AeronCluster.java:536-585`.
+    const std::size_t length = common::MESSAGE_HEADER_LENGTH + codecs::AdminRequest::sbeBlockLength() +
+                               codecs::AdminRequest::payloadHeaderLength();
+
+    for (int attempt = 0; attempt < SEND_ATTEMPTS; ++attempt)
+    {
+        aeron_buffer_claim_t claim{};
+        const std::int64_t position = ingress_publication_.try_claim(length, claim);
+        track_ingress_publication_result(position);
+
+        if (position > 0)
+        {
+            codecs::AdminRequest encoder;
+            encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+            encoder.leadershipTermId(leadership_term_id_)
+                .clusterSessionId(cluster_session_id_)
+                .correlationId(correlation_id)
+                .requestType(codecs::AdminRequestType::SNAPSHOT)
+                .putPayload("", 0);
+            (void)aeron_buffer_claim_commit(&claim);
+            return true;
+        }
+
+        if (AERON_PUBLICATION_CLOSED == position)
+        {
+            return std::unexpected(make_error(ErrorCode::protocol_error, "ingress publication is closed"));
+        }
+
+        if (AERON_PUBLICATION_MAX_POSITION_EXCEEDED == position)
+        {
+            return std::unexpected(make_error(
+                ErrorCode::no_capacity,
+                "max position exceeded: term-length=" + std::to_string(ingress_publication_.term_buffer_length())));
+        }
+    }
+
+    return false;
+}
+
 void ClusterClient::close_session()
 {
     const std::size_t length = common::MESSAGE_HEADER_LENGTH + codecs::SessionCloseRequest::sbeBlockLength();
@@ -457,8 +510,16 @@ std::expected<int, Error> ClusterClient::poll_egress(std::size_t fragment_limit)
         return 0;
     }
 
-    const int fragments =
-        aeron_subscription_poll(egress_subscription_.get(), &ClusterClient::on_fragment_dispatch, this, fragment_limit);
+    if (nullptr == assembler_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "the egress fragment assembler was not created"));
+    }
+
+    // `AeronCluster.pollEgress()` polls through `egressFragmentAssembler`: a
+    // response that crosses the MTU arrives as several fragments and must be
+    // reassembled before its `MessageHeader` is read.
+    const int fragments = aeron_subscription_poll(egress_subscription_.get(), aeron_fragment_assembler_handler,
+                                                  assembler_, fragment_limit);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
@@ -493,8 +554,16 @@ std::expected<int, Error> ClusterClient::controlled_poll_egress(std::size_t frag
         return 0;
     }
 
-    const int fragments = aeron_subscription_controlled_poll(egress_subscription_.get(), &ClusterClient::on_fragment,
-                                                             this, fragment_limit);
+    if (nullptr == controlled_assembler_)
+    {
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, "the controlled egress fragment assembler was not created"));
+    }
+
+    // `AeronCluster.pollEgress(fragmentLimit)` in the controlled variant polls
+    // through the controlled assembler, for the same reason as `poll_egress`.
+    const int fragments = aeron_subscription_controlled_poll(
+        egress_subscription_.get(), aeron_controlled_fragment_assembler_handler, controlled_assembler_, fragment_limit);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
@@ -966,7 +1035,14 @@ EgressAdapter::~EgressAdapter()
 
 std::expected<int, Error> EgressAdapter::poll(aeron_subscription_t* subscription)
 {
-    const int fragments = aeron_subscription_poll(subscription, &EgressAdapter::on_fragment, this, fragment_limit_);
+    if (nullptr == assembler_)
+    {
+        return std::unexpected(make_error(ErrorCode::internal_error, "the egress fragment assembler was not created"));
+    }
+    // `EgressAdapter.poll` (`EgressAdapter.java:66`) polls through the
+    // fragment assembler, not the raw fragment handler.
+    const int fragments =
+        aeron_subscription_poll(subscription, aeron_fragment_assembler_handler, assembler_, fragment_limit_);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));
@@ -1109,8 +1185,13 @@ ControlledEgressAdapter::~ControlledEgressAdapter()
 
 std::expected<int, Error> ControlledEgressAdapter::poll(aeron_subscription_t* subscription)
 {
-    const int fragments =
-        aeron_subscription_controlled_poll(subscription, &ControlledEgressAdapter::on_fragment, this, fragment_limit_);
+    if (nullptr == assembler_)
+    {
+        return std::unexpected(
+            make_error(ErrorCode::internal_error, "the controlled egress fragment assembler was not created"));
+    }
+    const int fragments = aeron_subscription_controlled_poll(subscription, aeron_controlled_fragment_assembler_handler,
+                                                             assembler_, fragment_limit_);
     if (fragments < 0)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "egress poll failed", aeron_errcode()));

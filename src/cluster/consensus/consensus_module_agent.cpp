@@ -906,6 +906,14 @@ int ConsensusModuleAgent::do_work() noexcept
             {
                 report(handled.error());
             }
+            // `handleError` parks the election in INIT. Nothing drives an INIT
+            // election again, and `slow_tick_work` only starts one when
+            // `election_` is null: without this reset a member that failed a
+            // catchup/join stays in INIT forever and never re-elects.
+            if (election::ElectionState::init == election_->state())
+            {
+                election_.reset();
+            }
         }
         else
         {
@@ -961,6 +969,30 @@ int ConsensusModuleAgent::slow_tick_work(std::int64_t now_ns) noexcept
         work_count += session_manager_->process_all_pending_sessions(now_ns, leader_member_.id, leadership_term_id_);
         work_count +=
             session_manager_->check_sessions(now_ns, leadership_term_id_, leader_member_.id, ingress_endpoints_);
+    }
+
+    // `ConsensusModuleAgent.slowTickWork:2438-2441`: a leader that can no
+    // longer see a follower quorum steps down. A single-member cluster is
+    // exempt: it is its own quorum (`activeMembers.length > 1`).
+    if (nullptr == election_ && ClusterRole::leader == role_ && state_ == ConsensusModuleState::active &&
+        active_members_.size() > 1 &&
+        !common::has_active_quorum(active_members_, now_ns, config_.leader_heartbeat_timeout_ns))
+    {
+        enter_election(false, "inactive follower quorum");
+        ++work_count;
+    }
+
+    // `ConsensusModuleAgent.slowTickWork:2463-2467`: a follower that has not
+    // seen the leader's log update for a heartbeat timeout starts an election.
+    // `enter_election` above sets `election_`, so the two triggers cannot fire
+    // in the same tick.
+    if (nullptr == election_ && ClusterRole::follower == role_ &&
+        (ConsensusModuleState::active == state_ || ConsensusModuleState::suspended == state_) &&
+        now_ns >= (time_of_last_log_update_ns_ + config_.leader_heartbeat_timeout_ns) &&
+        NULL_POSITION == termination_position_)
+    {
+        enter_election(false, "leader heartbeat timeout");
+        ++work_count;
     }
 
     // `ConsensusModuleAgent.slowTickWork:2473-2476`: the node toggle is read
@@ -2039,7 +2071,11 @@ std::int64_t ConsensusModuleAgent::recording_position()
 
 std::int64_t ConsensusModuleAgent::get_last_appended_position()
 {
-    return recording_position();
+    // `getLastAppendedPosition:3390-3403` asks the archive for the recording's
+    // stop position. The C client has no such request; `tryStopLogRecording`
+    // pins the same value in `log_recording_stop_position_` before it drops the
+    // append-position counter, so read that once the counter is gone.
+    return AERON_NULL_COUNTER_ID != append_position_counter_id_ ? recording_position() : log_recording_stop_position_;
 }
 
 void ConsensusModuleAgent::update_member_details(const common::ClusterMember& leader)
@@ -2855,6 +2891,38 @@ std::expected<std::int64_t, Error> ConsensusModuleAgent::prepare_for_new_leaders
 {
     (void)now_ns;
     role(ClusterRole::follower);
+    // `ConsensusModuleAgent.prepareForNewLeadership:1364-1381`: the leader's
+    // live/catchup destinations and its log adapter subscription must go before
+    // the election starts. The log publisher is the one that matters for a
+    // stepped-down leader: its publication still owns this member's log
+    // endpoint, so the follower's live-log subscription cannot add a
+    // destination to the same endpoint (`-11` generic error).
+    if (!catchup_log_destination_.empty() && nullptr != log_adapter_)
+    {
+        (void)log_adapter_->async_remove_destination(catchup_log_destination_);
+        catchup_log_destination_.clear();
+    }
+    if (!live_log_destination_.empty() && nullptr != log_adapter_)
+    {
+        (void)log_adapter_->async_remove_destination(live_log_destination_);
+        live_log_destination_.clear();
+    }
+    if (nullptr != log_adapter_)
+    {
+        (void)log_adapter_->disconnect();
+    }
+    if (NULL_VALUE != log_subscription_registration_id_)
+    {
+        auto removed = remove_log_subscription(log_subscription_registration_id_);
+        if (!removed)
+        {
+            return std::unexpected(removed.error());
+        }
+    }
+    if (nullptr != log_publisher_)
+    {
+        log_publisher_->disconnect();
+    }
     // `ConsensusModuleAgent.prepareForNewLeadership:1382`: no toggle action is
     // accepted until the election completes.
     cluster_control_deactivate(control_toggle_counter_);
@@ -2862,6 +2930,18 @@ std::expected<std::int64_t, Error> ConsensusModuleAgent::prepare_for_new_leaders
     if (NULL_VALUE != log_recording_id_)
     {
         last_append_position_ = get_last_appended_position();
+        // `prepareForNewLeadership:1388-1390`: rebuild the recovery plan while
+        // the stopped recording id is still known. `addLogPublication` reads it
+        // in the next term's LEADER_LOG_REPLICATION, before `electionComplete`
+        // rebuilds it, and without it the new publication starts at position 0
+        // while the archive's recording expects the previous join position.
+        auto plan = recording_log_.create_recovery_plan(
+            [this](std::int64_t recording_id) -> std::optional<common::RecordingLog::RecordingExtent>
+            { return recording_extent(recording_id); }, config_.service_count, log_recording_id_);
+        if (plan)
+        {
+            recovery_plan_ = std::move(*plan);
+        }
         session_manager_->clear_sessions_after(log_position, leadership_term_id_);
         session_manager_->disconnect_sessions();
         counter_set(commit_position_counter_, log_position);
@@ -3885,8 +3965,26 @@ void ConsensusModuleAgent::try_stop_log_recording()
         }
 
         log_recording_stop_position_ = recording_position();
-        log_recording_id_ = NULL_VALUE;
+        // `tryStopLogRecording` (`Agent:3364-3388`) keeps `logRecordingId`: it
+        // is the identity `getLastAppendedPosition` and the recovery plan use
+        // after the recording stops. Clearing it here made the recovery block
+        // in `prepareForNewLeadership` unreachable.
         append_position_counter_id_ = AERON_NULL_COUNTER_ID;
+
+        // `prepareForNewLeadership:1403-1420`: wait for the RecordingPos
+        // counter to disappear. Starting the next term's recording while the
+        // old counter is still allocated makes the archive extend the old
+        // recording and never publishes a counter for the new log session, so
+        // `tryCreateAppendPosition` spins forever.
+        const std::int64_t stopped_recording_id = log_recording_id_;
+        const std::int64_t counter_deadline = axc::core::NanoClock::now() + 10'000'000'000;
+        while (nullptr != client_.counters_reader() &&
+               AERON_NULL_COUNTER_ID != aeron_archive_recording_pos_find_counter_id_by_recording_id(
+                                            client_.counters_reader(), stopped_recording_id, archive_id_) &&
+               axc::core::NanoClock::now() < counter_deadline)
+        {
+            (void)client_.do_work();
+        }
     }
 }
 
@@ -4208,6 +4306,12 @@ void ConsensusModuleAgent::on_new_leadership_term(
     std::int32_t leader_member_id, std::int32_t log_session_id, std::int32_t app_version, bool is_startup)
 {
     (void)app_version;
+    const std::int64_t now = now_ns();
+    if (leadership_term_id >= leadership_term_id_)
+    {
+        time_of_last_leader_update_ns_ = now;
+    }
+
     if (nullptr != election_)
     {
         auto handled = election_->on_new_leadership_term(
@@ -4218,6 +4322,22 @@ void ConsensusModuleAgent::on_new_leadership_term(
         {
             report(handled.error());
         }
+    }
+    else if (ClusterRole::follower == role_ && leadership_term_id == leadership_term_id_ &&
+             leader_member_id == leader_member_.id)
+    {
+        // `ConsensusModuleAgent.onNewLeadershipTerm:1063-1070`: a steady-state
+        // follower accepts the current leader's term event as a heartbeat.
+        notified_commit_position_ = std::max(notified_commit_position_, commit_position);
+        time_of_last_log_update_ns_ = now;
+    }
+    else if (leadership_term_id > leadership_term_id_)
+    {
+        // `ConsensusModuleAgent.onNewLeadershipTerm:1071-1075`: the event names
+        // a newer term, so a new election is already in progress elsewhere.
+        enter_election(false, "unexpected new leadership term event: this.leadershipTermId=" +
+                                  std::to_string(leadership_term_id_) +
+                                  " newLeadershipTermId=" + std::to_string(leadership_term_id));
     }
 }
 
@@ -4253,7 +4373,7 @@ void ConsensusModuleAgent::on_append_position(std::int64_t leadership_term_id, s
 void ConsensusModuleAgent::on_commit_position(std::int64_t leadership_term_id, std::int64_t log_position,
                                               std::int32_t leader_member_id)
 {
-    // `ConsensusModuleAgent.onCommitPosition:1108-1132`.
+    // `ConsensusModuleAgent.onCommitPosition:1108-1140`.
     const std::int64_t now = now_ns();
     if (leadership_term_id >= leadership_term_id_)
     {
@@ -4273,6 +4393,18 @@ void ConsensusModuleAgent::on_commit_position(std::int64_t leadership_term_id, s
     {
         notified_commit_position_ = std::max(notified_commit_position_, log_position);
         time_of_last_log_update_ns_ = now;
+    }
+    else if (leadership_term_id > leadership_term_id_)
+    {
+        // `ConsensusModuleAgent.onCommitPosition:1129-1140`: a new leader has
+        // already been elected elsewhere; step into an election instead of
+        // waiting for the log image to close.
+        enter_election(false, "unexpected commit position from new leader - this.leadershipTermId=" +
+                                  std::to_string(leadership_term_id_) +
+                                  " newLeadershipTermId=" + std::to_string(leadership_term_id) +
+                                  " this.leaderMemberId=" + std::to_string(leader_member_.id) +
+                                  " this.commitPosition=" + std::to_string(commit_position()) +
+                                  " this.appendPosition=" + std::to_string(append_position()));
     }
 }
 

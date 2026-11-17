@@ -60,6 +60,13 @@ public:
         publication_ = std::move(publication);
     }
 
+    /// `LogPublisher.publication()` (`LogPublisher.java:78`). The agent keeps
+    /// it for the liveness check; tests use it to wait for the link.
+    [[nodiscard]] aeron_exclusive_publication_t* publication() const noexcept
+    {
+        return publication_.get();
+    }
+
     [[nodiscard]] bool has_publication() const noexcept
     {
         return nullptr != publication_;
