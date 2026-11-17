@@ -1011,9 +1011,12 @@ protected:
     {
         // A unique port per replay: the two archives' replay publications must not
         // share one subscription, or each poll would interleave both streams.
+        // Below the ephemeral range (32768-60999): a port in it can be taken by
+        // any outbound connection on the host (2026-11-17, the three-node rig
+        // and the reference-client test both moved for this reason).
         const std::string replay_channel =
             "aeron:udp?endpoint=localhost:" +
-            std::to_string(34000 + (::getpid() % 100) * 40 + (instance_ % 200) * 4 + (replay_sequence_++ % 4));
+            std::to_string(6000 + (::getpid() % 100) * 40 + (instance_ % 200) * 4 + (replay_sequence_++ % 4));
 
         aeron_subscription_t* subscription = nullptr;
         aeron_async_add_subscription_t* subscription_add = nullptr;
