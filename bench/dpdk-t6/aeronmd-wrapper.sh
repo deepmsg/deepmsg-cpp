@@ -8,6 +8,13 @@
 # `AERON_DIR` (a test may start several drivers at once; one vfio port could not
 # serve them, a vdev can).
 #
+# The harness's own `AERON_THREADING_MODE` is **passed through**, not replaced:
+# the media driver serves every mode the reference does, so the media arm runs
+# the configuration the suite asks for and the diff against the untouched
+# kernel arm is "the media", nothing else. The requested value is written into
+# the log before the driver's own output, which is how the arm says which modes
+# the suite actually used.
+#
 #   AXC_T6_DRIVER   the deepmsg-media-driver binary (required)
 #   AXC_T6_OUT      where the logs and pcaps go (default /tmp/axc-t6-drivers)
 set -euo pipefail
@@ -20,13 +27,14 @@ mkdir -p "$out"
 # The log must live **outside** `AERON_DIR`: the reference driver deletes an
 # existing aeron directory on start and the open log would be unlinked.
 #
-# `AERON_THREADING_MODE` is forced to DEDICATED: the launcher runs DEDICATED
-# only, and the reference harness asks for SHARED in most classes. The
-# `kernel-dedicated` arm measures what that forcing alone changes; this arm must
-# be compared with that one, not with the untouched kernel arm.
-printf 'wrapper: AERON_THREADING_MODE=DEDICATED (requested %s)\n' "${AERON_THREADING_MODE:-<unset>}" \
+# One variable feeds both the reading and the exec, so a wrapper that forces a
+# mode cannot report a different one than the driver got.
+effective_mode=${AERON_THREADING_MODE:-}
+mode_env=()
+[[ -n "$effective_mode" ]] && mode_env+=("AERON_THREADING_MODE=$effective_mode")
+printf 'wrapper: AERON_THREADING_MODE=%s\n' "${effective_mode:-<unset>}" \
     >"$out/driver-$key.log"
-exec env AERON_THREADING_MODE=DEDICATED \
+exec env "${mode_env[@]}" \
     DEEPMSG_DPDK_ENABLED=true \
     "DEEPMSG_DPDK_EAL_ARGS=--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=$out/driver-$key.pcap" \
     DEEPMSG_DPDK_PORT=net_pcap0 \

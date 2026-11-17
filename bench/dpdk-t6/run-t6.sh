@@ -2,9 +2,13 @@
 # T6: the reference Java system tests, once on the kernel driver and once on our
 # media — which is open and falls back to the kernel for every channel.
 #
-#   bench/dpdk-t6/run-t6.sh --arm kernel|media|both [--area root|archive|cluster|driver|security|test]
+#   bench/dpdk-t6/run-t6.sh --arm kernel|media|all [--area root|archive|cluster|driver|security|test]
 #                           [--classes a,b] [--resume]
 #   bench/dpdk-t6/run-t6.sh --part a          # debug vs dpdk ctest, per test
+#
+# Two arms, one variable: the kernel arm is the reference `aeronmd` untouched
+# and the media arm is our `deepmsg-media-driver` with the media on, both with
+# the threading mode the harness asks for (the media driver serves all four).
 #
 # The media arm runs on a `net_pcap` vdev, not on the bench card: many of the
 # reference classes start two or more drivers in one test, and one vfio port
@@ -27,7 +31,6 @@ t6_build=${AXC_BUILD_DIR:-$t6_repo/build/dpdk-release}
 t6_media=${AXC_T6_DRIVER:-$t6_build/apps/deepmsg-media-driver/deepmsg-media-driver}
 t6_kernel=${AXC_T6_KERNEL_DRIVER:-$t6_repo/build/debug/aeron/binaries/aeronmd}
 t6_wrapper=${AXC_T6_WRAPPER:-$t6_repo/bench/dpdk-t6/aeronmd-wrapper.sh}
-t6_kernel_wrapper=${AXC_T6_KERNEL_WRAPPER:-$t6_repo/bench/dpdk-t6/kernel-wrapper.sh}
 t6_compare=$t6_repo/bench/dpdk-t6/compare.py
 t6_class_timeout=${AXC_T6_CLASS_TIMEOUT:-300}
 t6_gradle_args=${AXC_T6_GRADLE_ARGS:---offline}
@@ -50,7 +53,7 @@ usage()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --arm)
-            if [[ "$2" == "all" ]]; then t6_arms+=(kernel kernel-dedicated media); else t6_arms+=("$2"); fi
+            if [[ "$2" == "all" ]]; then t6_arms+=(kernel media); else t6_arms+=("$2"); fi
             shift 2
             ;;
         --area) t6_area=$2; shift 2 ;;
@@ -83,7 +86,7 @@ if [[ "$t6_part" == "a" ]]; then
     exit 0
 fi
 
-[[ ${#t6_arms[@]} -eq 0 ]] && t6_arms=(kernel kernel-dedicated media)
+[[ ${#t6_arms[@]} -eq 0 ]] && t6_arms=(kernel media)
 
 class_list()
 {
@@ -110,7 +113,6 @@ preflight()
     [[ -x "$t6_media" ]] || fail "no media driver at $t6_media (build the dpdk preset)"
     [[ -x "$t6_kernel" ]] || fail "no reference aeronmd at $t6_kernel (set AXC_T6_KERNEL_DRIVER or build/debug)"
     [[ -x "$t6_wrapper" ]] || fail "the media wrapper is not executable: $t6_wrapper"
-    [[ -x "$t6_kernel_wrapper" ]] || fail "the kernel wrapper is not executable: $t6_kernel_wrapper"
     command -v python3 >/dev/null || fail "python3 not found"
     command -v md5sum >/dev/null || fail "md5sum not found"
     ( cd "$t6_aeron" && ./gradlew --version >/dev/null 2>&1 ) || fail "gradle wrapper is not usable"
@@ -126,7 +128,6 @@ run_class() # run_class <arm> <class>
 
     local args=(-Daeron.test.system.aeronmd.path="$t6_kernel")
     case "$arm" in
-        kernel-dedicated) args=(-Daeron.test.system.aeronmd.path="$t6_kernel_wrapper") ;;
         media) args=(-Daeron.test.system.aeronmd.path="$t6_wrapper") ;;
     esac
 
@@ -154,22 +155,6 @@ run_class() # run_class <arm> <class>
     fi
 }
 
-summarise_kernel_dedicated()
-{
-    local dir=$t6_work/kernel-dedicated
-    local total_log=0 bad_log=0 log
-    for log in "$dir"/drivers/driver-*.log; do
-        [[ -f "$log" ]] || continue
-        total_log=$((total_log + 1))
-        grep -q 'wrapper: AERON_THREADING_MODE=DEDICATED' "$log" || bad_log=$((bad_log + 1))
-    done
-    say "control drivers: $total_log started, $((total_log - bad_log)) carry the forced mode"
-    echo "drivers=$total_log" >"$dir/driver-checks.txt"
-    echo "drivers_with_forced_mode=$((total_log - bad_log))" >>"$dir/driver-checks.txt"
-    [[ "$total_log" -gt 0 ]] || fail "the kernel-dedicated arm never started a driver"
-    [[ "$bad_log" -eq 0 ]] || fail "a kernel-dedicated driver log does not show the forced mode"
-}
-
 summarise_media()
 {
     local dir=$t6_work/media
@@ -194,15 +179,32 @@ summarise_media()
         fi
     done
     pcaps=$(find "$dir/drivers" -maxdepth 1 -name 'driver-*.pcap' 2>/dev/null | wc -l)
+
+    # What the harness asked for, read off the wrapper's one line. The arm must
+    # run the suite's own modes: a wrapper that forced one would show that mode
+    # for every driver, and the diff against the kernel arm would no longer be
+    # "the media".
+    local mode_lines shared=0 unset_modes=0
+    mode_lines=$(grep -h '^wrapper: AERON_THREADING_MODE=' "$dir"/drivers/driver-*.log 2>/dev/null || true)
+    shared=$(printf '%s\n' "$mode_lines" | grep -c '=SHARED$' || true)
+    local non_dedicated
+    non_dedicated=$(printf '%s\n' "$mode_lines" | grep -cv '=DEDICATED$' || true)
+    unset_modes=$(printf '%s\n' "$mode_lines" | grep -c '=<unset>$' || true)
     say "B2 drivers: $total_log logs, $((total_log - bad_log)) opened the media"
+    say "B2 modes: $(printf '%s\n' "$mode_lines" | sed 's/^wrapper: AERON_THREADING_MODE=//' | sort | uniq -c | tr '\n' ' ')"
     say "B3 frames: $pcaps pcaps, $bad_pcap not empty"
     {
         echo "drivers=$total_log"
         echo "drivers_with_media=$((total_log - bad_log))"
+        echo "drivers_shared=$shared"
+        echo "drivers_not_dedicated=$non_dedicated"
+        echo "drivers_unset=$unset_modes"
         echo "pcaps=$pcaps"
         echo "pcaps_with_frames=$bad_pcap"
     } >"$dir/driver-checks.txt"
     [[ "$bad_log" -eq 0 ]] || fail "B2: a driver started without the media"
+    [[ "$non_dedicated" -gt 0 ]] ||
+        fail "B2: every driver ran DEDICATED — the arm is not passing the harness's mode through"
     [[ "$bad_pcap" -eq 0 ]] || fail "B3: the media carried frames; see $dir/driver-checks.txt"
 }
 
@@ -236,8 +238,6 @@ run_arm() # run_arm <arm>
     python3 "$t6_compare" collect --xml-dir "$dir/xml" --out "$dir/status.tsv"
     if [[ "$arm" == "media" ]]; then
         summarise_media
-    elif [[ "$arm" == "kernel-dedicated" ]]; then
-        summarise_kernel_dedicated
     fi
 }
 
@@ -273,32 +273,20 @@ main()
         check_counts "$arm"
     done
     if [[ ${#t6_arms[@]} -ge 2 ]] && [[ " ${t6_arms[*]} " == *" media "* ]]; then
-        local base_arm=kernel
-        [[ " ${t6_arms[*]} " == *" kernel-dedicated "* ]] && base_arm=kernel-dedicated
-        local only_base only_media
-        only_base=$(comm -23 <(cut -f1 "$t6_work/$base_arm/status.tsv" | sort -u) \
-                            <(cut -f1 "$t6_work/media/status.tsv" | sort -u) | head -5)
-        only_media=$(comm -13 <(cut -f1 "$t6_work/$base_arm/status.tsv" | sort -u) \
+        local only_kernel only_media
+        only_kernel=$(comm -23 <(cut -f1 "$t6_work/kernel/status.tsv" | sort -u) \
+                              <(cut -f1 "$t6_work/media/status.tsv" | sort -u) | head -5)
+        only_media=$(comm -13 <(cut -f1 "$t6_work/kernel/status.tsv" | sort -u) \
                              <(cut -f1 "$t6_work/media/status.tsv" | sort -u) | head -5)
-        if [[ -n "$only_base" || -n "$only_media" ]]; then
-            say "classes only in $base_arm: $only_base"
+        if [[ -n "$only_kernel" || -n "$only_media" ]]; then
+            say "classes only in kernel: $only_kernel"
             say "classes only in media: $only_media"
             fail "the arms ran different classes; re-run the missing side with --resume"
         fi
-        if [[ " ${t6_arms[*]} " == *" kernel-dedicated "* ]]; then
-            python3 "$t6_compare" diff --base "$t6_work/kernel/status.tsv" \
-                --other "$t6_work/kernel-dedicated/status.tsv" --base-label kernel \
-                --other-label kernel-dedicated --out "$t6_work/diff-control" --allow-deltas || true
-            python3 "$t6_compare" diff --base "$t6_work/kernel-dedicated/status.tsv" \
-                --other "$t6_work/media/status.tsv" --base-label kernel-dedicated \
-                --other-label media --out "$t6_work/diff" ||
-                fail "B4: the arms disagree; adjudicate every row in $t6_work/diff/deltas.tsv"
-        else
-            python3 "$t6_compare" diff --base "$t6_work/kernel/status.tsv" \
-                --other "$t6_work/media/status.tsv" --base-label kernel --other-label media \
-                --out "$t6_work/diff" ||
-                fail "B4: the arms disagree; adjudicate every row in $t6_work/diff/deltas.tsv"
-        fi
+        python3 "$t6_compare" diff --base "$t6_work/kernel/status.tsv" \
+            --other "$t6_work/media/status.tsv" --base-label kernel --other-label media \
+            --out "$t6_work/diff" ||
+            fail "B4: the arms disagree; adjudicate every row in $t6_work/diff/deltas.tsv"
     fi
     say "work=$t6_work"
 }
