@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <string>
@@ -24,6 +25,8 @@
 #include "cluster/client/cluster_client.h"
 #include "cluster/common/cluster_codecs.h"
 #include "core/deepmsg/deepmsg_client.h"
+#include "io_aeron_cluster_codecs/AdminRequest.h"
+#include "io_aeron_cluster_codecs/AdminRequestType.h"
 #include "io_aeron_cluster_codecs/NewLeaderEvent.h"
 #include "io_aeron_cluster_codecs/SessionCloseRequest.h"
 #include "io_aeron_cluster_codecs/SessionConnectRequest.h"
@@ -209,6 +212,27 @@ public:
         return close_requests_;
     }
 
+    [[nodiscard]] int admin_requests() const noexcept
+    {
+        return admin_requests_;
+    }
+
+    [[nodiscard]] std::int64_t last_admin_correlation_id() const noexcept
+    {
+        return last_admin_correlation_id_;
+    }
+
+    [[nodiscard]] codecs::AdminRequestType::Value last_admin_request_type() const noexcept
+    {
+        return last_admin_request_type_;
+    }
+
+    /// The bytes the client put on the wire, message header included.
+    [[nodiscard]] const std::vector<std::uint8_t>& last_admin_request() const noexcept
+    {
+        return last_admin_request_;
+    }
+
     [[nodiscard]] const std::vector<std::vector<std::uint8_t>>& payloads() const noexcept
     {
         return payloads_;
@@ -364,6 +388,16 @@ private:
             return;
         }
 
+        if (header->templateId() == codecs::AdminRequest::sbeTemplateId())
+        {
+            auto decoder = deepmsg::cluster::common::wrap_body<codecs::AdminRequest>(message, *header);
+            ++fake->admin_requests_;
+            fake->last_admin_correlation_id_ = decoder.correlationId();
+            fake->last_admin_request_type_ = decoder.requestType();
+            fake->last_admin_request_.assign(message.begin(), message.end());
+            return;
+        }
+
         if (header->templateId() == codecs::SessionCloseRequest::sbeTemplateId())
         {
             ++fake->close_requests_;
@@ -436,6 +470,10 @@ private:
     std::int64_t last_term_id_{-1};
     int keep_alives_{0};
     int close_requests_{0};
+    int admin_requests_{0};
+    std::int64_t last_admin_correlation_id_{-1};
+    codecs::AdminRequestType::Value last_admin_request_type_{codecs::AdminRequestType::NULL_VALUE};
+    std::vector<std::uint8_t> last_admin_request_{};
     bool ready_{false};
 };
 
@@ -638,6 +676,59 @@ TEST(ClusterClientTest, keepAliveCarriesTheTermAndSession)
     EXPECT_TRUE(*sent);
 
     ASSERT_TRUE(pump_session(*session, fake, [&] { return fake.keep_alives() == 1; }));
+}
+
+TEST(ClusterClientTest, theAdminRequestToTakeASnapshotCarriesTheSessionAndCorrelation)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.ok());
+    FakeCluster fake(driver.dir());
+    ASSERT_TRUE(fake.ready());
+
+    auto session = connect_session(driver.dir(), ipc_config(), fake);
+    ASSERT_TRUE(session.has_value());
+
+    auto sent = session->cluster->send_admin_request_to_take_a_snapshot(4242);
+    ASSERT_TRUE(sent.has_value());
+    EXPECT_TRUE(*sent);
+
+    ASSERT_TRUE(pump_session(*session, fake, [&] { return fake.admin_requests() == 1; }));
+    EXPECT_EQ(4242, fake.last_admin_correlation_id());
+    EXPECT_EQ(codecs::AdminRequestType::SNAPSHOT, fake.last_admin_request_type());
+}
+
+TEST(ClusterClientTest, theAdminRequestToTakeASnapshotIsTheSchemaGolden)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.ok());
+    FakeCluster fake(driver.dir());
+    ASSERT_TRUE(fake.ready());
+
+    auto session = connect_session(driver.dir(), ipc_config(), fake);
+    ASSERT_TRUE(session.has_value());
+
+    constexpr std::int64_t correlation_id = 4242;
+    auto sent = session->cluster->send_admin_request_to_take_a_snapshot(correlation_id);
+    ASSERT_TRUE(sent.has_value());
+    ASSERT_TRUE(*sent);
+    ASSERT_TRUE(pump_session(*session, fake, [&] { return fake.admin_requests() == 1; }));
+
+    // 1.54.0 schema 111 v17: MessageHeader(blockLength=28, template=26,
+    // schema=111, version=17), then leadershipTermId, clusterSessionId,
+    // correlationId, requestType=SNAPSHOT(0), and an empty payload (length 0).
+    std::vector<std::uint8_t> expected(8 + 28 + 4, 0);
+    const auto put = [&expected](std::size_t offset, const auto& value)
+    { std::memcpy(expected.data() + offset, &value, sizeof(value)); };
+    put(0, std::uint16_t{28});
+    put(2, std::uint16_t{26});
+    put(4, std::uint16_t{111});
+    put(6, std::uint16_t{17});
+    put(8, TERM_ID);
+    put(16, static_cast<std::int64_t>(SESSION_ID));
+    put(24, correlation_id);
+    put(32, codecs::AdminRequestType::SNAPSHOT);
+
+    EXPECT_EQ(expected, fake.last_admin_request());
 }
 
 TEST(ClusterClientTest, aKeepAliveBetweenTwoOffersLeavesBothOnTheWire)

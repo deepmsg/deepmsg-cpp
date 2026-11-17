@@ -8,6 +8,8 @@
 #include "cluster/client/channel_util.h"
 #include "core/error/error.h"
 #include "core/time/clock.h"
+#include "io_aeron_cluster_codecs/AdminRequest.h"
+#include "io_aeron_cluster_codecs/AdminRequestType.h"
 #include "io_aeron_cluster_codecs/AdminResponse.h"
 #include "io_aeron_cluster_codecs/NewLeaderEvent.h"
 #include "io_aeron_cluster_codecs/SessionCloseRequest.h"
@@ -416,6 +418,47 @@ std::expected<bool, Error> ClusterClient::send_keep_alive()
             encoder.leadershipTermId(leadership_term_id_).clusterSessionId(cluster_session_id_);
             (void)aeron_buffer_claim_commit(&claim);
             return true;
+        }
+
+        if (AERON_PUBLICATION_MAX_POSITION_EXCEEDED == position)
+        {
+            return std::unexpected(make_error(
+                ErrorCode::no_capacity,
+                "max position exceeded: term-length=" + std::to_string(ingress_publication_.term_buffer_length())));
+        }
+    }
+
+    return false;
+}
+
+std::expected<bool, Error> ClusterClient::send_admin_request_to_take_a_snapshot(std::int64_t correlation_id)
+{
+    // `AeronCluster.java:536-585`.
+    const std::size_t length = common::MESSAGE_HEADER_LENGTH + codecs::AdminRequest::sbeBlockLength() +
+                               codecs::AdminRequest::payloadHeaderLength();
+
+    for (int attempt = 0; attempt < SEND_ATTEMPTS; ++attempt)
+    {
+        aeron_buffer_claim_t claim{};
+        const std::int64_t position = ingress_publication_.try_claim(length, claim);
+        track_ingress_publication_result(position);
+
+        if (position > 0)
+        {
+            codecs::AdminRequest encoder;
+            encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+            encoder.leadershipTermId(leadership_term_id_)
+                .clusterSessionId(cluster_session_id_)
+                .correlationId(correlation_id)
+                .requestType(codecs::AdminRequestType::SNAPSHOT)
+                .putPayload("", 0);
+            (void)aeron_buffer_claim_commit(&claim);
+            return true;
+        }
+
+        if (AERON_PUBLICATION_CLOSED == position)
+        {
+            return std::unexpected(make_error(ErrorCode::protocol_error, "ingress publication is closed"));
         }
 
         if (AERON_PUBLICATION_MAX_POSITION_EXCEEDED == position)

@@ -305,6 +305,10 @@ public:
     /// `sendKeepAlive()` (`AeronCluster.java:487-526`).
     [[nodiscard]] std::expected<bool, Error> send_keep_alive();
 
+    /// `sendAdminRequestToTakeASnapshot(correlationId)`
+    /// (`AeronCluster.java:536-585`).
+    [[nodiscard]] std::expected<bool, Error> send_admin_request_to_take_a_snapshot(std::int64_t correlation_id);
+
     /// `pollEgress()` (`AeronCluster.java:599-612`).
     [[nodiscard]] std::expected<int, Error> poll_egress(std::size_t fragment_limit = FRAGMENT_LIMIT);
 
