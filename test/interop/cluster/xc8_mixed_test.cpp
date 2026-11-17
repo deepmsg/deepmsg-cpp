@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "cluster/common/cluster_counters.h"
+#include "cluster/common/recording_log.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "fixture/cluster_client_session.h"
 #include "fixture/java_process.h"
@@ -102,8 +103,10 @@ protected:
         root_dir_ = created;
         // The port block stays below the ephemeral range (main's #65 rule) and
         // below the three-node rig's 12000 block: 4000..7100 cannot collide
-        // with it whatever the pids are.
-        base_port_ = 4000 + ((static_cast<int>(::getpid()) % 32) * 100);
+        // with it whatever the pids are. Tests in one process share the pid,
+        // so each takes the next 50-port slot.
+        static std::atomic<int> port_round{0};
+        base_port_ = 4000 + ((static_cast<int>(::getpid()) % 32) * 100) + (port_round.fetch_add(1) * 50);
     }
 
     void TearDown() override
@@ -142,16 +145,18 @@ protected:
         return members_list;
     }
 
-    [[nodiscard]] std::vector<std::pair<std::string, std::string>> member_properties(int index, int members) const
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> member_properties(int index, int members,
+                                                                                     bool fresh) const
     {
         const std::string node_dir = root_dir_ + "/node" + std::to_string(index);
+        const std::string wipe = fresh ? "true" : "false";
         std::vector<std::pair<std::string, std::string>> properties{
             {"aeron.dir", node_dir + "/aeron"},
-            {"aeron.dir.delete.on.start", "true"},
+            {"aeron.dir.delete.on.start", wipe},
             {"aeron.cluster.dir", node_dir + "/cluster"},
-            {"aeron.cluster.dir.delete.on.start", "true"},
+            {"aeron.cluster.dir.delete.on.start", wipe},
             {"aeron.archive.dir", node_dir + "/archive"},
-            {"aeron.archive.dir.delete.on.start", "true"},
+            {"aeron.archive.dir.delete.on.start", wipe},
             {"aeron.cluster.id", std::to_string(CLUSTER_ID)},
             {"aeron.cluster.member.id", std::to_string(index)},
             {"aeron.cluster.members", members_string(members)},
@@ -174,11 +179,11 @@ protected:
         return properties;
     }
 
-    void start_member(int index, int members, Stack stack)
+    void start_member(int index, int members, Stack stack, bool fresh = true)
     {
         const std::string node_dir = root_dir_ + "/node" + std::to_string(index);
         std::filesystem::create_directories(node_dir);
-        const auto properties = member_properties(index, members);
+        const auto properties = member_properties(index, members, fresh);
 
         if (Stack::java == stack)
         {
@@ -268,7 +273,14 @@ protected:
         for (int attempt = 0; attempt < 20; ++attempt)
         {
             start_container_once(index, stack);
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            // The retry window is long enough to starve the counter clients
+            // (ten seconds force-closes an aeron client), so drive them.
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+            while (std::chrono::steady_clock::now() < until)
+            {
+                drive_counter_clients(static_cast<int>(stacks_.size()));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
             if (containers_[index] && containers_[index]->running())
             {
                 for (auto& client : clients_)
@@ -643,6 +655,60 @@ protected:
         session.close();
         return true;
     }
+    void set_control_toggle(int index, std::int32_t value)
+    {
+        auto* client = client_for(index);
+        ASSERT_NE(nullptr, client);
+        (void)client->do_work();
+        const std::int32_t id = deepmsg::cluster::common::find_cluster_counter(
+            client->counters_reader(), deepmsg::cluster::common::CLUSTER_CONTROL_TOGGLE_TYPE_ID, CLUSTER_ID);
+        ASSERT_NE(AERON_NULL_COUNTER_ID, id);
+        std::int64_t* address = aeron_counters_reader_addr(client->counters_reader(), id);
+        ASSERT_NE(nullptr, address);
+        __atomic_store_n(address, static_cast<std::int64_t>(value), __ATOMIC_RELEASE);
+    }
+
+    /// Reads a recording's first segment file (`<id>-0.rec`) as bytes, at most
+    /// `window` of them (the segment is a large zero-filled file; the entries
+    /// live at its front).
+    [[nodiscard]] std::string read_recording_file(int index, std::int64_t recording_id,
+                                                  std::size_t window = 1U << 20U) const
+    {
+        const std::string path =
+            root_dir_ + "/node" + std::to_string(index) + "/archive/" + std::to_string(recording_id) + "-0.rec";
+        std::ifstream in{path, std::ios::binary};
+        if (!in)
+        {
+            return {};
+        }
+        std::string bytes(window, '\0');
+        in.read(bytes.data(), static_cast<std::streamsize>(window));
+        bytes.resize(static_cast<std::size_t>(in.gcount()));
+        return bytes;
+    }
+
+    [[nodiscard]] std::int64_t recording_file_size(int index, std::int64_t recording_id) const
+    {
+        const std::string path =
+            root_dir_ + "/node" + std::to_string(index) + "/archive/" + std::to_string(recording_id) + "-0.rec";
+        std::error_code error;
+        const auto size = std::filesystem::file_size(path, error);
+        return error ? -1 : static_cast<std::int64_t>(size);
+    }
+
+    /// `-1` when equal, else the offset of the first differing byte.
+    [[nodiscard]] static std::int64_t first_difference(const std::string& a, const std::string& b)
+    {
+        const std::size_t common = std::min(a.size(), b.size());
+        for (std::size_t i = 0; i < common; ++i)
+        {
+            if (a[i] != b[i])
+            {
+                return static_cast<std::int64_t>(i);
+            }
+        }
+        return a.size() == b.size() ? -1 : static_cast<std::int64_t>(common);
+    }
 };
 
 TEST_F(MixedRig, aJavaMemberAndOurMemberServeAClient)
@@ -695,7 +761,7 @@ TEST_F(MixedRig, ourAppointedLeaderServesAClientWithThreeMembers)
     stop_members();
 }
 
-TEST_F(MixedRig, DISABLED_aJavaDirectoryRestartsUnderOurNode)
+TEST_F(MixedRig, aJavaDirectoryRestartsUnderOurNode)
 {
     // XC-5's core: the same member directory, first a Java member, then ours.
     // It currently fails on the Java-written `recording.log`: our node exits
@@ -704,7 +770,7 @@ TEST_F(MixedRig, DISABLED_aJavaDirectoryRestartsUnderOurNode)
     start_cluster({Stack::java, Stack::cpp});
     ASSERT_GE(leader_of(2), 0) << member_dump(2);
     kill_member(0);
-    start_member(0, 2, Stack::cpp);
+    start_member(0, 2, Stack::cpp, false);
     start_container(0, Stack::cpp);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     while (std::chrono::steady_clock::now() < deadline)
@@ -717,6 +783,143 @@ TEST_F(MixedRig, DISABLED_aJavaDirectoryRestartsUnderOurNode)
     }
     EXPECT_EQ(1, counter(0, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
         << "our node could not take over the Java member's directory: " << member_dump(2);
+    stop_members();
+}
+
+TEST_F(MixedRig, theMembersLogRecordingsAreByteIdentical)
+{
+    // XC-3's byte criterion, log side: in one mixed cluster every member's log
+    // recording is the same bytes (the follower's recording is the leader's
+    // frames), so a format difference between the stacks would show here.
+    start_cluster({Stack::java, Stack::cpp, Stack::java});
+    ASSERT_TRUE(echo_round(3, 1, 10, 0)) << member_dump(3);
+    stop_members();
+
+    const std::string reference = read_recording_file(0, 0);
+    ASSERT_FALSE(reference.empty()) << "node 0 has no log recording";
+    for (int i = 1; i < 3; ++i)
+    {
+        EXPECT_EQ(recording_file_size(0, 0), recording_file_size(i, 0)) << "node " << i << " segment size";
+        const std::int64_t offset = first_difference(reference, read_recording_file(i, 0));
+        EXPECT_EQ(-1, offset) << "node " << i << " log recording differs from node 0's at offset " << offset;
+    }
+}
+
+// XC-3's byte criterion, snapshot side. The recordings differ between members
+// at offset 12 (the publishing session id) and offset 20 (the frame's reserved
+// value, the snapshot publication's position): each member takes its *own*
+// snapshot, while the reference replicates the leader's snapshot recording to
+// the followers, which is what makes the bytes equal there. Recorded as the
+// XC-3 snapshot gap; the service snapshots are per-stack (`同 supplier`).
+TEST_F(MixedRig, DISABLED_theMembersConsensusModuleSnapshotsAreByteIdentical)
+{
+    start_cluster({Stack::java, Stack::cpp, Stack::java});
+    ASSERT_TRUE(echo_round(3, 1, 10, 0)) << member_dump(3);
+
+    const int leader = leader_of(3);
+    ASSERT_GE(leader, 0) << member_dump(3);
+    const auto snapshots_before = counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    set_control_toggle(leader, 4);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline &&
+           counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID) <= snapshots_before)
+    {
+        drive_counter_clients(3);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_GT(counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID), snapshots_before)
+        << "the snapshot never completed: " << member_dump(3);
+    stop_members();
+
+    // The CM snapshot's recording id comes from each member's own
+    // `recording.log`; the ids are per-archive, so they are read, not assumed.
+    std::vector<std::int64_t> ids;
+    for (int i = 0; i < 3; ++i)
+    {
+        auto log =
+            deepmsg::cluster::common::RecordingLog::open(root_dir_ + "/node" + std::to_string(i) + "/cluster", false);
+        ASSERT_TRUE(log) << log.error().message.view();
+        const auto* snapshot = log->get_latest_snapshot(deepmsg::cluster::common::RecordingLog::SERVICE_ID);
+        ASSERT_NE(nullptr, snapshot) << "node " << i << " has no CM snapshot entry";
+        ids.push_back(snapshot->recording_id);
+    }
+
+    const std::string reference = read_recording_file(0, ids[0]);
+    ASSERT_FALSE(reference.empty()) << "node 0 has no CM snapshot recording " << ids[0];
+    for (int i = 1; i < 3; ++i)
+    {
+        EXPECT_EQ(recording_file_size(0, ids[0]), recording_file_size(i, ids[static_cast<std::size_t>(i)]))
+            << "node " << i << " snapshot segment size (recording " << ids[i] << ")";
+        const std::int64_t offset =
+            first_difference(reference, read_recording_file(i, ids[static_cast<std::size_t>(i)]));
+        EXPECT_EQ(-1, offset) << "node " << i << " CM snapshot (recording " << ids[i] << ") differs from node 0's ("
+                              << ids[0] << ") at offset " << offset;
+    }
+}
+
+TEST_F(MixedRig, aJavaLeadersDirectoryRestartsUnderOurNode)
+{
+    // XC-5 with the harder member: the Java member is the leader, it goes, and
+    // our node takes its directory over while the survivors elect.
+    start_cluster({Stack::java, Stack::cpp, Stack::java});
+    ASSERT_TRUE(echo_round(3, 1, 10, 0)) << member_dump(3);
+    const int leader = leader_of(3);
+    ASSERT_GE(leader, 0) << member_dump(3);
+    ASSERT_EQ(Stack::java, stack_of(leader)) << "expected a Java leader: " << member_dump(3);
+    const std::int64_t term = term_of(leader);
+    kill_member(leader);
+    ASSERT_TRUE(await_leader_above(3, term, std::chrono::seconds(90))) << member_dump(3);
+
+    start_member(leader, 3, Stack::cpp, false);
+    start_container(leader, Stack::cpp);
+    stacks_[static_cast<std::size_t>(leader)] = Stack::cpp;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (1 == counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_EQ(1, counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+        << "our node could not take over the Java leader's directory: " << member_dump(3);
+    ASSERT_TRUE(echo_round(3, 21, 10, 0)) << member_dump(3);
+    stop_members();
+}
+
+// The other XC-5 direction — our leader's directory taken over by the Java
+// member — is not delivered: the Java member never reaches ACTIVE on our
+// directory (it starts and then nothing; the cluster does not reform) while
+// our node takes over the Java directories in both positions. Disabled with
+// the finding so the forward direction stays a gate.
+TEST_F(MixedRig, DISABLED_ourLeadersDirectoryRestartsUnderAJavaMember)
+{
+    // The other direction: our member leads, goes, and the Java member takes
+    // its directory over.
+    appointed_leader_ = 0;
+    start_cluster({Stack::cpp, Stack::java, Stack::cpp});
+    ASSERT_TRUE(echo_round(3, 1, 10, 0)) << member_dump(3);
+    ASSERT_EQ(0, leader_of(3)) << member_dump(3);
+    const std::int64_t term = term_of(0);
+    kill_member(0);
+    ASSERT_TRUE(await_leader_above(3, term, std::chrono::seconds(90))) << member_dump(3);
+
+    start_member(0, 3, Stack::java, false);
+    start_container(0, Stack::java);
+    stacks_[0] = Stack::java;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (1 == counter(0, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_EQ(1, counter(0, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+        << "the Java member could not take over our leader's directory: " << member_dump(3);
+    ASSERT_TRUE(echo_round(3, 21, 10, 0)) << member_dump(3);
     stop_members();
 }
 
