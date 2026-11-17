@@ -338,7 +338,7 @@ protected:
             if (!service_library_.empty())
             {
                 out << "deepmsg.cluster.service.library=" << service_library_ << "\n"
-                    << "deepmsg.cluster.service=role-change\n";
+                    << "deepmsg.cluster.service=" << service_name_ << "\n";
             }
         }
     }
@@ -387,6 +387,17 @@ protected:
         else
         {
             (void)::unsetenv("AXC_TEST_ROLE_FILE");
+        }
+        if (!tracking_dir_.empty())
+        {
+            const std::string file = tracking_dir_ + "/tracking-" + std::to_string(index) + ".txt";
+            (void)::setenv("AXC_TEST_TRACKING_FILE", file.c_str(), 1);
+            (void)::setenv("AXC_TEST_TRACKING_SERVICE_ID", "1", 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_TRACKING_FILE");
+            (void)::unsetenv("AXC_TEST_TRACKING_SERVICE_ID");
         }
         auto container =
             spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
@@ -929,6 +940,24 @@ protected:
         return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     }
 
+    /// Lines appended by the tracking test service: `M <id>` for a client
+    /// message, `S <id>` for a service message, `T <correlationId>` for a
+    /// timer event.
+    [[nodiscard]] std::vector<std::string> tracking_lines(int index) const
+    {
+        std::ifstream in{tracking_dir_ + "/tracking-" + std::to_string(index) + ".txt"};
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (!line.empty())
+            {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
+
     /// `on_role_change` records written by the role-change test service, one
     /// role code per line.
     [[nodiscard]] std::vector<std::int32_t> role_records(int index) const
@@ -961,6 +990,11 @@ protected:
         {
             std::error_code error;
             std::filesystem::create_directories(role_dir_, error);
+        }
+        if (!tracking_dir_.empty())
+        {
+            std::error_code error;
+            std::filesystem::create_directories(tracking_dir_, error);
         }
         start_client_driver(round);
 
@@ -1032,7 +1066,9 @@ protected:
     std::string classes_dir_{};
     std::string client_aeron_dir_{};
     std::string service_library_{};
+    std::string service_name_{"role-change"};
     std::string role_dir_{};
+    std::string tracking_dir_{};
     std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[NODES]{};

@@ -77,6 +77,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc2_election_test.cpp
         cluster/xc2_restart_path_test.cpp
         cluster/xc2_admin_client_test.cpp
+        cluster/xc2_service_ipc_test.cpp
         cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
@@ -113,6 +114,19 @@ add_dependencies(role_change_service_dynamic axc_sbe_codecs)
 set_target_properties(role_change_service_dynamic PROPERTIES PREFIX "" OUTPUT_NAME "role-change-service")
 target_link_options(role_change_service_dynamic PRIVATE "-Wl,--unresolved-symbols=ignore-all")
 
+# C6c-2 F4b: the reference's `MessageTrackingService` for the service-IPC
+# scenarios (records client/service messages and timers, snapshots them).
+add_library(tracking_service_dynamic SHARED services/tracking_service.cpp)
+axc_target_defaults(tracking_service_dynamic)
+target_include_directories(tracking_service_dynamic PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_BINARY_DIR}/generated/axc/sbe"
+    "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-client/src/main/c"
+    "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-archive/src/main/c")
+add_dependencies(tracking_service_dynamic axc_sbe_codecs)
+set_target_properties(tracking_service_dynamic PROPERTIES PREFIX "" OUTPUT_NAME "tracking-service")
+target_link_options(tracking_service_dynamic PRIVATE "-Wl,--unresolved-symbols=ignore-all")
+
 target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
@@ -122,10 +136,12 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\""
     "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
     "AXC_ROLE_CHANGE_SERVICE_LIBRARY=\"$<TARGET_FILE:role_change_service_dynamic>\""
+    "AXC_TRACKING_SERVICE_LIBRARY=\"$<TARGET_FILE:tracking_service_dynamic>\""
     "AXC_CLUSTER_CLIENT_SMOKE=\"$<TARGET_FILE:deepmsg-cluster-client-smoke>\"")
 
 add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container deepmsg-cluster-node
-    deepmsg-consensus-module echo_service_dynamic role_change_service_dynamic deepmsg-cluster-client-smoke)
+    deepmsg-consensus-module echo_service_dynamic role_change_service_dynamic tracking_service_dynamic
+    deepmsg-cluster-client-smoke)
 
 # The tool under test is an executable of its own; build it with the suite.
 add_dependencies(axc_archive_interop_tests archive-tool-ro)
