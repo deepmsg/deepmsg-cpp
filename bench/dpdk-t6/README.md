@@ -45,13 +45,21 @@ control, so it is gone too; B2 now fails if every media-arm driver ran
 bench/dpdk-t6/run-t6.sh --arm all                   # kernel + media, ~1.5-2 h
 bench/dpdk-t6/run-t6.sh --arm media --area cluster  # one area
 bench/dpdk-t6/run-t6.sh --arm all --resume          # continue a killed run
+bench/dpdk-t6/run-t6.sh --set slow --arm all        # the tagged classes, same diff
 bench/dpdk-t6/run-t6.sh --part a                    # debug vs dpdk ctest, per test
 ```
 
+`--set slow` is the classes the default task produces nothing for. The
+reference build gives each tag its own Gradle task (`slowTest`, `bindingsTest`,
+`topologyTest`, and `driverLoggingSystemTest`) and each class is run through the
+one that carries its tag; the two `@TopologyTest` classes need three real hosts
+(`10.42.0.10-12`) and are left out unless `--include-topology` is given. The
+per-class timeout defaults to 900 s in this set (300 s otherwise).
+
 Environment: `AXC_BUILD_DIR` (the DPDK build), `AXC_T6_KERNEL_DRIVER`
 (`build/debug/aeron/binaries/aeronmd` by default), `AXC_T6_DRIVER` (our media
-driver), `AXC_T6_WORK`, `AXC_T6_CLASS_TIMEOUT` (300 s), `AXC_T6_GRADLE_ARGS`
-(`--offline` by default, after the one-time fetch).
+driver), `AXC_T6_WORK`, `AXC_T6_CLASS_TIMEOUT` (300 s, 900 s for `--set slow`),
+`AXC_T6_GRADLE_ARGS` (`--offline` by default, after the one-time fetch).
 
 One work directory holds everything: `<arm>/xml/TEST-*.xml` (the Junit XML, per
 class), `<arm>/logs/<class>.log` (Gradle), `<arm>/status.tsv` (class, method,
@@ -64,7 +72,8 @@ driver the harness started), `media/driver-checks.txt`, and `diff/deltas.tsv`.
   `*Test.java` files exist; 25 produce no tests under the default Gradle task —
   20 `@SlowTest`, `DriverLoggingSystemTest`'s own task, `@TopologyTest`,
   `@BindingsTest`, `@Disabled`, and one helper without `@Test` — so 104 is the
-  whole untagged suite.)
+  whole untagged suite. `--set slow` requires ≥20 of those classes and ≥60
+  cases instead.)
 - **B2** every driver opened the media: one log per start, each with
   `dpdk media on net_pcap0`; a driver that fell back to the kernel says nothing.
   The wrapper's `wrapper: AERON_THREADING_MODE=<value>` line is the reading of
