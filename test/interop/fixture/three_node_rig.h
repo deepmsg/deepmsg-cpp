@@ -419,6 +419,23 @@ protected:
         {
             (void)::unsetenv("AXC_TEST_SLOW_SERVICE_MICROS");
         }
+        // C7's crash injection needs a snapshot long enough to kill inside.
+        if (snapshot_sleep_micros_[index] > 0)
+        {
+            (void)::setenv("AXC_TEST_SNAPSHOT_SLEEP_MICROS", std::to_string(snapshot_sleep_micros_[index]).c_str(), 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_SNAPSHOT_SLEEP_MICROS");
+        }
+        if (snapshot_load_throw_[index])
+        {
+            (void)::setenv("AXC_TEST_SNAPSHOT_LOAD_THROW", "1", 1);
+        }
+        else
+        {
+            (void)::unsetenv("AXC_TEST_SNAPSHOT_LOAD_THROW");
+        }
         auto container =
             spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
         ASSERT_TRUE(container) << container.error().message.view();
@@ -1091,6 +1108,8 @@ protected:
     std::string tracking_dir_{};
     std::string tracking_mode_{"full"};
     std::int32_t slow_service_micros_[NODES]{};
+    std::int32_t snapshot_sleep_micros_[NODES]{};
+    bool snapshot_load_throw_[NODES]{};
     std::map<int, std::map<std::string, std::string>> node_property_overrides_{};
     int round_{0};
     std::unique_ptr<ChildProcess> nodes_[NODES]{};

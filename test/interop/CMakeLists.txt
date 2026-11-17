@@ -79,6 +79,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc2_admin_client_test.cpp
         cluster/xc2_service_ipc_test.cpp
         cluster/xc2_bounds_test.cpp
+        cluster/xc7_crash_test.cpp
         cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp

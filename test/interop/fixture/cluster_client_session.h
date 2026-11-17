@@ -301,6 +301,34 @@ public:
         return false;
     }
 
+    /// Offer `payload` and pump until the publication takes it. No echo is
+    /// expected: the leadership has no quorum, so the message is appended but
+    /// never commits (C7's crash injection).
+    [[nodiscard]] bool offer_only(std::string_view payload,
+                                  std::chrono::milliseconds timeout = std::chrono::seconds(10))
+    {
+        if (!cluster_)
+        {
+            return false;
+        }
+        const auto bytes =
+            std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (cluster_->offer(bytes) >= 0)
+            {
+                return true;
+            }
+            if (!pump_once())
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        return false;
+    }
+
     /// Pump the client/egress until `predicate` holds.
     template <class Predicate>
     [[nodiscard]] bool pump_until(Predicate predicate, std::chrono::milliseconds timeout = std::chrono::seconds(10))

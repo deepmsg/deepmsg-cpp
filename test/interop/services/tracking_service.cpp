@@ -74,6 +74,18 @@ public:
         {
             record_only_ = true;
         }
+        // C7: the crash-injection fixture kills the process inside a snapshot,
+        // so the snapshot must be long enough to catch; the load switch makes
+        // a service refuse the snapshot the recovery plan hands it.
+        if (const char* sleep = std::getenv("AXC_TEST_SNAPSHOT_SLEEP_MICROS"); nullptr != sleep)
+        {
+            snapshot_sleep_micros_ = std::atoi(sleep);
+        }
+        if (const char* load_throw = std::getenv("AXC_TEST_SNAPSHOT_LOAD_THROW");
+            nullptr != load_throw && 0 == std::strcmp(load_throw, "1"))
+        {
+            snapshot_load_throw_ = true;
+        }
     }
 
     std::expected<void, service::Error> on_start(service::Cluster& cluster, service::SnapshotImage* snapshot)
@@ -95,6 +107,14 @@ public:
         if (nullptr == snapshot)
         {
             return {};
+        }
+        if (snapshot_load_throw_)
+        {
+            // `TestNode.ExceptionOnLoadService`: the container reports "failed
+            // to start service" and the member terminates; the fixture then
+            // invalidates the snapshot and restarts.
+            return std::unexpected(axc::core::make_error(axc::core::ErrorCode::internal_error,
+                                                         "the tracking service refuses the snapshot on load"));
         }
 
         Loader loader{*this};
@@ -291,6 +311,10 @@ public:
 
     std::expected<void, service::Error> on_take_snapshot(service::SnapshotPublication& writer)
     {
+        if (snapshot_sleep_micros_ > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds{snapshot_sleep_micros_});
+        }
         std::vector<std::uint8_t> counters;
         counters.push_back(SNAPSHOT_COUNTERS);
         append(counters, service_id_);
@@ -499,6 +523,8 @@ private:
     const char* file_{nullptr};
     std::int32_t node_index_{-1};
     std::int32_t slow_service_micros_{0};
+    std::int32_t snapshot_sleep_micros_{0};
+    bool snapshot_load_throw_{false};
     bool record_only_{false};
     std::int32_t service_id_{1};
     std::int32_t message_count_{0};
