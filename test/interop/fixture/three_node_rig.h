@@ -708,6 +708,11 @@ protected:
         {
             const std::string dir = round_dir(round_) + "/node" + std::to_string(index) + "/aeron";
             axc::core::ClientConfig config{dir};
+            // The rig cannot drive these while it is inside a blocking connect
+            // or a terminate; the C client's own conductor agent keeps the
+            // broadcast receiver from falling behind (2026-11-17: `unable to
+            // keep up with broadcast`, code 1006, after a long connect wait).
+            config.use_conductor_agent_invoker = false;
             config.on_error = [](void* clientd, int errcode, const char* message)
             {
                 std::fprintf(stderr, "NODECLIENTERR node=%lld code=%d %s\n",
