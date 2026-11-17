@@ -73,3 +73,14 @@ media p50 **25.3–25.5 µs**, and a clean session gives **M/K 0.803 / 0.809**
 effect, on the kernel arm, which that session does not pin). The P6
 pre-registration did not pin cores; runs that do are a recorded deviation and
 write their core sets into `RUN-INFO.txt`.
+
+Pin the far side as well when a kernel-arm number is meant to be quoted. A cell
+has six spinning threads — our sender and receiver, the reference's two, the
+echo and the client — and with the four sets below each pair gets its own cores
+on this eight-core machine: `P6_OURS_CPUSET=0-3 P6_PEER_CPUSET=4-5
+P6_ECHO_CPUSET=6 P6_CLIENT_CPUSET=7`. Measured 2026-11-17 over two sessions:
+kernel p50 **30.8–31.6 µs**, media **25.2–25.6 µs**, M/K 0.809 / 0.809 and
+0.820 / 0.818; the same run with the far side free also stayed clean, so the
+36.8 µs session is placement luck rather than a per-session law. Cramming every
+thread onto 0-3 instead gives a 6 ms kernel median — placement decides the arm's
+order of magnitude.

@@ -67,10 +67,27 @@ The two drivers run their agents on `spin`, so our media holds its cores at
 100%. Left to the scheduler it settles on the same cores as the far side
 often enough to move a whole media cell's median by 13 us in about one cell in
 twelve (measured 2026-11-16: 5 of 60 media cells unpinned, 0 of 32 with the
-media pinned to 0-3; the same run's kernel cells were unaffected). `P6_PEER_CPUSET`
-pins the reference driver (and the echo, unless `P6_ECHO_CPUSET` says otherwise)
-and `P6_CLIENT_CPUSET` pins the client probes. Every cell records all four in
-its `RUN-INFO.txt`, so a reading says which cores produced it.
+media pinned to 0-3). `P6_PEER_CPUSET` pins the reference driver (and the echo,
+unless `P6_ECHO_CPUSET` says otherwise) and `P6_CLIENT_CPUSET` pins the client
+probes. Every cell records all four in its `RUN-INFO.txt`, so a reading says
+which cores produced it.
+
+**Pin the far side too, for the kernel arm.** A kernel cell has six spinning
+threads -- our sender and receiver, the reference's sender and receiver, the
+echo and the client -- so on this eight-core machine give each pair its own
+cores:
+
+```bash
+sudo env P6_OURS_CPUSET=0-3 P6_PEER_CPUSET=4-5 P6_ECHO_CPUSET=6 \
+     P6_CLIENT_CPUSET=7 ... bench/dpdk-p6/run-perf.sh
+```
+
+Left free, the far side sometimes lands on the media's cores and one session
+carries a whole kernel arm at 36.8 us against 31.5 (the 2026-11-16 re-run's
+first session; `analysis/cpp/records/t7-stability.md` §7). With the four sets
+above, every kernel cell ran at 30.8-31.6 us and every media cell at
+25.2-25.6 us (2026-11-17, two sessions), and cramming everything onto 0-3
+instead turns the kernel arm's median into 6 ms.
 
 Every cell writes `RUN-INFO.txt` (build type, segments flag, git revision),
 `ours.log`, `peer-before.txt` / `peer-after.txt` (the peer's counters with both
