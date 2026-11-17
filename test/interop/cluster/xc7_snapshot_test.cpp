@@ -610,6 +610,57 @@ TEST_F(Xc7SnapshotTest, shouldTrackSnapshotDuration)
     stop_round();
 }
 
+TEST_F(Xc7SnapshotTest, shouldCatchupFromEmptyLogThenSnapshotAfterShutdownAndFollowerCleanStart)
+{
+    // `ClusterTest.shouldCatchupFromEmptyLogThenSnapshotAfterShutdownAnd
+    // FollowerCleanStart`: a follower clean-starts (its cluster and archive
+    // directories go) and catches up from the leader; after a snapshot and a
+    // shutdown it clean-starts again and still ends with the full history.
+    use_tracking_service();
+    start_cluster(90);
+    ASSERT_TRUE(wait_for_elections_closed(std::chrono::seconds(30))) << "the elections never closed: " << node_dump();
+
+    int leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const int follower = (leader + 1) % node_count_;
+
+    ClusterClientSession session;
+    ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
+    ASSERT_TRUE(send_ints(session, 10, 1, 0)) << node_dump();
+    std::string trace;
+    ASSERT_TRUE(await_tracking(10, trace)) << "the first batch never settled:\n" << trace << node_dump();
+
+    stop_node_gracefully(follower);
+    restart_node(round_, follower, true);
+    ASSERT_TRUE(wait_for_node_active(follower, std::chrono::seconds(60))) << node_dump();
+    trace.clear();
+    ASSERT_TRUE(await_tracking(10, trace)) << "the clean-started follower never caught up:\n" << trace << node_dump();
+
+    ASSERT_TRUE(send_ints(session, 5, 11, 10)) << node_dump();
+    trace.clear();
+    ASSERT_TRUE(await_tracking(15, trace)) << "the second batch never settled:\n" << trace << node_dump();
+    session.close();
+
+    leader = leader_index();
+    ASSERT_GE(leader, 0) << node_dump();
+    const auto snapshots_before = node_counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID);
+    ASSERT_TRUE(take_snapshot(leader, snapshots_before + 1)) << "the snapshot never completed: " << node_dump();
+
+    for (int i = 0; i < node_count_; ++i)
+    {
+        stop_node_gracefully(i);
+    }
+    restart_nodes_together(
+        round_, {{follower, true}, {(follower + 1) % node_count_, false}, {(follower + 2) % node_count_, false}});
+    ASSERT_TRUE(wait_for_cluster()) << "the restarted cluster never elected: " << node_dump();
+
+    trace.clear();
+    ASSERT_TRUE(await_tracking(15, trace)) << "the clean-started follower lost the snapshot or the log:\n"
+                                           << trace << node_dump();
+
+    stop_round();
+}
+
 TEST_F(Xc7SnapshotTest, shouldAddCommittedNextSessionIdToTheConsensusModuleSnapshot)
 {
     // `ClusterTest.shouldAddCommittedNextSessionIdToTheConsensusModuleSnapshot`.
