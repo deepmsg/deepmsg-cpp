@@ -61,11 +61,12 @@
     },
     {
       "name": "asan",
-      "displayName": "asan (gcc)",
+      "displayName": "asan + DPDK (gcc)",
       "inherits": "gcc",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "AXC_SANITIZER": "address"
+        "AXC_SANITIZER": "address",
+        "AXC_WITH_DPDK": "ON"
       }
     },
     {

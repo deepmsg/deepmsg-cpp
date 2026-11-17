@@ -44,9 +44,10 @@ direction):
 scripts/check.sh debug release
 ```
 
-Presets: `debug`, `release`, `asan`, `tsan`, `release-pgo`, plus `-clang`
-variants (`debug-clang`, …). `release-pgo` generates profiles into
-`build/pgo`; `release-pgo-use` consumes them.
+Presets: `debug`, `release`, `dpdk`, `asan`, `tsan`, `release-pgo`, plus
+`-clang` variants (`debug-clang`, …). `release-pgo` generates profiles into
+`build/pgo`; `release-pgo-use` consumes them. `dpdk` and `asan` compile the
+DPDK media in (`libdpdk-dev` required); every other preset builds without it.
 
 ## Layout
 

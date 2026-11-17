@@ -51,6 +51,17 @@ namespace
 
 constexpr const char* PCAP_PATH = "/tmp/axc-dpdk-port-test.pcap";
 
+// The EAL arguments of every virtual-port cell name the IOVA mode.
+//
+// ASan relocates the process's own mappings below its shadow, in the high half
+// of the address space, and EAL's auto-detected IOVA mode then refuses its
+// legacy memory: "couldn't allocate memory due to IOVA exceeding limits of
+// current DMA mask" (2026-11-17, the first ASan run of the media). These cells
+// use `net_pcap`, where EAL selects VA anyway; naming it keeps the fixture
+// about the media rather than about the address space it lands in. Every
+// `--no-huge ... --vdev=` string below carries `--iova-mode=va` for that
+// reason.
+
 }  // namespace
 
 TEST(DpdkPortChild, TheEalOpensAVirtualPortAndSendsAFrame)
@@ -61,8 +72,9 @@ TEST(DpdkPortChild, TheEalOpensAVirtualPortAndSendsAFrame)
     }
 
     (void)std::remove(PCAP_PATH);
-    const std::vector<std::string> args{"/proc/self/exe", "--no-huge", "--no-shconf", "--no-telemetry",
-                                        std::string{"--vdev=net_pcap0,tx_pcap="} + PCAP_PATH};
+    const std::vector<std::string> args{"/proc/self/exe", "--no-huge",
+                                        "--no-shconf",    "--no-telemetry",
+                                        "--iova-mode=va", std::string{"--vdev=net_pcap0,tx_pcap="} + PCAP_PATH};
 
     auto eal = axc::core::media::dpdk::Eal::init(args);
     ASSERT_TRUE(eal.has_value()) << eal.error().message.view();
@@ -192,8 +204,8 @@ TEST(DpdkMediaChild, TheStackReceivesAndSendsOnAPcapPort)
 
     axc::core::media::dpdk::Settings settings;
     settings.enabled = true;
-    settings.eal_args = std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,rx_pcap="} + MEDIA_RX_PATH +
-                        ",tx_pcap=" + MEDIA_TX_PATH;
+    settings.eal_args = std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,rx_pcap="} +
+                        MEDIA_RX_PATH + ",tx_pcap=" + MEDIA_TX_PATH;
     settings.port = std::string{"net_pcap0"};
     settings.ipv4_address = axc::core::media::dpdk::Ipv4Prefix{0x0a0a0001, 24};
     settings.static_neighbours = "10.10.0.2=02:00:00:00:00:02";
@@ -308,8 +320,9 @@ TEST(DpdkCountersChild, TheDpdkCountersAreInTheCnc)
 
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
-    properties.set("deepmsg.dpdk.eal.args",
-                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-counters.pcap");
+    properties.set(
+        "deepmsg.dpdk.eal.args",
+        "--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-counters.pcap");
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
     properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
@@ -407,7 +420,7 @@ TEST(DpdkMediaChild, TheMediaSaysWhichPortItOpened)
 
     axc::core::media::dpdk::Settings settings;
     settings.enabled = true;
-    settings.eal_args = std::string{"--no-huge --no-shconf --vdev=net_pcap0,tx_pcap="} + MEDIA_LINE_PCAP;
+    settings.eal_args = std::string{"--no-huge --no-shconf --iova-mode=va --vdev=net_pcap0,tx_pcap="} + MEDIA_LINE_PCAP;
     settings.port = std::string{"net_pcap0"};
     settings.ipv4_address = axc::core::media::dpdk::Ipv4Prefix{0x0a0a0001, 24};
     settings.rx_descriptors = 256;
@@ -517,7 +530,8 @@ TEST(DpdkOversizeChild, ThePortRefusesADatagramItCannotFrame)
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
     properties.set("deepmsg.dpdk.eal.args",
-                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + OVERSIZE_PCAP_PATH);
+                   std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap="} +
+                       OVERSIZE_PCAP_PATH);
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
 
@@ -734,7 +748,8 @@ TEST(DpdkSharedChild, TheSharedDriverCarriesAFrameThroughTheMedia)
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
     properties.set("deepmsg.dpdk.eal.args",
-                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + SHARED_PCAP_PATH);
+                   std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap="} +
+                       SHARED_PCAP_PATH);
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
     properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
@@ -793,7 +808,8 @@ TEST(DpdkInvokerRefusedChild, TheDriverStartRefusesInvokerWithoutAManualLoop)
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
     properties.set("deepmsg.dpdk.eal.args",
-                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + INVOKER_PCAP_PATH);
+                   std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap="} +
+                       INVOKER_PCAP_PATH);
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
 
@@ -844,7 +860,8 @@ TEST(DpdkInvokerChild, TheCallerThreadRunsTheDriver)
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
     properties.set("deepmsg.dpdk.eal.args",
-                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + INVOKER_PCAP_PATH);
+                   std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap="} +
+                       INVOKER_PCAP_PATH);
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
     properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
@@ -919,8 +936,9 @@ TEST(DpdkIdleWarningChild, ASleepingReceiverIsAWarning)
 
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
-    properties.set("deepmsg.dpdk.eal.args",
-                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-warning.pcap");
+    properties.set(
+        "deepmsg.dpdk.eal.args",
+        "--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-warning.pcap");
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
 
@@ -982,8 +1000,9 @@ TEST(DpdkIdleQuietChild, ABusySpinIdleStrategyIsQuiet)
 
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
-    properties.set("deepmsg.dpdk.eal.args",
-                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-quiet.pcap");
+    properties.set(
+        "deepmsg.dpdk.eal.args",
+        "--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-quiet.pcap");
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
 
@@ -1054,8 +1073,9 @@ TEST(DpdkIdleQuietSharedChild, ASharedDriverOnlyReadsTheSharedStrategy)
 
     axc::core::PropertySource properties;
     properties.set("deepmsg.dpdk.enabled", "true");
-    properties.set("deepmsg.dpdk.eal.args",
-                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-shared.pcap");
+    properties.set(
+        "deepmsg.dpdk.eal.args",
+        "--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-shared.pcap");
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
 
@@ -1128,8 +1148,9 @@ TEST(DpdkAliasChild, TheReferenceMediaNameIsTheAlias)
 
     axc::core::PropertySource properties;
     properties.set("aeron.udp.channel.transport.bindings.media", "dpdk");
-    properties.set("deepmsg.dpdk.eal.args",
-                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + ALIAS_PCAP_PATH);
+    properties.set(
+        "deepmsg.dpdk.eal.args",
+        std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap="} + ALIAS_PCAP_PATH);
     properties.set("deepmsg.dpdk.port", "net_pcap0");
     properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
 
@@ -1216,7 +1237,8 @@ constexpr const char* LAUNCHER_PCAP_PATH = "/tmp/axc-dpdk-launcher.pcap";
     }
 
     const std::string eal_args =
-        std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + LAUNCHER_PCAP_PATH;
+        std::string{"--no-huge --no-shconf --no-telemetry --iova-mode=va --vdev=net_pcap0,tx_pcap="} +
+        LAUNCHER_PCAP_PATH;
     const pid_t child = ::fork();
     if (0 > child)
     {
