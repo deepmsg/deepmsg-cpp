@@ -54,8 +54,19 @@ sudo env AXC_BUILD_DIR=$PWD/$build \
 ```
 
 Knobs: `P6_COUNT` (messages per cell, 20,000), `P6_WARMUP` (2,000),
-`P6_SESSIONS`, `P6_IDLE_STRATEGY`, `AXC_DPDK_BENCH_PCI` / `_LOCAL` / `_PEER`
-(topology overrides).
+`P6_SESSIONS`, `P6_RATE` (messages per second; 0 is the strict ping-pong),
+`P6_IDLE_STRATEGY`, `AXC_DPDK_BENCH_PCI` / `_LOCAL` / `_PEER` (topology
+overrides).
+
+`P6_RATE` paces the client: it keeps up to 1,024 messages in flight and offers
+one every 1/rate seconds, recording each message's own round trip. Below
+1/round-trip the link idles between messages — where the 10GBASE-T PHY's
+low-power state shows up as a higher median — and above it a queue forms and
+the round trip includes the queue. One unpaced handshake message starts the
+clock, because the rig triggers the echo a second after the client starts. A
+cell fails if the pace it achieved is below 90% of the one it asked for; the
+requested and achieved rates are printed and the requested one is written into
+each cell's `RUN-INFO.txt`.
 
 **Pin the media's cores for any reading you mean to quote**:
 

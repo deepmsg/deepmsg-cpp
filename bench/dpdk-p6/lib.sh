@@ -76,6 +76,7 @@ p6_build_info()
         echo "peer_cpuset=${P6_PEER_CPUSET:-}"
         echo "echo_cpuset=${P6_ECHO_CPUSET:-}"
         echo "client_cpuset=${P6_CLIENT_CPUSET:-}"
+        echo "rate=${P6_RATE:-0}"
         echo "media_sha256=$(sha256sum "$p6_build/apps/deepmsg-media-driver/deepmsg-media-driver" 2>/dev/null | cut -d' ' -f1)"
         echo "aeronmd_sha256=$(sha256sum "$p6_build/aeron/binaries/aeronmd" 2>/dev/null | cut -d' ' -f1)"
         grep -h '^CXX_FLAGS' "$p6_build/apps/deepmsg-media-driver/CMakeFiles/deepmsg-media-driver.dir/flags.make" 2>/dev/null |
