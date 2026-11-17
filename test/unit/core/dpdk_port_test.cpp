@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -459,6 +460,12 @@ TEST(DpdkMedia, TheMediaLineIsOnStdout)
 
     EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0 (net_pcap), address 10.10.0.1/24, mtu "))
         << output;
+    // This child opens with the default mode (DEDICATED) on a device that
+    // reports one transmit queue: the line says so, and the DEDICATED sender
+    // and receiver agents sharing that queue earns the warning rather than
+    // silence.
+    EXPECT_NE(std::string::npos, output.find("queues 1 rx 1 tx")) << output;
+    EXPECT_NE(std::string::npos, output.find("dpdk media warning: this port offers one transmit queue")) << output;
     EXPECT_NE(std::string::npos, output.find("dpdk media closed")) << output;
     (void)std::remove(MEDIA_LINE_PATH);
 }
@@ -624,6 +631,261 @@ TEST(DpdkOversize, TheChildProcess)
 namespace
 {
 
+constexpr const char* SHARED_PCAP_PATH = "/tmp/axc-dpdk-shared.pcap";
+constexpr const char* INVOKER_PCAP_PATH = "/tmp/axc-dpdk-invoker.pcap";
+constexpr const char* THREADING_CHANNEL = "aeron:udp?endpoint=10.10.0.2:24620";
+
+/// With a manual main loop the calling thread is one of the driver's agents,
+/// so it must run, not wait (`aeronmd.c:165-168`).
+void drive(aeron_driver_t* driven_driver)
+{
+    if (nullptr != driven_driver)
+    {
+        aeron_driver_main_idle_strategy(driven_driver, aeron_driver_main_do_work(driven_driver));
+    }
+}
+
+/// A publication through the driver in `directory`, one datagram offered at
+/// the peer `10.10.0.2` -- a peer and not the media's own address, because the
+/// stack loops a self-addressed frame inside itself and only a peer's frame
+/// must leave the port. `driven_driver` is set when the driver's agents run on
+/// this thread (INVOKER); the other modes run them on their own threads and
+/// pass null. Answers whether the publication was created.
+[[nodiscard]] bool open_a_publication(const char* directory, aeron_driver_t* driven_driver)
+{
+    aeron_context_t* context = nullptr;
+    aeron_t* client = nullptr;
+    if (0 != aeron_context_init(&context))
+    {
+        return false;
+    }
+    (void)aeron_context_set_dir(context, directory);
+    (void)aeron_context_set_use_conductor_agent_invoker(context, true);
+    if (0 != aeron_init(&client, context))
+    {
+        (void)aeron_context_close(context);
+        return false;
+    }
+
+    aeron_async_add_publication_t* pub_add = nullptr;
+    const bool asked = 0 == aeron_async_add_publication(&pub_add, client, THREADING_CHANNEL, 1001);
+    aeron_publication_t* publication = nullptr;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (asked && std::chrono::steady_clock::now() < deadline && nullptr == publication)
+    {
+        drive(driven_driver);
+        (void)aeron_main_do_work(client);
+        (void)aeron_async_add_publication_poll(&publication, pub_add);
+        if (nullptr != publication)
+        {
+            const std::array<std::uint8_t, 16> payload{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+            // The offer is attempted, not required: with no receiver the
+            // publication's limit stays at its initial position and the sender
+            // still announces itself with a setup frame, which is the frame
+            // this case reads off the port.
+            (void)aeron_publication_offer(publication, payload.data(), payload.size(), nullptr, nullptr);
+        }
+        ::usleep(1000);
+    }
+
+    // Give the sending agent the passes it needs to take the offer.
+    for (int pass = 0; pass < 100; ++pass)
+    {
+        drive(driven_driver);
+        (void)aeron_main_do_work(client);
+        ::usleep(1000);
+    }
+
+    if (nullptr != publication)
+    {
+        (void)aeron_publication_close(publication, nullptr, nullptr);
+    }
+    (void)aeron_close(client);
+    (void)aeron_context_close(context);
+    return nullptr != publication;
+}
+
+[[nodiscard]] long long pcap_size(const char* path)
+{
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    return error ? -1 : static_cast<long long>(size);
+}
+
+}  // namespace
+
+// SHARED runs the sender and the receiver agents on one thread
+// (`aeron_driver_shared_do_work`, `aeron_driver.c:753-761`). The media used to
+// refuse every mode but DEDICATED; here it must accept the driver and carry a
+// frame from that one thread, which is the port's single transmit queue.
+TEST(DpdkSharedChild, TheSharedDriverCarriesAFrameThroughTheMedia)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)std::remove(SHARED_PCAP_PATH);
+    char directory[] = "/tmp/axc-dpdk-shared-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)::aeron_properties_setenv("aeron.threading.mode", "SHARED");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + SHARED_PCAP_PATH);
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+    properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+
+    EXPECT_TRUE(open_a_publication(directory, nullptr)) << "the client never got a publication";
+    EXPECT_TRUE(driver->close().has_value());
+
+    EXPECT_GT(pcap_size(SHARED_PCAP_PATH), 24) << "no frame left through the shared thread's transmit queue";
+    std::filesystem::remove_all(directory);
+    (void)std::remove(SHARED_PCAP_PATH);
+}
+
+TEST(DpdkShared, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe",
+                "--gtest_filter=DpdkSharedChild.TheSharedDriverCarriesAFrameThroughTheMedia", "--gtest_color=no",
+                static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
+// INVOKER is the mode that cannot start its agents on a thread of its own: the
+// reference's driver start refuses it unless the caller runs the loop
+// (`aeron_driver.c:1380-1386`). Both halves are the criterion: the refusal when
+// the caller does not run it, and frames carried when it does. They are two
+// child processes because the EAL is initialised once per process.
+TEST(DpdkInvokerRefusedChild, TheDriverStartRefusesInvokerWithoutAManualLoop)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    char directory[] = "/tmp/axc-dpdk-invoker-refused-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)::aeron_properties_setenv("aeron.threading.mode", "INVOKER");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + INVOKER_PCAP_PATH);
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    auto refused = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_FALSE(refused.has_value()) << "INVOKER started a runner of its own";
+    EXPECT_NE(std::string::npos, std::string{refused.error().message.view()}.find("manual_main_loop"))
+        << refused.error().message.view();
+    std::filesystem::remove_all(directory);
+    (void)std::remove(INVOKER_PCAP_PATH);
+}
+
+TEST(DpdkInvokerRefused, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe",
+                "--gtest_filter=DpdkInvokerRefusedChild.TheDriverStartRefusesInvokerWithoutAManualLoop",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
+TEST(DpdkInvokerChild, TheCallerThreadRunsTheDriver)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)std::remove(INVOKER_PCAP_PATH);
+    char directory[] = "/tmp/axc-dpdk-invoker-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)::aeron_properties_setenv("aeron.threading.mode", "INVOKER");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + INVOKER_PCAP_PATH);
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+    properties.set("deepmsg.dpdk.static.neighbours", "10.10.0.2=02:00:00:00:00:02");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr,
+                                                            axc::core::driver::StartMode::caller_thread);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+
+    EXPECT_TRUE(open_a_publication(directory, driver->driver())) << "the client never got a publication";
+    EXPECT_TRUE(driver->close().has_value());
+
+    EXPECT_GT(pcap_size(INVOKER_PCAP_PATH), 24) << "no frame left while the caller ran the driver";
+    std::filesystem::remove_all(directory);
+    (void)std::remove(INVOKER_PCAP_PATH);
+}
+
+TEST(DpdkInvoker, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe", "--gtest_filter=DpdkInvokerChild.TheCallerThreadRunsTheDriver",
+                "--gtest_color=no", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
+namespace
+{
+
 constexpr const char* IDLE_WARNING_PATH = "/tmp/axc-dpdk-idle-warning.txt";
 constexpr const char* IDLE_QUIET_PATH = "/tmp/axc-dpdk-idle-quiet.txt";
 
@@ -702,7 +964,9 @@ TEST(DpdkIdleWarning, TheChildProcess)
     (void)std::remove(IDLE_WARNING_PATH);
 }
 
-// A busy spin keeps the ring drained and earns no line.
+// A busy spin keeps the ring drained and earns no idle line. (This child is
+// DEDICATED on a vdev that offers one transmit queue, so the queue-sharing
+// warning is the other, expected line -- see `DpdkMedia.TheMediaLineIsOnStdout`.)
 TEST(DpdkIdleQuietChild, ABusySpinIdleStrategyIsQuiet)
 {
     if (nullptr == std::getenv("AXC_DPDK_CHILD"))
@@ -759,8 +1023,81 @@ TEST(DpdkIdleQuiet, TheChildProcess)
 
     const std::string output = read_all(IDLE_QUIET_PATH);
     EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0")) << output;
-    EXPECT_EQ(std::string::npos, output.find("dpdk media warning:")) << output;
+    EXPECT_EQ(std::string::npos, output.find("idle strategy is not a busy spin")) << output;
     (void)std::remove(IDLE_QUIET_PATH);
+}
+
+namespace
+{
+
+constexpr const char* IDLE_SHARED_PATH = "/tmp/axc-dpdk-idle-shared.txt";
+
+}  // namespace
+
+// In SHARED one runner is both the sender and the receiver
+// (`aeron_driver_shared_do_work`), so the strategy that can leave frames in the
+// ring is that runner's; a sleeping *receiver* strategy is never consulted
+// there. A warning about it would name an agent the mode does not have.
+TEST(DpdkIdleQuietSharedChild, ASharedDriverOnlyReadsTheSharedStrategy)
+{
+    if (nullptr == std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "runs in a child process";
+    }
+
+    (void)::setenv("AERON_RECEIVER_IDLE_STRATEGY", "sleeping", 1);
+    (void)::setenv("AERON_SHARED_IDLE_STRATEGY", "spin", 1);
+    char directory[] = "/tmp/axc-dpdk-idle-shared-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(directory));
+    (void)::aeron_properties_setenv("aeron.dir", directory);
+    (void)::aeron_properties_setenv("aeron.threading.mode", "SHARED");
+
+    axc::core::PropertySource properties;
+    properties.set("deepmsg.dpdk.enabled", "true");
+    properties.set("deepmsg.dpdk.eal.args",
+                   "--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap=/tmp/axc-dpdk-idle-shared.pcap");
+    properties.set("deepmsg.dpdk.port", "net_pcap0");
+    properties.set("deepmsg.dpdk.ipv4.address", "10.10.0.1/24");
+
+    auto driver = axc::core::driver::EmbeddedDriver::create(properties, nullptr, nullptr);
+    ASSERT_TRUE(driver.has_value()) << driver.error().message.view();
+    EXPECT_TRUE(driver->close().has_value());
+    std::filesystem::remove_all(directory);
+    (void)std::remove("/tmp/axc-dpdk-idle-shared.pcap");
+}
+
+TEST(DpdkIdleQuietShared, TheChildProcess)
+{
+    if (nullptr != std::getenv("AXC_DPDK_CHILD"))
+    {
+        GTEST_SKIP() << "we are the child";
+    }
+
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (0 == child)
+    {
+        const int output = ::open(IDLE_SHARED_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (0 > output || 0 > ::dup2(output, STDOUT_FILENO))
+        {
+            ::_exit(127);
+        }
+        (void)::close(output);
+        (void)::setenv("AXC_DPDK_CHILD", "1", 1);
+        ::execl("/proc/self/exe", "/proc/self/exe",
+                "--gtest_filter=DpdkIdleQuietSharedChild.ASharedDriverOnlyReadsTheSharedStrategy", "--gtest_color=no",
+                static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(child, ::waitpid(child, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(0, WEXITSTATUS(status)) << "the child failed; what it wrote is in " << IDLE_SHARED_PATH;
+
+    const std::string output = read_all(IDLE_SHARED_PATH);
+    EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0")) << output;
+    EXPECT_EQ(std::string::npos, output.find("dpdk media warning:")) << output;
+    (void)std::remove(IDLE_SHARED_PATH);
 }
 
 namespace
@@ -839,6 +1176,141 @@ TEST(DpdkAlias, TheChildProcess)
     EXPECT_NE(std::string::npos, output.find("dpdk media on net_pcap0 (net_pcap), address 10.10.0.1/24, mtu "))
         << output;
     (void)std::remove(ALIAS_LINE_PATH);
+}
+
+#ifndef AXC_MEDIA_DRIVER_BIN
+#define AXC_MEDIA_DRIVER_BIN ""
+#endif
+
+namespace
+{
+
+constexpr const char* LAUNCHER_OUTPUT_PATH = "/tmp/axc-dpdk-launcher.txt";
+constexpr const char* LAUNCHER_PCAP_PATH = "/tmp/axc-dpdk-launcher.pcap";
+
+/// Runs the built `deepmsg-media-driver` in `mode` and answers whether it
+/// opened the media **and** was still running afterwards, exiting 0 on
+/// SIGTERM. A launcher that refuses the mode fails the first half; one that
+/// starts INVOKER without a caller-driven loop prints the media line while
+/// installing and then dies at `aeron_driver_start` with the reference's
+/// `manual_main_loop` error, which only the second half catches.
+///
+/// `carry_a_frame` adds the half a still-running process cannot prove: a client
+/// in this process gets a publication through the child's driver and the
+/// child's sender must put a frame on its port. A launcher that selects the
+/// caller-thread start but never runs the loop passes "still running" and
+/// fails this -- the driver's conductor and sender would never work.
+[[nodiscard]] bool the_launcher_runs(const char* mode, bool carry_a_frame)
+{
+    const std::string binary = AXC_MEDIA_DRIVER_BIN;
+    if (binary.empty() || !std::filesystem::exists(binary))
+    {
+        return false;
+    }
+    (void)std::remove(LAUNCHER_OUTPUT_PATH);
+    (void)std::remove(LAUNCHER_PCAP_PATH);
+    char directory[] = "/tmp/axc-dpdk-launcher-XXXXXX";
+    if (nullptr == ::mkdtemp(directory))
+    {
+        return false;
+    }
+
+    const std::string eal_args =
+        std::string{"--no-huge --no-shconf --no-telemetry --vdev=net_pcap0,tx_pcap="} + LAUNCHER_PCAP_PATH;
+    const pid_t child = ::fork();
+    if (0 > child)
+    {
+        return false;
+    }
+    if (0 == child)
+    {
+        const int output = ::open(LAUNCHER_OUTPUT_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (0 > output || 0 > ::dup2(output, STDOUT_FILENO) || 0 > ::dup2(output, STDERR_FILENO))
+        {
+            ::_exit(127);
+        }
+        (void)::close(output);
+        (void)::setenv("AERON_DIR", directory, 1);
+        (void)::setenv("AERON_THREADING_MODE", mode, 1);
+        (void)::setenv("DEEPMSG_DPDK_ENABLED", "true", 1);
+        (void)::setenv("DEEPMSG_DPDK_EAL_ARGS", eal_args.c_str(), 1);
+        (void)::setenv("DEEPMSG_DPDK_PORT", "net_pcap0", 1);
+        (void)::setenv("DEEPMSG_DPDK_IPV4_ADDRESS", "10.10.0.1/24", 1);
+        ::execl(binary.c_str(), binary.c_str(), static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+
+    bool opened = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (std::string::npos != read_all(LAUNCHER_OUTPUT_PATH).find("dpdk media on net_pcap0"))
+        {
+            opened = true;
+            break;
+        }
+        if (child == ::waitpid(child, nullptr, WNOHANG))
+        {
+            break;  // it exited before the media was open
+        }
+        ::usleep(10000);
+    }
+    bool running = false;
+    bool carried = !carry_a_frame;
+    if (opened)
+    {
+        if (carry_a_frame)
+        {
+            // The media line is printed while the context is installed; the
+            // driver's CnC file appears just after it.
+            ::usleep(300000);
+            carried = open_a_publication(directory, nullptr);
+            ::usleep(200000);
+        }
+        else
+        {
+            ::usleep(200000);
+        }
+        running = 0 == ::waitpid(child, nullptr, WNOHANG);
+    }
+    (void)::kill(child, SIGTERM);
+    int status = 0;
+    (void)::waitpid(child, &status, 0);
+    const bool frames_on_the_port = !carry_a_frame || pcap_size(LAUNCHER_PCAP_PATH) > 24;
+    std::filesystem::remove_all(directory);
+    (void)std::remove(LAUNCHER_OUTPUT_PATH);
+    (void)std::remove(LAUNCHER_PCAP_PATH);
+    return opened && running && carried && frames_on_the_port && WIFEXITED(status) && 0 == WEXITSTATUS(status);
+}
+
+void skip_without_the_launcher()
+{
+    if (!std::filesystem::exists(AXC_MEDIA_DRIVER_BIN))
+    {
+        GTEST_SKIP() << "the deepmsg-media-driver binary is not in this build";
+    }
+}
+
+}  // namespace
+
+// The binary the T6 rig substitutes for `aeronmd` (`bench/dpdk-t6/
+// aeronmd-wrapper.sh`): every mode the reference accepts must start here too.
+TEST(DpdkLauncher, TheSharedModeStartsAndStaysUp)
+{
+    skip_without_the_launcher();
+    EXPECT_TRUE(the_launcher_runs("SHARED", false)) << "the launcher does not run a SHARED driver";
+}
+
+TEST(DpdkLauncher, TheSharedNetworkModeStartsAndStaysUp)
+{
+    skip_without_the_launcher();
+    EXPECT_TRUE(the_launcher_runs("SHARED_NETWORK", false)) << "the launcher does not run a SHARED_NETWORK driver";
+}
+
+TEST(DpdkLauncher, TheInvokerModeRunsInTheCallerThread)
+{
+    skip_without_the_launcher();
+    EXPECT_TRUE(the_launcher_runs("INVOKER", true)) << "the launcher does not drive an INVOKER driver";
 }
 
 #endif  // AXC_WITH_DPDK

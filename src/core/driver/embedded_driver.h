@@ -19,6 +19,20 @@ namespace axc::core::driver
 /// `aeron_driver_termination_hook_func_t`: the driver asks the process to stop.
 using TerminationHook = void (*)(void* state);
 
+/// Where `aeron_driver_start` puts the first agent runner.
+enum class StartMode
+{
+    /// `aeron_driver_start(driver, false)`: the runner starts on a thread of
+    /// its own. Legal for DEDICATED, SHARED and SHARED_NETWORK.
+    own_threads,
+    /// `aeron_driver_start(driver, true)`: the runner runs in the calling
+    /// thread, and the caller drives it with `aeron_driver_main_do_work` and
+    /// `aeron_driver_main_idle_strategy` (`aeronmd.c:153-168`). INVOKER
+    /// requires this -- `aeron_driver_start` refuses it otherwise
+    /// (`aeron_driver.c:1380-1386`).
+    caller_thread,
+};
+
 class EmbeddedDriver
 {
 public:
@@ -27,7 +41,8 @@ public:
     /// driver directory is not created (the C driver creates it in
     /// `aeron_driver_init`, `aeron_driver.c:917`).
     [[nodiscard]] static std::expected<EmbeddedDriver, Error> create(const PropertySource& properties,
-                                                                     TerminationHook hook, void* state) noexcept;
+                                                                     TerminationHook hook, void* state,
+                                                                     StartMode start = StartMode::own_threads) noexcept;
 
     ~EmbeddedDriver();
 

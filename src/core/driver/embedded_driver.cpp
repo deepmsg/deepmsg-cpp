@@ -23,7 +23,7 @@ namespace
 }  // namespace
 
 std::expected<EmbeddedDriver, Error> EmbeddedDriver::create(const PropertySource& properties, TerminationHook hook,
-                                                            void* state) noexcept
+                                                            void* state, StartMode start) noexcept
 {
     // The reference's media-selection name must be answered before the context
     // exists: `aeron_driver_context_init` resolves it and knows only `default`
@@ -60,7 +60,7 @@ std::expected<EmbeddedDriver, Error> EmbeddedDriver::create(const PropertySource
         return std::unexpected(driver_error("driver init"));
     }
 
-    if (0 != aeron_driver_start(driver, false))
+    if (0 != aeron_driver_start(driver, StartMode::caller_thread == start))
     {
         (void)aeron_driver_close(driver);
         std::ignore = media->close();

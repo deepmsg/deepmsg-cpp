@@ -85,12 +85,14 @@ int main(int argc, char** argv)
         fail(std::string{loaded.error().message.view()});
     }
 
-    // The driver runs DEDICATED agents on its own threads; the other modes need
-    // a caller-driven main loop, which this launcher does not implement yet.
-    if (auto mode = properties->get("aeron.threading.mode"); mode && *mode != "DEDICATED")
-    {
-        fail("only aeron.threading.mode=DEDICATED is supported by this binary");
-    }
+    // All four of the reference's threading modes are served. INVOKER is the
+    // one that cannot start a runner of its own: the driver refuses it unless
+    // the caller runs the first agent (`aeron_driver.c:1380-1386`), and the
+    // reference's own launcher answers by running the main loop itself
+    // (`aeronmd.c:153-168`). The other three start that runner on a thread and
+    // this loop only waits, which is how this binary has always run them.
+    const std::string_view threading_mode = properties->get("aeron.threading.mode").value_or("DEDICATED");
+    const bool invoker = "INVOKER" == threading_mode;
 
     // The reference's own namespace goes back into the environment the C driver
     // reads (`aeron_driver_context_init`); `deepmsg.*` stays ours.
@@ -107,7 +109,9 @@ int main(int argc, char** argv)
     std::signal(SIGINT, &on_signal);
     std::signal(SIGTERM, &on_signal);
 
-    auto driver = axc::core::driver::EmbeddedDriver::create(*properties, &on_termination, nullptr);
+    auto driver = axc::core::driver::EmbeddedDriver::create(
+        *properties, &on_termination, nullptr,
+        invoker ? axc::core::driver::StartMode::caller_thread : axc::core::driver::StartMode::own_threads);
     if (!driver)
     {
         fail(std::string{driver.error().message.view()});
@@ -115,7 +119,16 @@ int main(int argc, char** argv)
 
     while (0 != g_running)
     {
-        ::usleep(10000);
+        if (invoker)
+        {
+            // `aeronmd.c:165-168`: with a manual main loop the calling thread
+            // *is* the driver's first agent, so it must not sleep.
+            aeron_driver_main_idle_strategy(driver->driver(), aeron_driver_main_do_work(driver->driver()));
+        }
+        else
+        {
+            ::usleep(10000);
+        }
     }
 
     if (auto closed = driver->close(); !closed)

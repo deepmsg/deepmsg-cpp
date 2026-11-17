@@ -94,6 +94,22 @@ TEST(DpdkMediaConfig, ParsesEverySetting)
     EXPECT_EQ(500u, settings->arp_retry_ms);
 }
 
+// The transmit-queue layout follows the thread that runs the sending agents,
+// not a setting: DEDICATED has the sender and the receiver agents on two
+// threads and must not let them share a DPDK queue (the 2026-11-16 lost
+// frame); the other three modes run both agents on one thread and ask for one
+// queue. A device that offers fewer wins.
+TEST(DpdkMediaConfig, TheThreadingModeDecidesTheTransmitQueues)
+{
+    using axc::core::media::dpdk::transmit_queues_for;
+
+    EXPECT_EQ(2, transmit_queues_for(AERON_THREADING_MODE_DEDICATED, 8));
+    EXPECT_EQ(1, transmit_queues_for(AERON_THREADING_MODE_DEDICATED, 1));
+    EXPECT_EQ(1, transmit_queues_for(AERON_THREADING_MODE_SHARED, 8));
+    EXPECT_EQ(1, transmit_queues_for(AERON_THREADING_MODE_SHARED_NETWORK, 8));
+    EXPECT_EQ(1, transmit_queues_for(AERON_THREADING_MODE_INVOKER, 8));
+}
+
 TEST(DpdkMediaConfig, UnknownNameIsRefused)
 {
     PropertySource properties;
