@@ -6,18 +6,23 @@ do on the reference `aeronmd`? Per-case diff, no tolerance except a generated
 known-red list in which every row carries a mechanism.
 
 ```
-arm kernel            -Daeron.test.system.aeronmd.path=<reference aeronmd>, untouched
-arm kernel-dedicated  → kernel-wrapper.sh: reference aeronmd, AERON_THREADING_MODE=DEDICATED forced
-arm media             → aeronmd-wrapper.sh: deepmsg-media-driver on a net_pcap vdev,
-                      10.10.0.1/24, media on, AERON_THREADING_MODE=DEDICATED forced
+arm kernel   -Daeron.test.system.aeronmd.path=<reference aeronmd>, untouched
+arm media    → aeronmd-wrapper.sh: deepmsg-media-driver on a net_pcap vdev,
+               10.10.0.1/24, media on, the harness's AERON_THREADING_MODE passed through
 ```
 
-**The claim is `kernel-dedicated` vs `media`.** The reference harness asks for
-`SHARED` in most classes (`PubAndSubTest` starts 30 drivers, all SHARED) and our
-launcher runs DEDICATED only, so both experimental arms force DEDICATED; the
-`kernel-dedicated` arm is the control that measures what the forcing alone
-changes (reported separately, `diff-control/`). Without it, the diff would
-conflate "the media is on" with "the driver threads differently".
+**The claim is `kernel` vs `media`.** Both arms run the threading mode the
+suite asks for (`SHARED` in most classes; `PubAndSubTest` starts 30 drivers,
+all SHARED) — the media driver serves every mode the reference does. Nothing is
+forced, so the per-case diff is "the media is on", not "the driver threads
+differently".
+
+This rig used to have a third arm, `kernel-dedicated`: the reference driver
+with `DEDICATED` forced, because the media driver refused every other mode. It
+measured what that forcing alone changed, and the claim was
+`kernel-dedicated` vs `media`. With the forcing gone the control has nothing to
+control, so it is gone too; B2 now fails if every media-arm driver ran
+`DEDICATED`, which is exactly what that wrapper would have produced.
 
 ## Why a vdev and not the card
 
@@ -37,7 +42,7 @@ conflate "the media is on" with "the driver threads differently".
 # once: the reference system tests' Gradle dependencies (Maven Central)
 ( cd third_party/aeron && ./gradlew :aeron-system-tests:compileTestJava )
 
-bench/dpdk-t6/run-t6.sh --arm all                   # kernel + control + media, ~2 h
+bench/dpdk-t6/run-t6.sh --arm all                   # kernel + media, ~1.5-2 h
 bench/dpdk-t6/run-t6.sh --arm media --area cluster  # one area
 bench/dpdk-t6/run-t6.sh --arm all --resume          # continue a killed run
 bench/dpdk-t6/run-t6.sh --part a                    # debug vs dpdk ctest, per test
@@ -62,11 +67,12 @@ driver the harness started), `media/driver-checks.txt`, and `diff/deltas.tsv`.
   whole untagged suite.)
 - **B2** every driver opened the media: one log per start, each with
   `dpdk media on net_pcap0`; a driver that fell back to the kernel says nothing.
+  The wrapper's `wrapper: AERON_THREADING_MODE=<value>` line is the reading of
+  which modes the suite asked for, and the arm fails if every driver ran
+  `DEDICATED` (a wrapper that forces a mode).
 - **B3** the media carried nothing: every pcap is exactly 24 bytes.
-- **B4** per-case diff: `kernel-dedicated` vs `media` must have no deltas (each
-  surviving row is adjudicated into the record's known-red list with a
-  mechanism); `kernel` vs `kernel-dedicated` is the control and is reported,
-  not failed.
+- **B4** per-case diff: `kernel` vs `media` must have no deltas (each surviving
+  row is adjudicated into the record's known-red list with a mechanism).
 - **B6** a delta is re-run once before it is called structural.
 
 ## Pitfalls that have bitten
@@ -77,6 +83,6 @@ driver the harness started), `media/driver-checks.txt`, and `diff/deltas.tsv`.
   deletes an existing aeron directory on start and the open log is unlinked.
 - A killed class leaves `/dev/shm/aeron-*` behind and the next driver refuses
   the name; the rig removes it before every class.
-- `AERON_THREADING_MODE=SHARED` classes are red on our driver by construction
-  (`deepmsg-media-driver` runs DEDICATED only). That is the expected known-red
-  mechanism; fixing it is a separate card.
+- The media driver's modes are the reference's four, but a driver *process*
+  cannot start `INVOKER` without a caller-driven loop; the launcher runs one
+  (`aeronmd`'s shape), so the arm does not refuse it.
