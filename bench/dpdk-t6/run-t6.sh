@@ -4,6 +4,7 @@
 #
 #   bench/dpdk-t6/run-t6.sh --arm kernel|media|all [--area root|archive|cluster|driver|security|test]
 #                           [--classes a,b] [--resume]
+#   bench/dpdk-t6/run-t6.sh --set slow [--include-topology]
 #   bench/dpdk-t6/run-t6.sh --part a          # debug vs dpdk ctest, per test
 #
 # Two arms, one variable: the kernel arm is the reference `aeronmd` untouched
@@ -32,12 +33,14 @@ t6_media=${AXC_T6_DRIVER:-$t6_build/apps/deepmsg-media-driver/deepmsg-media-driv
 t6_kernel=${AXC_T6_KERNEL_DRIVER:-$t6_repo/build/debug/aeron/binaries/aeronmd}
 t6_wrapper=${AXC_T6_WRAPPER:-$t6_repo/bench/dpdk-t6/aeronmd-wrapper.sh}
 t6_compare=$t6_repo/bench/dpdk-t6/compare.py
-t6_class_timeout=${AXC_T6_CLASS_TIMEOUT:-300}
+t6_class_timeout=${AXC_T6_CLASS_TIMEOUT:-}
 t6_gradle_args=${AXC_T6_GRADLE_ARGS:---offline}
 t6_work=${AXC_T6_WORK:-}
 t6_arms=()
 t6_area=
 t6_classes=
+t6_set=main
+t6_include_topology=0
 t6_resume=0
 t6_part=b
 
@@ -46,7 +49,7 @@ fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
 usage()
 {
-    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -58,12 +61,25 @@ while [[ $# -gt 0 ]]; do
             ;;
         --area) t6_area=$2; shift 2 ;;
         --classes) t6_classes=$2; shift 2 ;;
+        --set) t6_set=$2; shift 2 ;;
+        --include-topology) t6_include_topology=1; shift ;;
         --resume) t6_resume=1; shift ;;
         --part) t6_part=$2; shift 2 ;;
         -h|--help) usage ;;
         *) fail "unknown argument $1" ;;
     esac
 done
+
+case "$t6_set" in
+    main) ;;
+    slow) ;;
+    *) fail "unknown --set '$t6_set' (main|slow)" ;;
+esac
+# The tagged classes include whole clusters; one of them (ClusterTest) needs
+# minutes, so the slow set defaults to a longer per-class budget.
+if [[ -z "$t6_class_timeout" ]]; then
+    if [[ "$t6_set" == "slow" ]]; then t6_class_timeout=900; else t6_class_timeout=300; fi
+fi
 
 if [[ "$t6_part" == "a" ]]; then
     run_part_a() {
@@ -88,11 +104,60 @@ fi
 
 [[ ${#t6_arms[@]} -eq 0 ]] && t6_arms=(kernel media)
 
+t6_src_root()
+{
+    printf '%s' "$t6_aeron/aeron-system-tests/src/test/java"
+}
+
+# The file of a class, so the annotations can be read.
+class_file() { printf '%s/%s.java' "$(t6_src_root)" "${1//.//}"; }
+
+# Which Gradle task runs `class` in the reference build: the default `test`
+# excludes every tagged one, and each tag has its own task (`build.gradle`).
+class_task()
+{
+    local class=$1 file
+    file=$(class_file "$class")
+    [[ -f "$file" ]] || fail "no source file for $class"
+    if [[ "$class" == "io.aeron.driver.DriverLoggingSystemTest" ]]; then
+        printf 'driverLoggingSystemTest'
+        return 0
+    fi
+    if grep -q '^@TopologyTest' "$file"; then printf 'topologyTest'; return 0; fi
+    if grep -q '^@BindingsTest' "$file"; then printf 'bindingsTest'; return 0; fi
+    printf 'slowTest'
+}
+
+# The classes the default `test` task produces nothing for: the class-level
+# tags, the three whose every `@Test` is `@SlowTest` but whose class is
+# untagged, and the logging test (its own task). The two topology classes need
+# three real hosts (10.42.0.10-12) and are left out unless asked for.
+# `PersistentSubscriptionTest` is abstract and `ExperimentalDriverFeaturesTest`
+# has no tests, so neither is selected.
+in_slow_set()
+{
+    local class=$1 file
+    file=$(class_file "$class")
+    case "$class" in
+        io.aeron.driver.DriverLoggingSystemTest | \
+            io.aeron.MdsEosPositionTest | \
+            io.aeron.StreamSessionLimitsTest | \
+            io.aeron.cluster.ClusterUncommittedStateTest)
+            return 0
+            ;;
+    esac
+    if grep -q '^@TopologyTest' "$file"; then
+        [[ "$t6_include_topology" -eq 1 ]]
+        return $?
+    fi
+    grep -q '^@SlowTest' "$file" || grep -q '^@BindingsTest' "$file"
+}
+
 class_list()
 {
-    local root="$t6_aeron/aeron-system-tests/src/test/java"
+    local root path class
+    root=$(t6_src_root)
     [[ -d "$root" ]] || fail "no reference system tests at $root (is third_party/aeron populated?)"
-    local path class
     while IFS= read -r path; do
         class=${path#"$root"/}
         class=${class%.java}
@@ -104,6 +169,7 @@ class_list()
                 *) [[ "$class" == "io.aeron.$t6_area".* ]] || continue ;;
             esac
         fi
+        if [[ "$t6_set" == "slow" ]] && ! in_slow_set "$class"; then continue; fi
         printf '%s\n' "$class"
     done < <(find "$root" -name '*Test.java' | sort)
 }
@@ -130,20 +196,22 @@ run_class() # run_class <arm> <class>
     case "$arm" in
         media) args=(-Daeron.test.system.aeronmd.path="$t6_wrapper") ;;
     esac
+    local task
+    task=$(class_task "$class")
 
     # The harness cleans its own directories, but a killed class leaves aeron
     # shm behind and the next driver then refuses the name.
     rm -rf /dev/shm/aeron-* 2>/dev/null || true
-    rm -rf "$t6_aeron/aeron-system-tests/build/test-results/test"
+    rm -rf "$t6_aeron/aeron-system-tests/build/test-results/$task"
 
     local log="$dir/logs/${class}.log"
     local status=0
-    ( cd "$t6_aeron" && timeout "$t6_class_timeout" ./gradlew :aeron-system-tests:test \
+    ( cd "$t6_aeron" && timeout "$t6_class_timeout" ./gradlew :aeron-system-tests:"$task" \
         --tests "$class" "${args[@]}" --console=plain --rerun-tasks $t6_gradle_args ) >"$log" 2>&1 || status=$?
 
     mkdir -p "$dir/xml"
     local found=0
-    for xml in "$t6_aeron"/aeron-system-tests/build/test-results/test/TEST-*.xml; do
+    for xml in "$t6_aeron"/aeron-system-tests/build/test-results/"$task"/TEST-*.xml; do
         [[ -f "$xml" ]] || continue
         cp "$xml" "$dir/xml/"
         found=1
@@ -251,6 +319,14 @@ check_counts() # check_counts <arm>
     say "B1 $arm: $classes classes, $cases cases"
     if [[ -n "$t6_classes" || -n "$t6_area" ]]; then
         say "B1 skipped: this run is filtered (classes/area), not the whole suite"
+        return 0
+    fi
+    if [[ "$t6_set" == "slow" ]]; then
+        # 129 `*Test.java` files exist; the default task runs 104 of them, and
+        # the tagged ones are run here by their own tasks. Two are topology
+        # classes (three real hosts) and are left out unless asked for.
+        [[ "$classes" -ge 20 && "$cases" -ge 60 ]] ||
+            fail "B1: arm $arm ran only $classes slow classes / $cases cases"
         return 0
     fi
     # 129 `*Test.java` files exist; 25 of them carry only @SlowTest methods (or
