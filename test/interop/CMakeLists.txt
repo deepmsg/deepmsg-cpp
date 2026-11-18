@@ -82,6 +82,8 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc7_crash_test.cpp
         cluster/xc7_snapshot_test.cpp
         cluster/xc7_recovery_plan_test.cpp
+        cluster/xc8_mixed_test.cpp
+        cluster/xc0_java_cluster_test.cpp
         cluster/xc4b_binary_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
