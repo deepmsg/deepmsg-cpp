@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -394,7 +395,8 @@ protected:
         classes_dir_ = root_dir_ + "/classes";
         std::filesystem::create_directories(classes_dir_);
         std::vector<std::string> sources;
-        for (const char* const name : {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java"})
+        for (const char* const name :
+             {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java", "ClusterAuctionServiceProbe.java"})
         {
             for (const std::string& relative :
                  {"/deepmsg-tests/java/" + std::string{name}, "/java/" + std::string{name}})
@@ -533,6 +535,7 @@ protected:
 
     void stop_all()
     {
+        stop_restart_node();
         session_.close();
         for (auto& process : members_process_)
         {
@@ -649,6 +652,20 @@ protected:
     {
         const int leader = leader_index();
         ASSERT_GE(leader, 0) << "no leader";
+        const std::string egress = "aeron:udp?endpoint=localhost:" + std::to_string(egress_port());
+        ASSERT_TRUE(
+            session_.connect_udp(member_dir(leader, "aeron"), ingress_endpoints(), egress, std::chrono::seconds(30)))
+            << session_.last_error();
+        for (int i = 0; i < count; ++i)
+        {
+            std::string payload = "c9-" + std::to_string(i);
+            ASSERT_TRUE(session_.offer_and_await(payload, static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
+                << "echo failed at " << i;
+        }
+    }
+
+    [[nodiscard]] std::string ingress_endpoints() const
+    {
         std::string ingress;
         for (int i = 0; i < MEMBERS; ++i)
         {
@@ -658,15 +675,61 @@ protected:
             }
             ingress.append(std::to_string(i)).append("=localhost:").append(std::to_string(member_port(i, 0)));
         }
-        const std::string egress = "aeron:udp?endpoint=localhost:" + std::to_string(egress_port());
-        ASSERT_TRUE(session_.connect_udp(member_dir(leader, "aeron"), ingress, egress, std::chrono::seconds(30)))
-            << session_.last_error();
-        for (int i = 0; i < count; ++i)
+        return ingress;
+    }
+
+    /// The reference's auction business (`ClusterAuctionServiceProbe`): a
+    /// stateful service, so a node started from the backup can be asked what
+    /// state it recovered.
+    void start_auction_containers()
+    {
+        compile_java_probes();
+        for (int i = 0; i < MEMBERS; ++i)
         {
-            std::string payload = "c9-" + std::to_string(i);
-            ASSERT_TRUE(session_.offer_and_await(payload, static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
-                << "echo failed at " << i;
+            std::vector<std::string> arguments = java_opens();
+            arguments.insert(arguments.end(),
+                             {"-cp", jar_ + ":" + classes_dir_, "ClusterAuctionServiceProbe", member_dir(i, "aeron"),
+                              member_dir(i, "cluster"), std::to_string(CLUSTER_ID), "0"});
+            auto spawned = ChildProcess::spawn("/usr/bin/java", arguments, {},
+                                               root_dir_ + "/auction" + std::to_string(i) + ".log");
+            ASSERT_TRUE(spawned) << spawned.error().message.view();
+            containers_[i] = std::make_unique<ChildProcess>(std::move(*spawned));
         }
+    }
+
+    struct BidResponse
+    {
+        std::int64_t correlation_id{0};
+        std::int64_t customer_id{0};
+        std::int64_t price{0};
+        bool succeeded{false};
+    };
+
+    /// `BasicAuctionClusteredService`: bid (24 B) `correlationId @0`,
+    /// `customerId @8`, `price @16`; egress (25 B) the same three plus
+    /// `bidSucceeded u8 @24`.
+    [[nodiscard]] BidResponse bid(ClusterClientSession& session, std::int64_t correlation_id, std::int64_t customer_id,
+                                  std::int64_t price)
+    {
+        std::string payload(24, '\0');
+        std::memcpy(payload.data(), &correlation_id, sizeof(correlation_id));
+        std::memcpy(payload.data() + 8, &customer_id, sizeof(customer_id));
+        std::memcpy(payload.data() + 16, &price, sizeof(price));
+
+        const std::size_t before = session.messages().size();
+        EXPECT_TRUE(session.offer_and_await(payload, before + 1, std::chrono::seconds(20)))
+            << "the auction never answered bid " << correlation_id;
+
+        BidResponse response;
+        if (session.messages().size() > before && session.messages().back().size() >= 25)
+        {
+            const std::string& answer = session.messages().back();
+            std::memcpy(&response.correlation_id, answer.data(), 8);
+            std::memcpy(&response.customer_id, answer.data() + 8, 8);
+            std::memcpy(&response.price, answer.data() + 16, 8);
+            response.succeeded = 0 != static_cast<std::uint8_t>(answer[24]);
+        }
+        return response;
     }
 
     void take_snapshot()
@@ -709,6 +772,149 @@ protected:
         return false;
     }
 
+    /// The backup has the complete state: the snapshot retrieved and the live
+    /// log replayed to the leader's commit position (the reference's
+    /// `awaitBackupLiveLogPosition`, `ClusterBackupTest.java:71`).
+    [[nodiscard]] bool wait_for_backup_caught_up(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const int leader = leader_index();
+            if (leader >= 0 &&
+                1 <= backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID))
+            {
+                const std::int64_t commit =
+                    java_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+                const std::int64_t live =
+                    backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID);
+                if (commit >= 0 && live >= commit)
+                {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return false;
+    }
+
+    [[nodiscard]] int restart_port(int offset) const
+    {
+        return base_port_ + 200 + offset;
+    }
+
+    /// Reference `TestCluster.startStaticNodeFromBackup` (`:623-687`): a single
+    /// reference member whose cluster directory and archive are the backup's,
+    /// started with the delete flags off and appointed as its own leader.
+    void start_java_node_from_backup()
+    {
+        const std::string dir = root_dir_ + "/restart";
+        std::filesystem::create_directories(dir + "/aeron");
+        const std::string member =
+            "0,localhost:" + std::to_string(restart_port(0)) + ",localhost:" + std::to_string(restart_port(1)) +
+            ",localhost:" + std::to_string(restart_port(2)) + ",localhost:" + std::to_string(restart_port(3)) +
+            ",localhost:" + std::to_string(restart_port(4));
+
+        const std::string path = dir + "/node.properties";
+        std::ofstream out{path};
+        ASSERT_TRUE(out.good());
+        out << "aeron.dir=" << dir << "/aeron\n"
+            << "aeron.dir.delete.on.start=true\n"
+            << "aeron.cluster.dir=" << backup_cluster() << "\n"
+            << "aeron.cluster.dir.delete.on.start=false\n"
+            << "aeron.archive.dir=" << backup_archive() << "\n"
+            << "aeron.archive.dir.delete.on.start=false\n"
+            << "aeron.cluster.id=" << CLUSTER_ID << "\n"
+            << "aeron.cluster.member.id=0\n"
+            << "aeron.cluster.appointed.leader.id=0\n"
+            << "aeron.cluster.members=" << member << "\n"
+            << "aeron.cluster.ingress.channel=aeron:udp?endpoint=localhost:" << restart_port(0) << "\n"
+            << "aeron.cluster.consensus.channel=aeron:udp?alias=consensus\n"
+            << "aeron.cluster.log.channel=aeron:udp?term-length=512k|alias=raft\n"
+            << "aeron.cluster.control.channel=aeron:ipc?term-length=128k\n"
+            << "aeron.cluster.replication.channel=aeron:udp?endpoint=localhost:0\n"
+            << "aeron.cluster.service.count=1\n"
+            << "aeron.cluster.startup.canvass.timeout=10s\n"
+            << "aeron.cluster.leader.heartbeat.timeout=2s\n"
+            << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << restart_port(4) << "\n"
+            << "aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0\n"
+            << "aeron.threading.mode=SHARED\n";
+        out.close();
+
+        std::vector<std::string> arguments = java_opens();
+        arguments.insert(arguments.end(), {"-cp", jar_, "io.aeron.cluster.ClusteredMediaDriver", path});
+        auto spawned = ChildProcess::spawn("/usr/bin/java", arguments, {}, root_dir_ + "/restart/node.log");
+        ASSERT_TRUE(spawned) << spawned.error().message.view();
+        restart_node_ = std::make_unique<ChildProcess>(std::move(*spawned));
+    }
+
+    void start_restart_auction_container()
+    {
+        std::vector<std::string> arguments = java_opens();
+        arguments.insert(arguments.end(),
+                         {"-cp", jar_ + ":" + classes_dir_, "ClusterAuctionServiceProbe", root_dir_ + "/restart/aeron",
+                          backup_cluster(), std::to_string(CLUSTER_ID), "0"});
+        auto spawned = ChildProcess::spawn("/usr/bin/java", arguments, {}, root_dir_ + "/restart/auction.log");
+        ASSERT_TRUE(spawned) << spawned.error().message.view();
+        restart_container_ = std::make_unique<ChildProcess>(std::move(*spawned));
+    }
+
+    [[nodiscard]] std::int64_t restart_counter(std::int32_t type_id)
+    {
+        if (!restart_client_)
+        {
+            const std::string client_dir = root_dir_ + "/restart/aeron";
+            axc::core::ClientConfig client_config{client_dir};
+            client_config.on_error = &on_client_error;
+            auto client = DeepmsgClient::connect(client_config);
+            if (!client)
+            {
+                return -1;
+            }
+            restart_client_ = std::make_unique<DeepmsgClient>(std::move(*client));
+        }
+        (void)restart_client_->do_work();
+        const std::int32_t id =
+            deepmsg::cluster::common::find_cluster_counter(restart_client_->counters_reader(), type_id, CLUSTER_ID);
+        if (AERON_NULL_COUNTER_ID == id)
+        {
+            return -1;
+        }
+        std::int64_t* address = aeron_counters_reader_addr(restart_client_->counters_reader(), id);
+        return nullptr == address ? -1 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
+    }
+
+    [[nodiscard]] bool wait_for_restart_leader(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (1 == restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) &&
+                2 == restart_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID))
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    void stop_restart_node()
+    {
+        restart_session_.close();
+        if (restart_container_)
+        {
+            restart_container_->terminate(std::chrono::seconds(10));
+            restart_container_.reset();
+        }
+        if (restart_node_)
+        {
+            restart_node_->terminate(std::chrono::seconds(10));
+            restart_node_.reset();
+        }
+        restart_client_.reset();
+    }
+
     [[nodiscard]] axc::interop::ProcessResult run_tool(const std::string& directory, const std::string& command)
     {
         axc::interop::ProcessOptions options;
@@ -731,6 +937,10 @@ protected:
     std::array<std::unique_ptr<DeepmsgClient>, MEMBERS> java_clients_{};
     std::unique_ptr<ChildProcess> backup_{};
     std::unique_ptr<DeepmsgClient> backup_client_{};
+    std::unique_ptr<ChildProcess> restart_node_{};
+    std::unique_ptr<ChildProcess> restart_container_{};
+    std::unique_ptr<DeepmsgClient> restart_client_{};
+    ClusterClientSession restart_session_{};
     ClusterClientSession session_{};
 };
 
@@ -778,6 +988,64 @@ TEST_F(Xc9BackupJavaClusterTest, theBackupRetrievesTheSnapshotAndTheLiveLog)
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_TRUE(live_position) << "the backup never followed the live log";
+}
+
+/// C9-2 (`shouldBackupClusterWithSnapshot`, `ClusterBackupTest.java:138-168`):
+/// our backup's directory is a complete cluster directory. The reference's own
+/// member starts on it (`startStaticNodeFromBackup`), reloads the snapshot from
+/// our archive and replays our recorded log; the stateful auction service
+/// answers with the state it recovered.
+TEST_F(Xc9BackupJavaClusterTest, theReferenceNodeStartsFromOurBackupDirectory)
+{
+    start_java_cluster();
+    start_auction_containers();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << "no leader";
+    const std::string egress = "aeron:udp?endpoint=localhost:" + std::to_string(egress_port());
+    ASSERT_TRUE(
+        session_.connect_udp(member_dir(leader, "aeron"), ingress_endpoints(), egress, std::chrono::seconds(30)))
+        << session_.last_error();
+
+    BidResponse answer{};
+    for (int i = 0; i < 5; ++i)
+    {
+        answer = bid(session_, i + 1, 42, 100 + i);
+        ASSERT_TRUE(answer.succeeded) << "bid " << i << " was refused";
+    }
+    EXPECT_EQ(42, answer.customer_id) << "the auction did not take the winning bid";
+    EXPECT_EQ(104, answer.price) << "the auction did not take the winning bid";
+
+    take_snapshot();
+
+    start_backup();
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "the backup never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_caught_up(std::chrono::seconds(120)))
+        << "the backup never caught up: live="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID)
+        << " snapshots=" << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID);
+
+    stop_all();
+
+    start_java_node_from_backup();
+    start_restart_auction_container();
+    ASSERT_TRUE(wait_for_restart_leader(std::chrono::seconds(120)))
+        << "the reference node started from our backup never became the active leader (state="
+        << restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) << ")";
+
+    const std::string restart_egress = "aeron:udp?endpoint=localhost:" + std::to_string(restart_port(60));
+    ASSERT_TRUE(restart_session_.connect_udp(root_dir_ + "/restart/aeron",
+                                             "0=localhost:" + std::to_string(restart_port(0)), restart_egress,
+                                             std::chrono::seconds(30)))
+        << restart_session_.last_error();
+
+    const BidResponse refused = bid(restart_session_, 99, 7, 50);
+    EXPECT_FALSE(refused.succeeded) << "the recovered auction took a bid below the recovered best price";
+    EXPECT_EQ(42, refused.customer_id) << "the recovered auction state is not the backed-up one";
+    EXPECT_EQ(104, refused.price) << "the recovered auction state is not the backed-up one";
 }
 
 }  // namespace

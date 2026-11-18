@@ -7,7 +7,9 @@
 //
 // The scenario reads the state from outside the container: every event is
 // appended to `AXC_TEST_TRACKING_FILE` (`M <id>`, `S <id>`, `T <correlation>`),
-// and a snapshot restore rewrites the restored lists.
+// and a snapshot restore rewrites the restored lists. `L <0|1>` is written
+// first and records whether `on_start` was handed a snapshot image (the
+// reference's `wasSnapshotLoaded`).
 
 #include <chrono>
 #include <cstdint>
@@ -104,6 +106,10 @@ public:
         {
             std::ofstream out{file_, std::ios::trunc};
         }
+        // C9-2: the reference's `wasSnapshotLoaded` witness. `L 1` means
+        // `on_start` was handed an image (the recovery plan picked a snapshot),
+        // `L 0` an empty start; the node-from-backup scenarios assert on it.
+        write_line('L', nullptr == snapshot ? 0 : 1);
         if (nullptr == snapshot)
         {
             return {};

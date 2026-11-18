@@ -13,8 +13,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -67,6 +69,14 @@ void on_client_error(void* /*clientd*/, int /*errcode*/, const char* /*message*/
 {
     return {"--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens",
             "java.base/sun.nio.ch=ALL-UNNAMED"};
+}
+
+/// The tracking service reads a 4-byte little-endian id per client message.
+[[nodiscard]] std::string int_payload(std::int32_t value)
+{
+    std::string bytes(sizeof(value), '\0');
+    std::memcpy(bytes.data(), &value, sizeof(value));
+    return bytes;
 }
 
 class Xc9JavaBackupAgainstOurClusterTest : public ::testing::Test
@@ -213,20 +223,52 @@ protected:
         for (int i = 0; i < MEMBERS; ++i)
         {
             const std::string path = node_dir(i) + "/container.properties";
-            std::ofstream out{path};
-            ASSERT_TRUE(out.good());
-            out << "aeron.dir=" << node_dir(i) << "/aeron\n"
-                << "aeron.dir.delete.on.start=false\n"
-                << "aeron.cluster.dir=" << node_dir(i) << "/cluster\n"
-                << "aeron.cluster.id=" << CLUSTER_ID << "\n"
-                << "aeron.cluster.service.id=0\n"
-                << "aeron.cluster.service.name=clustered-service-" << CLUSTER_ID << "-0\n"
-                << "deepmsg.cluster.service=echo\n";
-            out.close();
-            auto spawned = ChildProcess::spawn(AXC_CONTAINER_BINARY, {path}, {}, node_dir(i) + "/container.log");
+            write_container_properties(path, node_dir(i) + "/aeron", node_dir(i) + "/cluster");
+            auto spawned = ChildProcess::spawn(AXC_CONTAINER_BINARY, {path}, tracking_environment(tracking_file(i)),
+                                               node_dir(i) + "/container.log");
             ASSERT_TRUE(spawned) << spawned.error().message.view();
             containers_[i] = std::make_unique<ChildProcess>(std::move(*spawned));
         }
+    }
+
+    /// The container's properties. The tracking service is the stateful
+    /// witness the node-from-backup scenario needs (`C9-2`): it records every
+    /// applied message to a file and snapshots its lists, so a recovered node
+    /// shows the state it reloaded.
+    void write_container_properties(const std::string& path, const std::string& aeron_dir,
+                                    const std::string& cluster_dir)
+    {
+        std::ofstream out{path};
+        ASSERT_TRUE(out.good());
+        out << "aeron.dir=" << aeron_dir << "\n"
+            << "aeron.dir.delete.on.start=false\n"
+            << "aeron.cluster.dir=" << cluster_dir << "\n"
+            << "aeron.cluster.id=" << CLUSTER_ID << "\n"
+            << "aeron.cluster.service.id=0\n"
+            << "aeron.cluster.service.name=clustered-service-" << CLUSTER_ID << "-0\n";
+        if (tracking_)
+        {
+            out << "deepmsg.cluster.service.library=" << AXC_TRACKING_SERVICE_LIBRARY << "\n"
+                << "deepmsg.cluster.service=tracking\n";
+        }
+        else
+        {
+            out << "deepmsg.cluster.service=echo\n";
+        }
+    }
+
+    [[nodiscard]] std::string tracking_file(int index) const
+    {
+        return root_dir_ + "/tracking-" + std::to_string(index) + ".txt";
+    }
+
+    [[nodiscard]] std::vector<std::string> tracking_environment(const std::string& file) const
+    {
+        if (!tracking_)
+        {
+            return {};
+        }
+        return {"AXC_TEST_TRACKING_FILE=" + file, "AXC_TEST_TRACKING_SERVICE_ID=0", "AXC_TEST_TRACKING_NODE_INDEX=0"};
     }
 
     void start_java_backup()
@@ -264,6 +306,7 @@ protected:
 
     void stop_all()
     {
+        stop_restart_node();
         session_.close();
         if (backup_)
         {
@@ -400,6 +443,42 @@ protected:
         }
     }
 
+    /// The tracking service's client messages carry a 4-byte id; the echo it
+    /// answers with is the same payload.
+    void send_ints(int count)
+    {
+        const int leader = leader_index();
+        ASSERT_GE(leader, 0) << "no leader";
+        ASSERT_TRUE(session_.connect_udp(node_dir(leader) + "/aeron", ingress_endpoints(), egress_channel(),
+                                         std::chrono::seconds(30)))
+            << session_.last_error();
+        for (int i = 0; i < count; ++i)
+        {
+            ASSERT_TRUE(
+                session_.offer_and_await(int_payload(i), static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
+                << "echo failed at " << i;
+        }
+    }
+
+    [[nodiscard]] std::string ingress_endpoints() const
+    {
+        std::string ingress;
+        for (int i = 0; i < MEMBERS; ++i)
+        {
+            if (0 != i)
+            {
+                ingress.push_back(',');
+            }
+            ingress.append(std::to_string(i)).append("=localhost:").append(std::to_string(member_port(i, 0)));
+        }
+        return ingress;
+    }
+
+    [[nodiscard]] std::string egress_channel() const
+    {
+        return "aeron:udp?endpoint=localhost:" + std::to_string(egress_port());
+    }
+
     void take_snapshot()
     {
         const int leader = leader_index();
@@ -423,6 +502,249 @@ protected:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         FAIL() << "our cluster never took the snapshot";
+    }
+
+    void stop_restart_node()
+    {
+        restart_session_.close();
+        if (restart_container_)
+        {
+            restart_container_->terminate(std::chrono::seconds(10));
+            restart_container_.reset();
+        }
+        if (restart_node_)
+        {
+            restart_node_->terminate(std::chrono::seconds(10));
+            restart_node_.reset();
+        }
+        restart_client_.reset();
+    }
+
+    [[nodiscard]] int restart_port(int offset) const
+    {
+        return base_port_ + 200 + offset;
+    }
+
+    [[nodiscard]] std::string restart_tracking_file() const
+    {
+        return root_dir_ + "/tracking-restart.txt";
+    }
+
+    /// Reference `TestCluster.startStaticNodeFromBackup` (`:623-687`): one
+    /// member whose cluster directory and archive are the backup's, started
+    /// with `deleteDirOnStart(false)` / `deleteArchiveOnStart(false)` and
+    /// appointed as its own leader.
+    void start_node_from_backup()
+    {
+        const std::string dir = root_dir_ + "/restart";
+        std::filesystem::create_directories(dir + "/aeron");
+        const int archive_port = restart_port(4);
+        const std::string member =
+            "0,localhost:" + std::to_string(restart_port(0)) + ",localhost:" + std::to_string(restart_port(1)) +
+            ",localhost:" + std::to_string(restart_port(2)) + ",localhost:" + std::to_string(restart_port(3)) +
+            ",localhost:" + std::to_string(archive_port);
+
+        const std::string path = dir + "/node.properties";
+        std::ofstream out{path};
+        ASSERT_TRUE(out.good());
+        out << "aeron.dir=" << dir << "/aeron\n"
+            << "aeron.dir.delete.on.start=true\n"
+            << "aeron.cluster.dir=" << root_dir_ << "/backup-cluster\n"
+            << "aeron.cluster.dir.delete.on.start=false\n"
+            << "aeron.archive.dir=" << root_dir_ << "/backup-archive\n"
+            << "aeron.archive.dir.delete.on.start=false\n"
+            << "aeron.cluster.id=" << CLUSTER_ID << "\n"
+            << "aeron.cluster.member.id=0\n"
+            << "aeron.cluster.appointed.leader.id=0\n"
+            << "aeron.cluster.members=" << member << "\n"
+            << "aeron.cluster.ingress.channel=aeron:udp?term-length=128k|alias=ingress|endpoint=localhost:"
+            << restart_port(0) << "\n"
+            << "aeron.cluster.consensus.channel=aeron:udp?alias=consensus\n"
+            << "aeron.cluster.log.channel=aeron:udp?term-length=512k|alias=raft\n"
+            << "aeron.cluster.control.channel=aeron:ipc?term-length=128k\n"
+            << "aeron.cluster.replication.channel=aeron:udp?endpoint=localhost:0\n"
+            << "aeron.cluster.leader.heartbeat.timeout=2s\n"
+            << "aeron.cluster.startup.canvass.timeout=10s\n"
+            << "aeron.cluster.service.count=1\n"
+            << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << archive_port << "\n"
+            << "aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0\n";
+        out.close();
+
+        auto spawned = ChildProcess::spawn(AXC_CLUSTER_NODE_BIN, {"--embedded-driver", path}, {}, dir + "/node.log");
+        ASSERT_TRUE(spawned) << spawned.error().message.view();
+        restart_node_ = std::make_unique<ChildProcess>(std::move(*spawned));
+
+        await_restart_container();
+    }
+
+    /// The container's start-up ack is offered exactly once and a not-yet
+    /// connected control publication is fatal (`three_node_rig.h`'s
+    /// `await_container_started`); the CM's recovery widens that window, so the
+    /// container is respawned until it prints `STARTED serviceId=`.
+    void await_restart_container()
+    {
+        constexpr int MAX_ATTEMPTS = 20;
+        constexpr auto START_TIMEOUT = std::chrono::seconds(15);
+        const std::string dir = root_dir_ + "/restart";
+        const std::string container_path = dir + "/container.properties";
+        const std::string log_path = dir + "/container.log";
+        write_container_properties(container_path, dir + "/aeron", root_dir_ + "/backup-cluster");
+
+        for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt)
+        {
+            if (!restart_node_ || !restart_node_->running())
+            {
+                return;
+            }
+            std::error_code error;
+            std::filesystem::remove(log_path, error);
+            auto container = ChildProcess::spawn(AXC_CONTAINER_BINARY, {container_path},
+                                                 tracking_environment(restart_tracking_file()), log_path);
+            ASSERT_TRUE(container) << container.error().message.view();
+            restart_container_ = std::make_unique<ChildProcess>(std::move(*container));
+
+            const auto deadline = std::chrono::steady_clock::now() + START_TIMEOUT;
+            bool started = false;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                if (tracking_dump(log_path).find("STARTED serviceId=") != std::string::npos)
+                {
+                    started = true;
+                    break;
+                }
+                if (!restart_container_->running())
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (started)
+            {
+                return;
+            }
+            if (restart_container_->running())
+            {
+                restart_container_->terminate(std::chrono::seconds(5));
+            }
+            restart_container_.reset();
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    }
+
+    [[nodiscard]] std::int64_t restart_counter(std::int32_t type_id)
+    {
+        if (!restart_client_)
+        {
+            const std::string client_dir = root_dir_ + "/restart/aeron";
+            axc::core::ClientConfig client_config{client_dir};
+            client_config.on_error = &on_client_error;
+            auto client = DeepmsgClient::connect(client_config);
+            if (!client)
+            {
+                return -1;
+            }
+            restart_client_ = std::make_unique<DeepmsgClient>(std::move(*client));
+        }
+        (void)restart_client_->do_work();
+        const std::int32_t id =
+            deepmsg::cluster::common::find_cluster_counter(restart_client_->counters_reader(), type_id, CLUSTER_ID);
+        if (AERON_NULL_COUNTER_ID == id)
+        {
+            return -1;
+        }
+        std::int64_t* address = aeron_counters_reader_addr(restart_client_->counters_reader(), id);
+        return nullptr == address ? -1 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
+    }
+
+    [[nodiscard]] bool wait_for_restart_leader(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (1 == restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) &&
+                2 == restart_counter(deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID))
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    struct TrackingFile
+    {
+        int snapshot_loaded{-1};
+        std::vector<std::int32_t> messages;
+    };
+
+    [[nodiscard]] TrackingFile read_tracking(const std::string& path) const
+    {
+        TrackingFile tracking;
+        std::ifstream in{path};
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (line.size() < 3 || ' ' != line[1])
+            {
+                continue;
+            }
+            const std::int64_t value = std::strtoll(line.c_str() + 2, nullptr, 10);
+            if ('M' == line[0])
+            {
+                tracking.messages.push_back(static_cast<std::int32_t>(value));
+            }
+            else if ('L' == line[0])
+            {
+                tracking.snapshot_loaded = static_cast<int>(value);
+            }
+        }
+        return tracking;
+    }
+
+    [[nodiscard]] std::string tracking_dump(const std::string& path) const
+    {
+        std::ifstream in{path};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    }
+
+    [[nodiscard]] bool wait_for_tracking(const std::string& path, const std::vector<std::int32_t>& expected,
+                                         std::chrono::milliseconds timeout) const
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (read_tracking(path).messages == expected)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    /// The backup has the complete state: the snapshot retrieved and the live
+    /// log replayed to the leader's commit position (the reference's
+    /// `awaitBackupLiveLogPosition`, `ClusterBackupTest.java:71`).
+    [[nodiscard]] bool wait_for_backup_caught_up(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const int leader = leader_index();
+            if (leader >= 0 &&
+                1 <= backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID))
+            {
+                const std::int64_t commit = counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+                const std::int64_t live =
+                    backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID);
+                if (commit >= 0 && live >= commit)
+                {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return false;
     }
 
     [[nodiscard]] bool wait_for_backup_state(ClusterBackupState wanted, std::chrono::milliseconds timeout)
@@ -454,11 +776,16 @@ protected:
     std::string jar_{};
     std::string root_dir_{};
     int base_port_{0};
+    bool tracking_{false};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> nodes_{};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> containers_{};
     std::array<std::unique_ptr<DeepmsgClient>, MEMBERS> clients_{};
     std::unique_ptr<ChildProcess> backup_{};
     std::unique_ptr<DeepmsgClient> backup_client_{};
+    std::unique_ptr<ChildProcess> restart_node_{};
+    std::unique_ptr<ChildProcess> restart_container_{};
+    std::unique_ptr<DeepmsgClient> restart_client_{};
+    ClusterClientSession restart_session_{};
     ClusterClientSession session_{};
 };
 
@@ -493,6 +820,63 @@ TEST_F(Xc9JavaBackupAgainstOurClusterTest, theJavaBackupBacksUpOurCluster)
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_TRUE(live_position) << "the Java backup never followed the live log";
+}
+
+/// C9-2 (`shouldBackupClusterWithSnapshot`, `ClusterBackupTest.java:138-168`):
+/// the backup directory is a complete cluster directory. The cluster is
+/// stopped and one member starts on the backup's `cluster-backup` and
+/// `backup-archive`; it reloads the snapshot and replays the log, so the
+/// tracking service's state is the ten messages and the cluster echoes again.
+TEST_F(Xc9JavaBackupAgainstOurClusterTest, theNodeStartsFromTheBackupDirectory)
+{
+    tracking_ = true;
+    start_cluster();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "our cluster never became active";
+
+    constexpr int message_count = 10;
+    send_ints(message_count);
+    take_snapshot();
+
+    start_java_backup();
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "the Java backup never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_caught_up(std::chrono::seconds(120)))
+        << "the backup never caught up: live="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID)
+        << " snapshots=" << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID);
+
+    stop_all();
+
+    start_node_from_backup();
+    ASSERT_TRUE(wait_for_restart_leader(std::chrono::seconds(120)))
+        << "the node started from the backup never became the active leader (state="
+        << restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) << ")";
+
+    std::vector<std::int32_t> expected;
+    for (int i = 0; i < message_count; ++i)
+    {
+        expected.push_back(i);
+    }
+    ASSERT_TRUE(wait_for_tracking(restart_tracking_file(), expected, std::chrono::seconds(60)))
+        << "the recovered service state:\n"
+        << tracking_dump(restart_tracking_file());
+    EXPECT_EQ(1, read_tracking(restart_tracking_file()).snapshot_loaded)
+        << "the recovery plan did not load the snapshot:\n"
+        << tracking_dump(restart_tracking_file());
+
+    // The recovered cluster serves: a new client message is applied once and echoed.
+    const std::string egress = "aeron:udp?endpoint=localhost:" + std::to_string(restart_port(60));
+    ASSERT_TRUE(restart_session_.connect_udp(root_dir_ + "/restart/aeron",
+                                             "0=localhost:" + std::to_string(restart_port(0)), egress,
+                                             std::chrono::seconds(30)))
+        << restart_session_.last_error();
+    ASSERT_TRUE(restart_session_.offer_and_await(int_payload(message_count), 1, std::chrono::seconds(20)))
+        << "the recovered cluster did not echo";
+    expected.push_back(message_count);
+    EXPECT_TRUE(wait_for_tracking(restart_tracking_file(), expected, std::chrono::seconds(30)))
+        << "the recovered service did not apply the new message:\n"
+        << tracking_dump(restart_tracking_file());
 }
 
 }  // namespace
