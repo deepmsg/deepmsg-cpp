@@ -200,11 +200,12 @@ protected:
             return;
         }
         classes_dir_compiled_ = true;
+        simple_probe_available_ = true;
         classes_dir_ = root_dir_ + "/classes";
         std::filesystem::create_directories(classes_dir_);
         std::vector<std::string> sources;
         for (const char* const name : {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java",
-                                       "ChallengeAuthenticatorSupplier.java"})
+                                       "ChallengeAuthenticatorSupplier.java", "SimpleAuthenticatorSupplier.java"})
         {
             for (const std::string& relative :
                  {"/deepmsg-tests/java/" + std::string{name}, "/java/" + std::string{name}})
@@ -215,6 +216,14 @@ protected:
                     sources.push_back(candidate);
                     break;
                 }
+            }
+            // `SimpleAuthenticatorSupplier` is a C9-2 probe: an older fork
+            // checkout does not have it, and only the simple-credentials case
+            // needs it.
+            if (sources.empty() && 0 == std::string{name}.compare("SimpleAuthenticatorSupplier.java"))
+            {
+                simple_probe_available_ = false;
+                continue;
             }
             ASSERT_FALSE(sources.empty()) << "probe source not found: " << name;
         }
@@ -227,7 +236,7 @@ protected:
         ASSERT_EQ(0, compiled->exit_code) << compiled->output;
     }
 
-    void start_java_cluster()
+    void start_java_cluster(const std::string& authenticator = "ChallengeAuthenticatorSupplier")
     {
         compile_java_probes();
         for (int i = 0; i < MEMBERS; ++i)
@@ -262,7 +271,7 @@ protected:
 
             std::vector<std::string> arguments = java_opens();
             arguments.insert(arguments.end(), {"-cp", jar_ + ":" + root_dir_ + "/classes",
-                                               "-Daeron.cluster.authenticator.supplier=ChallengeAuthenticatorSupplier",
+                                               "-Daeron.cluster.authenticator.supplier=" + authenticator,
                                                "io.aeron.cluster.ClusteredMediaDriver", path});
             auto spawned =
                 ChildProcess::spawn("/usr/bin/java", arguments, {}, root_dir_ + "/member" + std::to_string(i) + ".log");
@@ -317,7 +326,8 @@ protected:
         }
     }
 
-    void start_backup(const std::string& challenge_answer, const std::string& suffix)
+    void start_backup(const std::string& challenge_answer, const std::string& suffix,
+                      const std::string& credentials = "")
     {
         const std::string path = root_dir_ + "/backup-" + suffix + ".properties";
         std::ofstream out{path};
@@ -328,6 +338,7 @@ protected:
             << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << backup_archive_port() << "\n"
             << "aeron.archive.control.response.channel=aeron:udp?endpoint=localhost:" << (base_port_ + 90) << "\n"
             << "deepmsg.cluster.backup.challenge.response=" << challenge_answer << "\n"
+            << "deepmsg.cluster.backup.credentials=" << credentials << "\n"
             << "aeron.archive.threading.mode=DEDICATED\n"
             << "aeron.cluster.id=" << CLUSTER_ID << "\n"
             << "aeron.cluster.member.id=0\n"
@@ -510,10 +521,29 @@ protected:
         return result ? *result : axc::interop::ProcessResult{};
     }
 
+    [[nodiscard]] bool member_log_contains(const std::string& text) const
+    {
+        for (int i = 0; i < MEMBERS; ++i)
+        {
+            std::ifstream in{root_dir_ + "/member" + std::to_string(i) + ".log"};
+            if (!in)
+            {
+                continue;
+            }
+            const std::string member_log{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+            if (std::string::npos != member_log.find(text))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string jar_{};
     std::string tests_root_{};
     std::string classes_dir_{};
     bool classes_dir_compiled_{false};
+    bool simple_probe_available_{false};
     std::string root_dir_{};
     int base_port_{0};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> members_process_{};
@@ -522,6 +552,52 @@ protected:
     std::unique_ptr<ChildProcess> backup_{};
     std::unique_ptr<DeepmsgClient> backup_client_{};
 };
+
+TEST_F(Xc9BackupAuthTest, theBackupAuthenticatesWithSimpleCredentials)
+{
+    start_java_cluster("SimpleAuthenticatorSupplier");
+    if (!simple_probe_available_)
+    {
+        GTEST_SKIP() << "the fork's SimpleAuthenticatorSupplier probe is missing";
+    }
+    start_containers();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
+
+    start_backup("", "simple", "c9-credentials");
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(120)))
+        << "the backup never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+
+    EXPECT_TRUE(member_log_contains("SIMPLE_OK")) << "the probe authenticator never accepted the credentials";
+}
+
+TEST_F(Xc9BackupAuthTest, theBackupWithWrongSimpleCredentialsIsRejected)
+{
+    start_java_cluster("SimpleAuthenticatorSupplier");
+    if (!simple_probe_available_)
+    {
+        GTEST_SKIP() << "the fork's SimpleAuthenticatorSupplier probe is missing";
+    }
+    start_containers();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
+
+    start_backup("", "simple-bad", "not-the-credentials");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool backing_up = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (backup_state_code(ClusterBackupState::backing_up) ==
+            backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID))
+        {
+            backing_up = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_FALSE(backing_up) << "the backup reached BACKING_UP despite the wrong credentials";
+    EXPECT_TRUE(member_log_contains("SIMPLE_REJECTED")) << "no member logged SIMPLE_REJECTED";
+}
 
 TEST_F(Xc9BackupAuthTest, theBackupAnswersTheChallengeAndReachesBackingUp)
 {
