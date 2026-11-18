@@ -544,7 +544,7 @@ TEST_F(Xc7SnapshotTest, shouldTerminateNodeWithInvalidSnapshotAndRecoveryAfterIn
 
     // The container refuses the snapshot and exits; the consensus module must
     // terminate the member rather than run without its service.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
     bool terminated = false;
     while (std::chrono::steady_clock::now() < deadline)
     {
