@@ -361,6 +361,17 @@ std::expected<void, Error> AsyncConnect::await_publication_connected(axc::core::
     {
         for (MemberIngress& member : members_)
         {
+            // A follower answers a connect request with a redirect and nothing
+            // else, so once a redirect has named the leader the client must
+            // not pick another member's publication again: it would be
+            // redirected in a loop until the message timeout (2026-11-18:
+            // form 2, 2530 connects to one follower in a single run).
+            // `updateMembers` pins the reference's `ingressPublication` to the
+            // leader's publication (`AeronCluster.java:2554-2562`).
+            if (leader_pinned_ && member.member_id != leader_member_id_)
+            {
+                continue;
+            }
             if (!member.publication.valid() && !member.publication_exception.has_value())
             {
                 // Only start an add once; `asyncGetPublication` is the poll.
@@ -601,6 +612,7 @@ void AsyncConnect::update_members()
 {
     // `AeronCluster.java:2543-2570`.
     leader_member_id_ = egress_poller_->leader_member_id();
+    leader_pinned_ = true;
 
     std::optional<MemberIngress> old_leader;
     for (auto iterator = members_.begin(); iterator != members_.end(); ++iterator)
