@@ -578,7 +578,9 @@ protected:
     void restart_with(int index, Stack stack, int members)
     {
         kill_member(index);
-        start_member(index, members, stack);
+        // The restart keeps the member's directory: a wiped one would make it
+        // a brand new member instead of the one that comes back.
+        start_member(index, members, stack, false);
         start_container(index, stack);
         stacks_[static_cast<std::size_t>(index)] = stack;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
@@ -903,6 +905,11 @@ TEST_F(MixedRig, threeMembersFormACluster)
 // covered by the four probes above and by
 // `ourAppointedLeaderServesAClientWithThreeMembers`; the loop is disabled
 // until the restart path stops starving the counter clients.
+// The restart in this loop keeps the member's directory now (`fresh=false`),
+// but the mixed rig's restart path still starves the counter clients and the
+// member comes back without counters. The loop's properties are covered by the
+// four probes above and by `aJavaLeadersDirectoryRestartsUnderOurNode`; the
+// restart machinery stays the open fixture item.
 TEST_F(MixedRig, DISABLED_membersOfBothStacksLeadATurn)
 {
     // XC-3's first arm: a three-member cluster of both stacks; whoever leads
