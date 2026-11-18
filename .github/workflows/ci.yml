@@ -72,6 +72,14 @@ jobs:
           done
           exit 1
 
+      # The SBE jar is 1 MB and Maven Central rate-limits the runners (2026-11-18:
+      # 429 twice in one morning); a cache hit keeps the gate off the network.
+      - name: Cache SBE tool
+        uses: actions/cache@v4
+        with:
+          path: third_party/sbe-tool
+          key: sbe-tool-1.42.0
+
       - name: Fetch SBE tool
         run: scripts/fetch-sbe.sh
 
@@ -126,6 +134,14 @@ jobs:
             sleep 20
           done
           exit 1
+
+      # The SBE jar is 1 MB and Maven Central rate-limits the runners (2026-11-18:
+      # 429 twice in one morning); a cache hit keeps the gate off the network.
+      - name: Cache SBE tool
+        uses: actions/cache@v4
+        with:
+          path: third_party/sbe-tool
+          key: sbe-tool-1.42.0
 
       - name: Fetch SBE tool
         run: scripts/fetch-sbe.sh
