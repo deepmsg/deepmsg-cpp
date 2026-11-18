@@ -141,6 +141,10 @@ private:
     std::int64_t leadership_term_id_{0};
     std::int64_t leader_heartbeat_timeout_ns_{NULL_VALUE};
     std::int32_t leader_member_id_{0};
+    /// Set by a redirect: only the leader can open a session, so the next
+    /// publication is taken from the leader's member (the reference pins
+    /// `ingressPublication` to the old leader's, `AeronCluster.java:2559-2562`).
+    bool leader_pinned_{false};
     std::size_t message_length_{0};
 };
 
