@@ -115,6 +115,9 @@ public:
                                std::int64_t image_correlation_id) override;
     void on_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
                                std::span<const std::uint8_t> encoded_credentials) override;
+    void on_backup_query(std::int64_t correlation_id, std::int32_t response_stream_id, std::int32_t version,
+                         std::int64_t log_position, std::string_view response_channel,
+                         std::span<const std::uint8_t> encoded_credentials) override;
     void on_admin_request(std::int64_t leadership_term_id, std::int64_t cluster_session_id, std::int64_t correlation_id,
                           std::int32_t request_type, std::span<const std::uint8_t> payload) override;
     void on_extension_message(std::int32_t schema_id, std::int32_t template_id,

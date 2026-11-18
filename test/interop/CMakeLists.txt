@@ -87,6 +87,8 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc5_cluster_tool_test.cpp
         cluster/xc4b_binary_test.cpp
         cluster/c9_backup_test.cpp
+        cluster/c9_backup_reverse_test.cpp
+        cluster/c9_backup_auth_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
@@ -94,6 +96,7 @@ axc_add_executable(axc_cluster_interop_tests
         axc_cluster_service
         axc_cluster_client
         axc_cluster_consensus
+        axc_cluster_backup
         axc_basic_auction_service
         axc_core
         aeron_static

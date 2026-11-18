@@ -1,5 +1,8 @@
 #include "cluster/consensus/session_manager.h"
 
+#include "cluster/common/cluster_codecs.h"
+#include "io_aeron_cluster_codecs/BackupQuery.h"
+
 #include <cstdio>
 
 #include <algorithm>
@@ -245,6 +248,39 @@ int SessionManager::process_all_pending_sessions(std::int64_t now_ns_value, std:
     return process_pending_sessions(pending_sessions_, now_ns_value, leader_member_id, leadership_term_id);
 }
 
+void SessionManager::on_backup_query(std::int64_t correlation_id, std::int32_t response_stream_id, std::int32_t version,
+                                     std::int64_t log_position, std::string response_channel,
+                                     std::span<const std::uint8_t> encoded_credentials)
+{
+    // `onBackupAction` (`SessionManager.java:365-420`).
+    auto session = std::make_unique<ClusterSession>(config_.member_id, -1, response_stream_id,
+                                                    std::move(response_channel), "backup session");
+    session->action(SessionAction::backup);
+    session->async_connect(client_, config_.cluster_id);
+    session->last_activity_ns(now_ns(), correlation_id);
+    if (-1 != log_position)
+    {
+        session->request_log_position(log_position);
+    }
+
+    const std::int32_t major = (version >> 16) & 0xffff;
+    if (0 == major)
+    {
+        authenticator_.on_connect_request(session->id(), encoded_credentials, now_ms());
+        pending_backup_sessions_.push_back(std::move(session));
+    }
+    else
+    {
+        session->reject(codecs::EventCode::ERROR, "invalid protocol version");
+        rejected_backup_sessions_.push_back(std::move(session));
+    }
+}
+
+int SessionManager::process_pending_backup_sessions(std::int64_t now_ns_value, std::int32_t leader_member_id)
+{
+    return process_pending_sessions(pending_backup_sessions_, now_ns_value, leader_member_id, 0);
+}
+
 int SessionManager::process_pending_sessions(std::vector<std::unique_ptr<ClusterSession>>& pending,
                                              std::int64_t now_ns_value, std::int32_t leader_member_id,
                                              std::int64_t leadership_term_id)
@@ -254,6 +290,9 @@ int SessionManager::process_pending_sessions(std::vector<std::unique_ptr<Cluster
     for (std::size_t i = pending.size(); i-- > 0;)
     {
         ClusterSession& session = *pending[i];
+        if (SessionAction::backup == session.action())
+        {
+        }
 
         if (SessionState::invalid == session.state())
         {
@@ -289,6 +328,29 @@ int SessionManager::process_pending_sessions(std::vector<std::unique_ptr<Cluster
                 ClusterSessionProxy proxy(egress_publisher_, session);
                 authenticator_.on_challenged_session(proxy, now_ms());
             }
+        }
+
+        if (SessionState::authenticated == session.state() && SessionAction::backup == session.action())
+        {
+            if (!authorisation_service_.is_authorised(common::SBE_SCHEMA_ID, codecs::BackupQuery::SBE_TEMPLATE_ID, 0,
+                                                      session.encoded_principal()))
+            {
+                session.reject(codecs::EventCode::AUTHENTICATION_REJECTED, "Not authorised for BackupQuery");
+                rejected_backup_sessions_.push_back(std::move(pending[i]));
+                fast_unordered_remove(pending, i);
+                continue;
+            }
+
+            const std::optional<std::int64_t> log_position =
+                session.has_log_position_request() ? std::optional<std::int64_t>(session.log_position_request())
+                                                   : std::nullopt;
+            if (backup_responder_ && backup_responder_(session, log_position))
+            {
+                session.close(client_, "done");
+                fast_unordered_remove(pending, i);
+                work_count += 1;
+            }
+            continue;
         }
 
         if (SessionState::authenticated == session.state())
@@ -412,7 +474,9 @@ int SessionManager::send_redirects(std::int64_t leadership_term_id, std::int32_t
 int SessionManager::send_rejections(std::int64_t leadership_term_id, std::int32_t leader_member_id,
                                     std::int64_t now_ns_value)
 {
-    return send_for_all(rejected_sessions_, leadership_term_id, leader_member_id, now_ns_value);
+    int work_count = send_for_all(rejected_sessions_, leadership_term_id, leader_member_id, now_ns_value);
+    work_count += send_for_all(rejected_backup_sessions_, leadership_term_id, leader_member_id, now_ns_value);
+    return work_count;
 }
 
 int SessionManager::send_for_all(std::vector<std::unique_ptr<ClusterSession>>& sessions,

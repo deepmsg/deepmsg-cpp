@@ -58,7 +58,12 @@ public:
     /// user session's answer to the leader (`onConsensusChallengeResponse`).
     virtual void on_consensus_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
                                                  std::string_view encoded_credentials) = 0;
-    /// `BackupQuery` (`ConsensusAdapter.java:250`), C9's.
+    /// `BackupQuery` (`ConsensusAdapter.java:250`): a backup queries the
+    /// leader for the current log/snapshot state. `log_position` is
+    /// `NULL_VALUE` when the query did not name one.
+    virtual void on_backup_query(std::int64_t correlation_id, std::int32_t response_stream_id, std::int32_t version,
+                                 std::int64_t log_position, std::string_view response_channel,
+                                 std::span<const std::uint8_t> encoded_credentials) = 0;
     virtual void on_unhandled_template(std::int32_t template_id) = 0;
 };
 

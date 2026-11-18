@@ -4,8 +4,10 @@
 #include <expected>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "cluster/common/termination_hook.h"
 #include "core/config/property_source.h"
@@ -119,6 +121,13 @@ struct ClusterBackupConfig
     std::int64_t replication_progress_timeout_ns{10'000'000'000};
     std::int64_t replication_progress_interval_ns{1'000'000'000};
 
+    /// `CredentialsSupplier` (`ClusterBackup.Context.credentialsSupplier`):
+    /// the default sends empty credentials and answers a challenge with an
+    /// empty response (`NullCredentialsSupplier`).
+    std::function<std::vector<std::uint8_t>()> encoded_credentials = [] { return std::vector<std::uint8_t>{}; };
+    std::function<std::vector<std::uint8_t>(std::span<const std::uint8_t>)> on_challenge =
+        [](std::span<const std::uint8_t>) { return std::vector<std::uint8_t>{}; };
+
     // Injected by tests / the binary.
     common::TerminationHook termination_hook{};
     common::ExtendedTerminationHook extended_termination_hook{};
@@ -149,6 +158,6 @@ private:
 
 /// `Configuration.threadName` for the backup agent: `cluster-backup` in the
 /// classic scheme, `aeron-cl-bu` in the new one (`ClusterBackup.java:243-244`).
-[[nodiscard]] std::string backup_thread_name(const ClusterBackupConfig& config);
+[[nodiscard]] std::string_view backup_thread_name(const ClusterBackupConfig& config);
 
 }  // namespace deepmsg::cluster::backup

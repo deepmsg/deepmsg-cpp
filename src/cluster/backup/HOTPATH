@@ -1,2 +1,10 @@
 # Hot-path translation units of this module, one path per line (relative to src/).
-cluster/backup/cluster_backup_agent.cpp
+#
+# `cluster_backup_agent.cpp` is deliberately not registered, for the same
+# reason the consensus module leaves its agent out (see
+# `src/cluster/consensus/HOTPATH`): the steady-state pass is small, but the same
+# translation unit holds the startup path (mark file link, archive contexts,
+# recording log), error descriptions and the channel strings rebuilt on state
+# transitions, so the object references `operator new` and the exception
+# runtime. Registration waits for a warm-up/steady-state split (C10's
+# allocation test).

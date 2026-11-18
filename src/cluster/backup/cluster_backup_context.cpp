@@ -20,6 +20,7 @@ constexpr std::string_view MEMBER_ID_PROP_NAME = "aeron.cluster.member.id";
 constexpr std::string_view MEMBERS_PROP_NAME = "aeron.cluster.members";
 constexpr std::string_view MEMBER_ENDPOINTS_PROP_NAME = "aeron.cluster.member.endpoints";
 constexpr std::string_view CONSENSUS_CHANNEL_PROP_NAME = "aeron.cluster.consensus.channel";
+constexpr std::string_view CONSENSUS_ENDPOINTS_PROP_NAME = "aeron.cluster.consensus.endpoints";
 constexpr std::string_view CONSENSUS_STREAM_ID_PROP_NAME = "aeron.cluster.consensus.stream.id";
 constexpr std::string_view SNAPSHOT_STREAM_ID_PROP_NAME = "aeron.cluster.snapshot.stream.id";
 constexpr std::string_view LOG_STREAM_ID_PROP_NAME = "aeron.cluster.log.stream.id";
@@ -48,6 +49,12 @@ constexpr std::string_view RESPONSE_TIMEOUT_PROP_NAME = "aeron.cluster.backup.re
 constexpr std::string_view PROGRESS_TIMEOUT_PROP_NAME = "aeron.cluster.backup.progress.timeout";
 constexpr std::string_view COOL_DOWN_INTERVAL_PROP_NAME = "aeron.cluster.backup.cool.down.interval";
 constexpr std::string_view SOURCE_TYPE_PROP_NAME = "aeron.cluster.backup.source.type";
+/// The C++ shell's own names (not in the reference): the credentials a backup
+/// sends on the connect request and the fixed answer it gives to a challenge.
+/// The Java tests use them with the fork's `ChallengeAuthenticatorSupplier`.
+constexpr std::string_view CREDENTIALS_PROP_NAME = "deepmsg.cluster.backup.credentials";
+constexpr std::string_view CHALLENGE_ANSWER_PROP_NAME = "deepmsg.cluster.backup.challenge.response";
+
 /// Deliberately without the `aeron.` prefix in the reference
 /// (`ClusterBackup.java:561`).
 constexpr std::string_view INITIAL_REPLAY_START_PROP_NAME = "cluster.backup.initial.replay.start";
@@ -234,7 +241,7 @@ std::string ClusterBackupConfig::mark_file_path() const
     return directory + "/cluster-mark.dat";
 }
 
-std::string backup_thread_name(const ClusterBackupConfig& /*config*/)
+std::string_view backup_thread_name(const ClusterBackupConfig& /*config*/)
 {
     return "aeron-cl-bu";
 }
@@ -325,6 +332,7 @@ std::expected<ClusterBackupConfig, Error> cluster_backup_config_from_properties(
     config.members = get_string(properties, MEMBERS_PROP_NAME, {});
     config.member_endpoints = get_string(properties, MEMBER_ENDPOINTS_PROP_NAME, {});
     config.consensus_channel = get_string(properties, CONSENSUS_CHANNEL_PROP_NAME, config.consensus_channel);
+    config.consensus_endpoints = get_string(properties, CONSENSUS_ENDPOINTS_PROP_NAME, {});
     config.catchup_endpoint = get_string(properties, CATCHUP_ENDPOINT_PROP_NAME, {});
     config.catchup_channel = get_string(properties, CATCHUP_CHANNEL_PROP_NAME, config.catchup_channel);
     config.aeron_dir = get_string(properties, AERON_DIR_PROP_NAME, {});
@@ -495,6 +503,18 @@ std::expected<ClusterBackupConfig, Error> cluster_backup_config_from_properties(
             return std::unexpected(make_error(
                 ErrorCode::config_error, "unknown cluster.backup.initial.replay.start: " + std::string{*replay_start}));
         }
+    }
+
+    if (const auto credentials = properties.get(CREDENTIALS_PROP_NAME); credentials.has_value())
+    {
+        std::string value{*credentials};
+        config.encoded_credentials = [value]() { return std::vector<std::uint8_t>(value.begin(), value.end()); };
+    }
+    if (const auto answer = properties.get(CHALLENGE_ANSWER_PROP_NAME); answer.has_value())
+    {
+        std::string value{*answer};
+        config.on_challenge = [value](std::span<const std::uint8_t>)
+        { return std::vector<std::uint8_t>(value.begin(), value.end()); };
     }
 
     (void)THREAD_NAMING_PROP_NAME;
