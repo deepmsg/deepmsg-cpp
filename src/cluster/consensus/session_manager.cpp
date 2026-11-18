@@ -249,8 +249,7 @@ int SessionManager::process_all_pending_sessions(std::int64_t now_ns_value, std:
     // user *and* the backup sessions: the leader answers a `BackupQuery` here,
     // the follower through `processPendingBackupSessions`
     // (`ConsensusModuleAgent.java:2432`, `:2457`).
-    int work_count =
-        process_pending_sessions(pending_sessions_, now_ns_value, leader_member_id, leadership_term_id);
+    int work_count = process_pending_sessions(pending_sessions_, now_ns_value, leader_member_id, leadership_term_id);
     work_count += process_pending_sessions(pending_backup_sessions_, now_ns_value, leader_member_id, 0);
     return work_count;
 }
