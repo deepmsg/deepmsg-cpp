@@ -245,7 +245,14 @@ void SessionManager::on_challenge_response(std::int64_t correlation_id, std::int
 int SessionManager::process_all_pending_sessions(std::int64_t now_ns_value, std::int32_t leader_member_id,
                                                  std::int64_t leadership_term_id)
 {
-    return process_pending_sessions(pending_sessions_, now_ns_value, leader_member_id, leadership_term_id);
+    // `processAllPendingSessions` (`SessionManager.java:517-541`) processes the
+    // user *and* the backup sessions: the leader answers a `BackupQuery` here,
+    // the follower through `processPendingBackupSessions`
+    // (`ConsensusModuleAgent.java:2432`, `:2457`).
+    int work_count =
+        process_pending_sessions(pending_sessions_, now_ns_value, leader_member_id, leadership_term_id);
+    work_count += process_pending_sessions(pending_backup_sessions_, now_ns_value, leader_member_id, 0);
+    return work_count;
 }
 
 void SessionManager::on_backup_query(std::int64_t correlation_id, std::int32_t response_stream_id, std::int32_t version,

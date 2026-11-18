@@ -515,7 +515,8 @@ protected:
         backup_archive_dir_ = root_dir_ + "/backup" + std::string{suffix} + "-archive";
     }
 
-    void start_backup(std::string_view suffix = "", int catchup_port = -1, bool clean_start = true)
+    void start_backup(std::string_view suffix = "", int catchup_port = -1, bool clean_start = true,
+                      std::string_view source_type = "ANY", std::string_view replay_start = "")
     {
         use_backup_dirs(suffix);
         if (catchup_port < 0)
@@ -542,7 +543,14 @@ protected:
             << "aeron.cluster.log.channel=aeron:udp?term-length=512k|alias=raft\n"
             << "aeron.cluster.backup.catchup.endpoint=localhost:" << catchup_port << "\n"
             << "aeron.cluster.backup.catchup.channel=aeron:udp?endpoint=localhost:0\n"
-            << "aeron.cluster.backup.source.type=ANY\n";
+            // The reference's TestCluster shortens only the cool-down
+            // (`TestCluster.java:598`); a rejected source costs one.
+            << "aeron.cluster.backup.cool.down.interval=1s\n"
+            << "aeron.cluster.backup.source.type=" << source_type << "\n";
+        if (!replay_start.empty())
+        {
+            out << "cluster.backup.initial.replay.start=" << replay_start << "\n";
+        }
         out.close();
 
         auto spawned = ChildProcess::spawn(AXC_CLUSTER_BACKUP_BIN, {path}, {},
@@ -686,6 +694,8 @@ protected:
     {
         const int leader = leader_index();
         ASSERT_GE(leader, 0) << "no leader";
+        // A second batch needs a new session (`reconnectClient`).
+        session_.close();
         const std::string egress = "aeron:udp?endpoint=localhost:" + std::to_string(egress_port());
         ASSERT_TRUE(
             session_.connect_udp(member_dir(leader, "aeron"), ingress_endpoints(), egress, std::chrono::seconds(30)))
@@ -969,6 +979,62 @@ protected:
         restart_client_.reset();
     }
 
+    /// `ArchiveTool <archive dir> <command…>` with the reference jar.
+    [[nodiscard]] axc::interop::ProcessResult run_archive_tool(const std::string& archive_dir,
+                                                               const std::vector<std::string>& arguments)
+    {
+        axc::interop::ProcessOptions options;
+        options.arguments = java_opens();
+        options.arguments.insert(options.arguments.end(), {"-cp", jar_, "io.aeron.archive.ArchiveTool", archive_dir});
+        options.arguments.insert(options.arguments.end(), arguments.begin(), arguments.end());
+        options.timeout = std::chrono::seconds(60);
+        auto result = axc::interop::run_process("/usr/bin/java", options);
+        EXPECT_TRUE(result) << result.error().message.view();
+        return result ? *result : axc::interop::ProcessResult{};
+    }
+
+    /// The log recording's id from the backup's own `recording.log`.
+    [[nodiscard]] std::int64_t term_recording_id(const std::string& cluster_dir)
+    {
+        const auto log = run_tool(cluster_dir, "recording-log");
+        const std::string marker = "type=TERM";
+        const std::size_t term = log.output.find(marker);
+        const std::size_t recording = log.output.rfind("recordingId=", term);
+        if (std::string::npos == term || std::string::npos == recording)
+        {
+            ADD_FAILURE() << "no TERM entry in the recording log:\n" << log.output;
+            return -1;
+        }
+        return std::strtoll(log.output.c_str() + recording + std::strlen("recordingId="), nullptr, 10);
+    }
+
+    struct RecordingExtent
+    {
+        std::int64_t start_position{-1};
+        std::int64_t stop_position{-1};
+    };
+
+    /// `ArchiveTool describe <id>`'s extent. The positions are absolute (the
+    /// recording of a replay keeps the replayed stream's positions), so
+    /// `start_position` is where the replay started.
+    [[nodiscard]] RecordingExtent recording_extent(const std::string& archive_dir, std::int64_t recording_id)
+    {
+        const auto described = run_archive_tool(archive_dir, {"describe", std::to_string(recording_id)});
+        RecordingExtent extent;
+        for (const auto& [name, target] :
+             {std::pair{"startPosition=", &extent.start_position}, std::pair{"stopPosition=", &extent.stop_position}})
+        {
+            const std::size_t marker = described.output.find(name);
+            if (std::string::npos == marker)
+            {
+                ADD_FAILURE() << "no " << name << " in the archive tool's output:\n" << described.output;
+                continue;
+            }
+            *target = std::strtoll(described.output.c_str() + marker + std::strlen(name), nullptr, 10);
+        }
+        return extent;
+    }
+
     [[nodiscard]] axc::interop::ProcessResult run_tool(const std::string& directory, const std::string& command)
     {
         axc::interop::ProcessOptions options;
@@ -1188,6 +1254,78 @@ TEST_F(Xc9BackupJavaClusterTest, theBackupResumesAfterItIsStopped)
     EXPECT_FALSE(refused.succeeded) << "the resumed backup's auction took a bid below its best price";
     EXPECT_EQ(43, refused.customer_id) << "the resumed backup does not hold the ten bids of its own round";
     EXPECT_EQ(109, refused.price) << "the resumed backup does not hold the ten bids of its own round";
+}
+
+/// C9-2 (`shouldBackupClusterNoSnapshotsAndNonEmptyLog` over
+/// `ClusterBackup.SourceType`, `ClusterBackupTest.java:81-108`): under ANY and
+/// FOLLOWER a follower's answer is accepted, under LEADER the leader's — the
+/// reference's leader processes backup sessions through
+/// `processAllPendingSessions` (`ConsensusModuleAgent.java:2432`), not only the
+/// follower path (`:2457`), so all three reach BACKING_UP.
+TEST_F(Xc9BackupJavaClusterTest, theBackupAcceptsEverySourceType)
+{
+    start_java_cluster();
+    start_containers();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
+    send_messages(10);
+
+    for (const char* type : {"ANY", "LEADER", "FOLLOWER"})
+    {
+        const std::string suffix = std::string{"-"} + type;
+        start_backup(suffix, -1, true, type);
+        ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+            << "source.type=" << type << " never reached BACKING_UP (state="
+            << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+        ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+            << "source.type=" << type << " never reached the leader's commit position";
+        stop_backup();
+    }
+}
+
+/// C9-2 (`ClusterBackup.Configuration.ReplayStart`): with `beginning` the live
+/// log is replayed from the start of the cluster log, not from the latest
+/// snapshot, so the backup's log recording is longer by the snapshot's
+/// position.
+TEST_F(Xc9BackupJavaClusterTest, theBackupReplaysFromTheBeginningWhenAsked)
+{
+    start_java_cluster();
+    start_containers();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << "no leader";
+    send_messages(10);
+    take_snapshot();
+    const std::int64_t snapshot_position =
+        java_counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    send_messages(10);  // a second batch after the snapshot, so the log has a tail
+
+    start_backup("-latest", -1, true, "ANY");
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "the default backup never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the default backup never reached the leader's commit position";
+    stop_backup();
+    const RecordingExtent latest = recording_extent(backup_archive(), term_recording_id(backup_cluster()));
+
+    start_backup("-beginning", -1, true, "ANY", "beginning");
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "the beginning backup never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the beginning backup never reached the leader's commit position";
+    stop_backup();
+    const RecordingExtent beginning = recording_extent(backup_archive(), term_recording_id(backup_cluster()));
+
+    ASSERT_EQ(0, beginning.start_position) << "the beginning backup did not replay from the start of the log";
+    EXPECT_GT(latest.start_position, 0) << "the default backup did not start at the latest snapshot";
+    EXPECT_LE(latest.start_position, snapshot_position + 64)
+        << "the default backup's start is not the snapshot's position (snapshot=" << snapshot_position << ")";
+    EXPECT_GT(latest.stop_position, latest.start_position) << "the default backup recorded no log";
+    // Both recordings end at the same absolute log position: the difference is
+    // only where the replay started.
+    EXPECT_EQ(beginning.stop_position, latest.stop_position) << "the two backups did not reach the same end of the log";
 }
 
 }  // namespace

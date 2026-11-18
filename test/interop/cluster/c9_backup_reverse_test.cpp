@@ -8,6 +8,7 @@
 
 #include <aeronc.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <csignal>
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -25,11 +27,17 @@
 
 #include <unistd.h>
 
+#include "cluster/backup/backup_publisher.h"
+#include "cluster/backup/channel_uri.h"
 #include "cluster/backup/cluster_backup_context.h"
+#include "cluster/client/client_config.h"
+#include "cluster/common/cluster_codecs.h"
 #include "cluster/common/cluster_counters.h"
+#include "cluster/common/recording_log.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "fixture/cluster_client_session.h"
 #include "fixture/process.h"
+#include "io_aeron_cluster_codecs/BackupResponse.h"
 
 #ifndef AXC_CLUSTER_NODE_BIN
 #define AXC_CLUSTER_NODE_BIN ""
@@ -79,6 +87,41 @@ void on_client_error(void* /*clientd*/, int /*errcode*/, const char* /*message*/
     std::memcpy(bytes.data(), &value, sizeof(value));
     return bytes;
 }
+
+namespace
+{
+
+/// `BackupQueryRunner` (`TestCluster.java:2584-2694`): one `BackupQuery` to a
+/// member over its consensus channel and the `BackupResponse` snapshots decoded
+/// from the response channel. The reference reads its ephemeral subscription
+/// address; here the response channel names a port.
+struct QueryResult
+{
+    bool found{false};
+    std::vector<std::int64_t> snapshot_log_positions;
+};
+
+void on_query_response(void* clientd, const std::uint8_t* buffer, std::size_t length, aeron_header_t* /*header*/)
+{
+    auto* result = static_cast<QueryResult*>(clientd);
+    const std::span<const std::uint8_t> message{buffer, length};
+    auto header = deepmsg::cluster::common::message_header(message);
+    if (!header || header->templateId() != io::aeron::cluster::codecs::BackupResponse::SBE_TEMPLATE_ID)
+    {
+        return;
+    }
+    auto decoder = deepmsg::cluster::common::wrap_body<io::aeron::cluster::codecs::BackupResponse>(message, *header);
+    result->found = true;
+    auto snapshots = decoder.snapshots();
+    result->snapshot_log_positions.clear();
+    for (std::uint64_t i = 0; i < snapshots.count(); ++i)
+    {
+        snapshots.next();
+        result->snapshot_log_positions.push_back(snapshots.logPosition());
+    }
+}
+
+}  // namespace
 
 class Xc9JavaBackupAgainstOurClusterTest : public ::testing::Test
 {
@@ -297,7 +340,7 @@ protected:
             // The reference's TestCluster also shortens only the cool-down
             // (`TestCluster.java:598`); the leader-change case needs it short.
             << "aeron.cluster.backup.cool.down.interval=1s\n"
-            << "aeron.cluster.backup.source.type=ANY\n"
+            << "aeron.cluster.backup.source.type=" << backup_source_type_ << "\n"
             << "aeron.threading.mode=SHARED\n";
         if (!backup_progress_timeout_.empty())
         {
@@ -528,6 +571,120 @@ protected:
     void send_ints(int count)
     {
         send_ints(0, count);
+    }
+
+    [[nodiscard]] int follower_index()
+    {
+        const int leader = leader_index();
+        for (int i = 0; i < MEMBERS; ++i)
+        {
+            if (i != leader && nodes_[i] &&
+                1 == counter(i, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /// `backupQueryContainsSnapshot` (`TestCluster.java:2517-2524`): query a
+    /// follower at `log_position` and return the snapshots' log positions. The
+    /// query is re-sent while no response arrives, as the reference does.
+    [[nodiscard]] QueryResult query_snapshots(std::int64_t log_position, int query_index)
+    {
+        const int member = follower_index();
+        EXPECT_GE(member, 0) << "no follower to answer a backup query";
+
+        // `ClientConfig.dir` is a view: the path must outlive the connect.
+        const std::string client_dir = node_dir(member) + "/aeron";
+        axc::core::ClientConfig client_config{client_dir};
+        client_config.on_error = &on_client_error;
+        auto connected = DeepmsgClient::connect(client_config);
+        EXPECT_TRUE(connected) << connected.error().message.view();
+
+        const std::string response_channel =
+            "aeron:udp?endpoint=localhost:" + std::to_string(base_port_ + 300 + query_index);
+        const std::int32_t response_stream_id = 5000 + query_index;
+        const std::int32_t consensus_stream_id = 108;
+        const std::string consensus_channel = deepmsg::cluster::backup::channel_with_endpoint(
+            "aeron:udp?term-length=64k", "localhost:" + std::to_string(member_port(member, 1)));
+
+        auto publication_add = connected->add_exclusive_publication(consensus_channel, consensus_stream_id);
+        auto subscription_add = connected->add_subscription(response_channel, response_stream_id);
+
+        axc::core::ExPubPtr publication{};
+        axc::core::SubPtr subscription{};
+        const auto add_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while ((!publication || !subscription) && std::chrono::steady_clock::now() < add_deadline)
+        {
+            if (!publication)
+            {
+                auto polled = publication_add.poll();
+                if (polled && polled->has_value())
+                {
+                    publication = std::move(**polled);
+                }
+            }
+            if (!subscription)
+            {
+                auto polled = subscription_add.poll();
+                if (polled && polled->has_value())
+                {
+                    subscription = std::move(**polled);
+                }
+            }
+            (void)connected->do_work();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_TRUE(publication) << "the consensus publication never connected";
+        EXPECT_TRUE(subscription) << "the response subscription never connected";
+        if (!publication || !subscription)
+        {
+            return {};
+        }
+
+        QueryResult result{};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        auto next_offer = std::chrono::steady_clock::now();
+        while (!result.found && std::chrono::steady_clock::now() < deadline)
+        {
+            (void)connected->do_work();
+            if (std::chrono::steady_clock::now() >= next_offer &&
+                aeron_exclusive_publication_is_connected(publication.get()))
+            {
+                const std::int64_t correlation_id = connected->next_correlation_id();
+                if (deepmsg::cluster::backup::BackupPublisher::backup_query(
+                        publication.get(), correlation_id, response_stream_id,
+                        deepmsg::cluster::client::PROTOCOL_SEMANTIC_VERSION, log_position, response_channel, {}))
+                {
+                    next_offer = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+                }
+            }
+            (void)aeron_subscription_poll(subscription.get(), &on_query_response, &result, 10);
+        }
+        EXPECT_TRUE(result.found) << "no BackupResponse for logPosition=" << log_position;
+        return result;
+    }
+
+    /// The snapshots of our cluster's log for service 0, oldest first.
+    [[nodiscard]] std::vector<std::int64_t> snapshot_log_positions(int member)
+    {
+        auto log = deepmsg::cluster::common::RecordingLog::open(node_dir(member) + "/cluster", false);
+        EXPECT_TRUE(log) << log.error().message.view();
+        std::vector<std::int64_t> positions;
+        if (!log)
+        {
+            return positions;
+        }
+        for (const auto& entry : log->entries())
+        {
+            if (deepmsg::cluster::common::RecordingLog::ENTRY_TYPE_SNAPSHOT == entry.type && 0 == entry.service_id)
+            {
+                positions.push_back(entry.log_position);
+            }
+        }
+        std::sort(positions.begin(), positions.end());
+        return positions;
     }
 
     void stop_cluster_member(int index)
@@ -876,6 +1033,7 @@ protected:
     bool tracking_{false};
     std::string heartbeat_timeout_{"2s"};
     std::string backup_progress_timeout_{};
+    std::string backup_source_type_{"ANY"};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> nodes_{};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> containers_{};
     std::array<std::unique_ptr<DeepmsgClient>, MEMBERS> clients_{};
@@ -887,6 +1045,78 @@ protected:
     ClusterClientSession restart_session_{};
     ClusterClientSession session_{};
 };
+
+/// C9-2 (`shouldQueryForSnapshotsWithLogPosition`, `ClusterBackupTest.java:667-710`):
+/// the CM answers a `BackupQuery` with the snapshots at or before its log
+/// position, or the lowest one (`SessionManager`'s
+/// `findSnapshotAtOrBeforeOrLowest`). The reference's exact table is replayed
+/// against three snapshots taken twenty messages apart.
+TEST_F(Xc9JavaBackupAgainstOurClusterTest, theBackupQueryPicksTheSnapshotAtOrBeforeTheLogPosition)
+{
+    tracking_ = true;
+    start_cluster();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "our cluster never became active";
+
+    constexpr int batch = 20;
+    for (int i = 0; i < 3; ++i)
+    {
+        send_ints(i * batch, batch);
+        take_snapshot();
+    }
+
+    const int leader = leader_index();
+    ASSERT_GE(leader, 0) << "no leader";
+    const std::vector<std::int64_t> snapshots = snapshot_log_positions(leader);
+    ASSERT_EQ(3U, snapshots.size()) << "the cluster did not take three snapshots";
+
+    int query_index = 0;
+    const auto expect = [&](std::int64_t log_position, std::int64_t expected)
+    {
+        const QueryResult result = query_snapshots(log_position, query_index++);
+        ASSERT_TRUE(result.found) << "no response for logPosition=" << log_position;
+        EXPECT_FALSE(result.snapshot_log_positions.empty()) << "no snapshot for logPosition=" << log_position;
+        for (const std::int64_t position : result.snapshot_log_positions)
+        {
+            EXPECT_EQ(expected, position) << "wrong snapshot for logPosition=" << log_position;
+        }
+    };
+
+    expect(0, snapshots[0]);
+    expect(snapshots[0] - 1, snapshots[0]);
+    expect(snapshots[0], snapshots[0]);
+    expect(snapshots[0] + 1, snapshots[0]);
+    expect(snapshots[1] - 1, snapshots[0]);
+    expect(snapshots[1], snapshots[1]);
+    expect(snapshots[1] + 1, snapshots[1]);
+    expect(snapshots[2] - 1, snapshots[1]);
+    expect(snapshots[2], snapshots[2]);
+    expect(snapshots[2] + 1, snapshots[2]);
+    expect(snapshots[2] + 1'000'000, snapshots[2]);
+    expect(std::numeric_limits<std::int64_t>::max(), snapshots[2]);
+}
+
+/// C9-2 (`ClusterBackupTest.java:81-108` over `SourceType`): our cluster answers
+/// a backup query from the leader as well as from a follower — the leader
+/// processes pending backup sessions through `processAllPendingSessions`
+/// (`SessionManager.java:517-541`), the follower through
+/// `processPendingBackupSessions` (`ConsensusModuleAgent.java:2457`). A backup
+/// with `source.type=LEADER` therefore backs our cluster up.
+TEST_F(Xc9JavaBackupAgainstOurClusterTest, theJavaBackupAcceptsTheLeaderAsItsSource)
+{
+    tracking_ = true;
+    start_cluster();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "our cluster never became active";
+
+    send_ints(10);
+
+    backup_source_type_ = "LEADER";
+    start_java_backup();
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "a backup with source.type=LEADER never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the LEADER-source backup never reached the cluster's commit position";
+}
 
 TEST_F(Xc9JavaBackupAgainstOurClusterTest, theJavaBackupBacksUpOurCluster)
 {
