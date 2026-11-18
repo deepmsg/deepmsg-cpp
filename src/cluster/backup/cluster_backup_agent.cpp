@@ -954,26 +954,43 @@ bool ClusterBackupAgent::source_acceptable(std::int32_t leader_member_id, std::i
     return false;
 }
 
-/// `ClusterBackupAgent.replayStartPosition` (`:1120-1154`).
-std::int64_t ClusterBackupAgent::replay_start_position() const
+namespace
 {
-    if (const auto* last_term = recording_log_->find_last_term(); nullptr != last_term)
+
+std::int64_t archive_stop_position_thunk(void* context, std::int64_t recording_id) noexcept
+{
+    auto* archive = static_cast<aeron_archive_t*>(context);
+    std::int64_t stop_position = NULL_POSITION;
+    if (0 == aeron_archive_get_stop_position(&stop_position, archive, recording_id))
     {
-        std::int64_t stop_position = NULL_POSITION;
-        if (0 == aeron_archive_get_stop_position(&stop_position, backup_archive_, last_term->recording_id))
+        return stop_position;
+    }
+    return NULL_POSITION;
+}
+
+}  // namespace
+
+std::int64_t replay_start_position(const common::RecordingLog::Entry* last_term,
+                                   std::span<const common::RecordingLog::Snapshot> snapshots,
+                                   BackupReplayStart initial_replay_start, StopPositionFn stop_position_of,
+                                   void* context) noexcept
+{
+    if (nullptr != last_term)
+    {
+        if (nullptr == stop_position_of)
         {
-            return stop_position;
+            return NULL_POSITION;
         }
-        return NULL_POSITION;
+        return stop_position_of(context, last_term->recording_id);
     }
 
-    if (BackupReplayStart::beginning == config_.initial_replay_start)
+    if (BackupReplayStart::beginning == initial_replay_start)
     {
         return NULL_POSITION;
     }
 
     std::int64_t position = NULL_POSITION;
-    for (const auto& snapshot : snapshots_retrieved_)
+    for (const auto& snapshot : snapshots)
     {
         if (0 == snapshot.service_id && snapshot.log_position > position)
         {
@@ -981,6 +998,13 @@ std::int64_t ClusterBackupAgent::replay_start_position() const
         }
     }
     return position;
+}
+
+/// `ClusterBackupAgent.replayStartPosition` (`:1120-1154`).
+std::int64_t ClusterBackupAgent::replay_start_position()
+{
+    return backup::replay_start_position(recording_log_->find_last_term(), snapshots_retrieved_,
+                                         config_.initial_replay_start, &archive_stop_position_thunk, backup_archive_);
 }
 
 void ClusterBackupAgent::reset()

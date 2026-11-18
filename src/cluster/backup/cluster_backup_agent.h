@@ -104,7 +104,7 @@ private:
     [[nodiscard]] bool has_progress_stalled(std::int64_t now_ms) const noexcept;
 
     [[nodiscard]] bool source_acceptable(std::int32_t leader_member_id, std::int32_t member_id) const noexcept;
-    [[nodiscard]] std::int64_t replay_start_position() const;
+    [[nodiscard]] std::int64_t replay_start_position();
 
     void state(ClusterBackupState new_state, std::int64_t now_ms);
 
@@ -160,5 +160,17 @@ private:
     std::int64_t slow_tick_deadline_ms_{0};
     std::int64_t mark_file_update_deadline_ms_{0};
 };
+
+/// `ClusterBackupAgent.replayStartPosition` (`:1120-1154`): where the live log
+/// replay starts — the last term's recording stop position when the backup
+/// already has one, `NULL_POSITION` for `beginning` or no snapshots, else the
+/// largest service-0 snapshot position. `stop_position_of` is the reference's
+/// `AeronArchive.getStopPosition` (the archive client, behind a test seam).
+using StopPositionFn = std::int64_t (*)(void* context, std::int64_t recording_id);
+
+[[nodiscard]] std::int64_t replay_start_position(const common::RecordingLog::Entry* last_term,
+                                                 std::span<const common::RecordingLog::Snapshot> snapshots,
+                                                 BackupReplayStart initial_replay_start,
+                                                 StopPositionFn stop_position_of, void* context) noexcept;
 
 }  // namespace deepmsg::cluster::backup

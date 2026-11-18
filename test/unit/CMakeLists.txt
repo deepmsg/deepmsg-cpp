@@ -114,6 +114,17 @@ axc_add_executable(axc_cluster_unit_tests
 target_compile_definitions(axc_cluster_unit_tests PRIVATE
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
+# C9-2: the reference's `ClusterBackupAgentTest` (the replay-start cases) and
+# `ClusterBackupContextTest` (the directory conclusion and the active mark file).
+axc_add_executable(axc_cluster_backup_unit_tests
+    SOURCES
+        cluster/backup/cluster_backup_agent_test.cpp
+        cluster/backup/cluster_backup_context_test.cpp
+    DEPS
+        axc_cluster_backup
+        axc_cluster_common
+        GTest::gtest_main)
+
 # C3a: the client side needs a media driver (the scripted cluster runs on an
 # embedded one), so it is its own binary.
 axc_add_executable(axc_cluster_client_unit_tests

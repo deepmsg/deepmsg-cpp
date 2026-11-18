@@ -205,6 +205,14 @@ int main(int argc, char* argv[])
     {
         fail(std::string{loaded.error().message.view()});
     }
+    // `ClusterBackupMediaDriver.java:96` sets `spiesSimulateConnection(true)`:
+    // the backup's driver lets a spy count as a connection. A caller may
+    // override it.
+    if (!properties->get("aeron.driver.spies.simulate.connection").has_value())
+    {
+        (void)aeron_properties_setenv("aeron.driver.spies.simulate.connection", "true");
+    }
+
     properties->for_each(
         [](std::string_view name, std::string_view value)
         {
