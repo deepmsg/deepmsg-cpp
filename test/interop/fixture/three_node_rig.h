@@ -394,6 +394,13 @@ protected:
 
     void start_container(int round, int index)
     {
+        spawn_container(round, index);
+        await_container_started(round, index);
+    }
+
+    /// Spawns one container attempt: its environment, a fresh log, the process.
+    void spawn_container(int round, int index)
+    {
         const std::string node_dir = round_dir(round) + "/node" + std::to_string(index);
         if (!role_dir_.empty())
         {
@@ -447,22 +454,38 @@ protected:
             (void)::unsetenv("AXC_TEST_SNAPSHOT_LOAD_THROW");
         }
 
-        // The reference container sends its start-up ServiceAck exactly once,
-        // and `ConsensusModuleProxy.checkResult` (Java `:219-235`) turns an
-        // offer on a not-yet-connected publication into a fatal
-        // `ClusterException`. The CM creates its control subscription during
-        // `onStart`, but the pairing takes a driver round trip to connect, so a
-        // container spawned inside that window exits with
-        // "publication is not connected"; its node then waits in
-        // `recoverFromSnapshotAndLog`'s service-ack loop with no timeout
-        // (`ConsensusModuleAgent.java:3535`, ours `:2168`) and never prints
-        // `STARTED cluster node` (2026-11-18: the CI red on `main` and #68).
-        // A container can also map the previous incarnation's CnC after a
-        // restart and then wait on counters that are never refreshed. Both
-        // shapes are recovered by the same rule the single-node rig has used
-        // since C4f (`xc2_single_node_test.cpp:302-330`): drive the container
-        // to `STARTED serviceId=`, and respawn it when it exits or stops
-        // making progress.
+        // The spawn's `>` redirect truncates the log, but the shell may do it
+        // after our first poll; a restart round (`start_round` on an existing
+        // directory) would otherwise leave the previous round's "STARTED
+        // serviceId=" visible and end the wait early.
+        std::error_code log_error;
+        std::filesystem::remove(node_dir + "/container.log", log_error);
+        auto container =
+            spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
+        ASSERT_TRUE(container) << container.error().message.view();
+        containers_[index] = std::make_unique<ChildProcess>(std::move(*container));
+    }
+
+    /// Drives a spawned container to `STARTED serviceId=`, respawning it when it
+    /// exits or makes no progress.
+    ///
+    /// The reference container sends its start-up ServiceAck exactly once, and
+    /// `ConsensusModuleProxy.checkResult` (Java `:219-235`) turns an offer on a
+    /// not-yet-connected publication into a fatal `ClusterException`. The CM
+    /// creates its control subscription during `onStart`, but the pairing takes
+    /// a driver round trip to connect, so a container spawned inside that
+    /// window exits with "publication is not connected"; its node then waits in
+    /// `recoverFromSnapshotAndLog`'s service-ack loop with no timeout
+    /// (`ConsensusModuleAgent.java:3535`, ours `:2168`) and never prints
+    /// `STARTED cluster node` (2026-11-18: the CI red on `main` and #68). A
+    /// container can also map the previous incarnation's CnC after a restart
+    /// and then wait on counters that are never refreshed. Both shapes are
+    /// recovered by the same rule the single-node rig has used since C4f
+    /// (`xc2_single_node_test.cpp:302-330`): drive the container to
+    /// `STARTED serviceId=`, and respawn it when it exits or stops making
+    /// progress.
+    void await_container_started(int round, int index)
+    {
         constexpr int MAX_ATTEMPTS = 20;
         constexpr auto START_TIMEOUT = std::chrono::seconds(15);
         const auto node_gone = [this, index]() { return nullptr == nodes_[index] || !nodes_[index]->running(); };
@@ -477,16 +500,10 @@ protected:
             {
                 return;
             }
-            // The spawn's `>` redirect truncates the log, but the shell may do
-            // it after our first poll; a restart round (`start_round` on an
-            // existing directory) would otherwise leave the previous round's
-            // "STARTED serviceId=" visible and end the wait early.
-            std::error_code log_error;
-            std::filesystem::remove(node_dir + "/container.log", log_error);
-            auto container =
-                spawn_logged(AXC_CONTAINER_BINARY, {node_dir + "/container.properties"}, node_dir + "/container.log");
-            ASSERT_TRUE(container) << container.error().message.view();
-            containers_[index] = std::make_unique<ChildProcess>(std::move(*container));
+            if (!containers_[index])
+            {
+                spawn_container(round, index);
+            }
 
             const auto deadline = std::chrono::steady_clock::now() + START_TIMEOUT;
             bool started = false;
@@ -692,7 +709,15 @@ protected:
         for (const auto& [index, clean_start] : restarts)
         {
             (void)clean_start;
-            start_container(round, index);
+            spawn_container(round, index);
+        }
+        // Every member of the group waits for its own container's ack, so spawn
+        // them all first and then wait: serialising the waits would stretch a
+        // three-node restart by one CM recovery per member.
+        for (const auto& [index, clean_start] : restarts)
+        {
+            (void)clean_start;
+            await_container_started(round, index);
         }
         // C6b's stale-CnC rule: do not read counters until the new drivers
         // have replaced the old CnC files.
