@@ -166,6 +166,17 @@ void mirror_stack_counters() noexcept
     set_counter(g_counters.error, source.errors.load(std::memory_order_relaxed));
 }
 
+/// One second's worth of the counters, and nothing more.
+///
+/// The stack's counters are the driver's bookkeeping, not the data path: the
+/// Rust media this one transcribes publishes them from the conductor's timer
+/// (`deepmsg:crates/driver/src/conductor.rs:1132,1427`, the 1 s
+/// `timer_interval_ns` branch), and a pass that mirrors them instead is what
+/// made this media slower than that one — eleven release stores and a clock
+/// read on every poll, at ~5-6 million polls a second, was ~62% of the
+/// receiver's cycles in the kernel and a fifth of the rest in the mirror
+/// (`analysis/dpdk/notes-2026-11-18-why-the-cpp-dpdk-is-slower.md`). The
+/// stack's half moves here so both halves change together.
 void update_port_counters() noexcept
 {
     const std::int64_t now =
@@ -176,6 +187,8 @@ void update_port_counters() noexcept
         return;
     }
     g_next_stats_ns = now + 1000LL * 1000 * 1000;
+
+    mirror_stack_counters();
 
     if (nullptr != g_port)
     {
@@ -199,6 +212,14 @@ struct PollerState
     bool inner_ready{false};
     bool receiver{false};
     std::vector<aeron_udp_channel_transport_t*> transports;
+    /// The transports in this poller whose frames do **not** come off the
+    /// stack. They are the only reason the reference poller below still has
+    /// anything to do; with none of them its `recvmmsg` would be a syscall on a
+    /// socket that never has a datagram (see `dpdk_poller_poll`).
+    std::vector<aeron_udp_channel_transport_t*> kernel_transports;
+    /// A count of passes, so the clock read that paces the counters happens
+    /// once every thousand and not once a pass.
+    std::uint64_t passes{0};
     std::vector<std::uint8_t> buffer;
 };
 
@@ -524,6 +545,13 @@ extern "C" int dpdk_poller_add(aeron_udp_transport_poller_t* poller, aeron_udp_c
     {
         state->transports.push_back(transport);
     }
+    else
+    {
+        // A transport with no stack binding is the kernel's: the default
+        // poller is the only thing that reads it, so it is what decides
+        // whether the poller poll calls the default at all.
+        state->kernel_transports.push_back(transport);
+    }
     return result;
 }
 
@@ -532,6 +560,10 @@ extern "C" int dpdk_poller_remove(aeron_udp_transport_poller_t* poller, aeron_ud
     auto* state = static_cast<PollerState*>(poller->bindings_clientd);
     const int result = g_default->poller_remove_func(&state->inner, transport);
     std::erase(state->transports, transport);
+    // By the transport and not by the binding: the transport state may have
+    // been closed by the time the reference takes it out of the poller, and a
+    // classification read again would have forgotten which list it went in.
+    std::erase(state->kernel_transports, transport);
     return result;
 }
 
@@ -547,8 +579,14 @@ extern "C" int dpdk_poller_poll(aeron_udp_transport_poller_t* poller, struct mms
     if (state->receiver)
     {
         work += g_stack->pump();
-        mirror_stack_counters();
-        update_port_counters();
+        // The counters are paced by the clock, and the clock is read once
+        // every thousand passes rather than once a pass: 0x3FF is ~180 us at
+        // the measured ~5.6 million passes a second, and
+        // `update_port_counters` keeps its own one-second boundary on top.
+        if (0 == (++state->passes & 0x3FF))
+        {
+            update_port_counters();
+        }
     }
     if (nullptr != g_counters.poller)
     {
@@ -587,8 +625,18 @@ extern "C" int dpdk_poller_poll(aeron_udp_transport_poller_t* poller, struct mms
         }
     }
 
-    work += static_cast<std::size_t>(
-        g_default->poller_poll_func(&state->inner, msgvec, vlen, bytes_rcved, recv_func, recvmmsg_func, clientd));
+    // The reference poller is called only when something in it is not on the
+    // stack. Its `poll` is a `recvmmsg` per transport per pass
+    // (`media/aeron_udp_transport_poller.c:187-215`), and a DPDK transport's
+    // composite kernel socket never has a datagram: calling it anyway is a
+    // syscall paid by every pass of a loop that runs millions of times a
+    // second (measured in `analysis/dpdk/notes-2026-11-18-why-the-cpp-dpdk-is-
+    // slower.md`: 62.7% of the receiver's cycles in the kernel).
+    if (!state->kernel_transports.empty())
+    {
+        work += static_cast<std::size_t>(
+            g_default->poller_poll_func(&state->inner, msgvec, vlen, bytes_rcved, recv_func, recvmmsg_func, clientd));
+    }
     return static_cast<int>(work);
 }
 
