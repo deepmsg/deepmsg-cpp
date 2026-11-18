@@ -1,6 +1,9 @@
 axc_add_library(axc_cluster_backup
     SOURCES
         module.cpp
+        cluster_backup_context.cpp
+        cluster_backup_agent.cpp
+        cluster_backup.cpp
     DEPS
         axc_cluster_common
         axc_cluster_consensus

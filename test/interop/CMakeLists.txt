@@ -86,6 +86,7 @@ axc_add_executable(axc_cluster_interop_tests
         cluster/xc0_java_cluster_test.cpp
         cluster/xc5_cluster_tool_test.cpp
         cluster/xc4b_binary_test.cpp
+        cluster/c9_backup_test.cpp
         fixture/java_process.cpp
         fixture/process.cpp
     DEPS
@@ -139,6 +140,7 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\""
     "AXC_CONTAINER_BINARY=\"$<TARGET_FILE:deepmsg-clustered-service-container>\""
     "AXC_CLUSTER_NODE_BIN=\"$<TARGET_FILE:deepmsg-cluster-node>\""
+    "AXC_CLUSTER_BACKUP_BIN=\"$<TARGET_FILE:deepmsg-cluster-backup>\""
     "AXC_CONSENSUS_MODULE_BIN=\"$<TARGET_FILE:deepmsg-consensus-module>\""
     "AXC_AERONMD_DEFAULT=\"${PROJECT_BINARY_DIR}/aeron/binaries/aeronmd\""
     "AXC_ECHO_SHARED_LIBRARY=\"$<TARGET_FILE:echo_service_dynamic>\""
@@ -148,6 +150,7 @@ target_compile_definitions(axc_cluster_interop_tests PRIVATE
     "AXC_ARCHIVE_SERVER_BIN=\"${PROJECT_BINARY_DIR}/apps/deepmsg-archive-server/deepmsg-archive-server\"")
 
 add_dependencies(axc_cluster_interop_tests deepmsg-clustered-service-container deepmsg-cluster-node
+    deepmsg-cluster-backup
     deepmsg-consensus-module echo_service_dynamic role_change_service_dynamic tracking_service_dynamic
     deepmsg-cluster-client-smoke axc_archive_server)
 
