@@ -532,10 +532,21 @@ protected:
         const int leader = leader_index();
         ASSERT_GE(leader, 0) << "no leader";
         // A new leader needs a new session (the reference's `reconnectClient`).
-        session_.close();
-        ASSERT_TRUE(session_.connect_udp(node_dir(leader) + "/aeron", ingress_endpoints(), egress_channel(),
-                                         std::chrono::seconds(30)))
-            << session_.last_error();
+        // The first attempt right after an election can lose the connect
+        // handshake (`cluster connect timeout`) on a loaded runner, so it is
+        // retried with a fresh session.
+        bool connected = false;
+        for (int attempt = 0; attempt < 3 && !connected; ++attempt)
+        {
+            session_.close();
+            connected = session_.connect_udp(node_dir(leader) + "/aeron", ingress_endpoints(), egress_channel(),
+                                             std::chrono::seconds(30));
+            if (!connected)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+        ASSERT_TRUE(connected) << session_.last_error();
         for (int i = first; i < first + count; ++i)
         {
             ASSERT_TRUE(session_.offer_and_await(int_payload(i), static_cast<std::size_t>(i - first + 1),
@@ -705,9 +716,25 @@ protected:
         {
             const int leader = leader_index();
             if (leader >= 0 && leader != old_leader &&
-                1 == counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+                1 == counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) &&
+                17 == counter(leader, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID))
             {
-                return true;
+                // Every surviving member must have closed its election too, or
+                // the client's ingress handshake races the new term.
+                bool others_closed = true;
+                for (int i = 0; i < MEMBERS; ++i)
+                {
+                    if (i == leader || !nodes_[i])
+                    {
+                        continue;
+                    }
+                    others_closed =
+                        others_closed && 17 == counter(i, deepmsg::cluster::common::CLUSTER_ELECTION_STATE_TYPE_ID);
+                }
+                if (others_closed)
+                {
+                    return true;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
