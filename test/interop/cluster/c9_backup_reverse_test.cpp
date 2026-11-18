@@ -10,6 +10,7 @@
 
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -180,7 +181,7 @@ protected:
         return value;
     }
 
-    void start_cluster()
+    void start_cluster(bool clean_start = true)
     {
         for (int i = 0; i < MEMBERS; ++i)
         {
@@ -194,9 +195,9 @@ protected:
             out << "aeron.dir=" << dir << "/aeron\n"
                 << "aeron.dir.delete.on.start=true\n"
                 << "aeron.cluster.dir=" << dir << "/cluster\n"
-                << "aeron.cluster.dir.delete.on.start=true\n"
+                << "aeron.cluster.dir.delete.on.start=" << (clean_start ? "true" : "false") << "\n"
                 << "aeron.archive.dir=" << dir << "/archive\n"
-                << "aeron.archive.dir.delete.on.start=true\n"
+                << "aeron.archive.dir.delete.on.start=" << (clean_start ? "true" : "false") << "\n"
                 << "aeron.cluster.id=" << CLUSTER_ID << "\n"
                 << "aeron.cluster.member.id=" << i << "\n"
                 << "aeron.cluster.members=" << members() << "\n"
@@ -208,7 +209,7 @@ protected:
                 << "aeron.cluster.replication.channel=aeron:udp?endpoint=localhost:0\n"
                 << "aeron.archive.control.channel=aeron:udp?endpoint=localhost:" << member_port(i, 4) << "\n"
                 << "aeron.archive.replication.channel=aeron:udp?endpoint=localhost:0\n"
-                << "aeron.cluster.leader.heartbeat.timeout=2s\n"
+                << "aeron.cluster.leader.heartbeat.timeout=" << heartbeat_timeout_ << "\n"
                 << "aeron.cluster.startup.canvass.timeout=10s\n"
                 << "aeron.cluster.service.count=1\n";
             out.close();
@@ -293,8 +294,15 @@ protected:
             << "aeron.cluster.log.channel=aeron:udp?term-length=512k|alias=raft\n"
             << "aeron.cluster.backup.catchup.endpoint=localhost:" << backup_catchup_port() << "\n"
             << "aeron.cluster.backup.catchup.channel=aeron:udp?endpoint=localhost:0\n"
+            // The reference's TestCluster also shortens only the cool-down
+            // (`TestCluster.java:598`); the leader-change case needs it short.
+            << "aeron.cluster.backup.cool.down.interval=1s\n"
             << "aeron.cluster.backup.source.type=ANY\n"
             << "aeron.threading.mode=SHARED\n";
+        if (!backup_progress_timeout_.empty())
+        {
+            out << "aeron.cluster.backup.progress.timeout=" << backup_progress_timeout_ << "\n";
+        }
         out.close();
 
         std::vector<std::string> arguments = java_opens();
@@ -302,6 +310,31 @@ protected:
         auto spawned = ChildProcess::spawn("/usr/bin/java", arguments, {}, root_dir_ + "/backup.log");
         ASSERT_TRUE(spawned) << spawned.error().message.view();
         backup_ = std::make_unique<ChildProcess>(std::move(*spawned));
+    }
+
+    void stop_cluster()
+    {
+        session_.close();
+        for (auto& container : containers_)
+        {
+            if (container)
+            {
+                container->terminate(std::chrono::seconds(10));
+                container.reset();
+            }
+        }
+        for (auto& node : nodes_)
+        {
+            if (node)
+            {
+                node->terminate(std::chrono::seconds(10));
+                node.reset();
+            }
+        }
+        for (auto& client : clients_)
+        {
+            client.reset();
+        }
     }
 
     void stop_all()
@@ -338,6 +371,12 @@ protected:
 
     [[nodiscard]] std::int64_t counter(int index, std::int32_t type_id)
     {
+        if (!nodes_[index])
+        {
+            // The member was stopped deliberately (the leader-change case): its
+            // driver is gone, so a counter read is not a failure.
+            return -1;
+        }
         if (!clients_[index])
         {
             const std::string client_dir = node_dir(index) + "/aeron";
@@ -445,19 +484,77 @@ protected:
 
     /// The tracking service's client messages carry a 4-byte id; the echo it
     /// answers with is the same payload.
-    void send_ints(int count)
+    void send_ints(int first, int count)
     {
         const int leader = leader_index();
         ASSERT_GE(leader, 0) << "no leader";
+        // A new leader needs a new session (the reference's `reconnectClient`).
+        session_.close();
         ASSERT_TRUE(session_.connect_udp(node_dir(leader) + "/aeron", ingress_endpoints(), egress_channel(),
                                          std::chrono::seconds(30)))
             << session_.last_error();
-        for (int i = 0; i < count; ++i)
+        for (int i = first; i < first + count; ++i)
         {
-            ASSERT_TRUE(
-                session_.offer_and_await(int_payload(i), static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
+            ASSERT_TRUE(session_.offer_and_await(int_payload(i), static_cast<std::size_t>(i - first + 1),
+                                                 std::chrono::seconds(20)))
                 << "echo failed at " << i;
         }
+    }
+
+    [[nodiscard]] std::int64_t leader_commit()
+    {
+        const int leader = leader_index();
+        return leader < 0 ? -1 : counter(leader, deepmsg::cluster::common::CLUSTER_COMMIT_POSITION_TYPE_ID);
+    }
+
+    /// The backup's live log position reaches the leader's commit position (the
+    /// reference's `awaitBackupLiveLogPosition`, `ClusterBackupTest.java:71`).
+    [[nodiscard]] bool wait_for_backup_live(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const std::int64_t commit = leader_commit();
+            if (commit >= 0 &&
+                backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID) >= commit)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    void send_ints(int count)
+    {
+        send_ints(0, count);
+    }
+
+    void stop_cluster_member(int index)
+    {
+        session_.close();
+        if (nodes_[index])
+        {
+            nodes_[index]->terminate(std::chrono::seconds(10));
+            nodes_[index].reset();
+        }
+        clients_[index].reset();
+    }
+
+    [[nodiscard]] bool wait_for_new_leader(int old_leader, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const int leader = leader_index();
+            if (leader >= 0 && leader != old_leader &&
+                1 == counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
     }
 
     [[nodiscard]] std::string ingress_endpoints() const
@@ -777,6 +874,8 @@ protected:
     std::string root_dir_{};
     int base_port_{0};
     bool tracking_{false};
+    std::string heartbeat_timeout_{"2s"};
+    std::string backup_progress_timeout_{};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> nodes_{};
     std::array<std::unique_ptr<ChildProcess>, MEMBERS> containers_{};
     std::array<std::unique_ptr<DeepmsgClient>, MEMBERS> clients_{};
@@ -877,6 +976,112 @@ TEST_F(Xc9JavaBackupAgainstOurClusterTest, theNodeStartsFromTheBackupDirectory)
     EXPECT_TRUE(wait_for_tracking(restart_tracking_file(), expected, std::chrono::seconds(30)))
         << "the recovered service did not apply the new message:\n"
         << tracking_dump(restart_tracking_file());
+}
+
+/// C9-2 (`shouldBackupClusterNoSnapshotsAndNonEmptyLogWithFailure`,
+/// `ClusterBackupTest.java:539-580`, and the live follow of
+/// `shouldBackupClusterAndJoinLive`, `:612-634`): no snapshot, a non-empty log,
+/// messages that arrive after BACKING_UP, and the member the backup was
+/// following dies. The backup must reset, re-query, follow the new leader, and
+/// the node started from its directory must replay every message.
+TEST_F(Xc9JavaBackupAgainstOurClusterTest, theBackupFollowsTheClusterThroughALeaderChange)
+{
+    tracking_ = true;
+    start_cluster();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "our cluster never became active";
+
+    send_ints(10);
+
+    start_java_backup();
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "state=" << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID);
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "live=" << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID)
+        << " commit=" << leader_commit();
+
+    // Messages after BACKING_UP are recorded by the live log subscription.
+    send_ints(10, 5);
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the backup did not follow the five messages sent after BACKING_UP";
+
+    // The member the backup was following dies: progress stalls, the backup goes
+    // through RESET_BACKUP, cools down and re-queries; a follower answers for the
+    // new leader (`ConsensusModuleAgent.java:2454-2458`).
+    const int old_leader = leader_index();
+    ASSERT_GE(old_leader, 0) << "no leader";
+    stop_cluster_member(old_leader);
+    ASSERT_TRUE(wait_for_new_leader(old_leader, std::chrono::seconds(60))) << "our cluster never elected a new leader";
+    send_ints(15, 5);
+
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the backup did not follow the new leader: live="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_LIVE_LOG_POSITION_TYPE_ID)
+        << " commit=" << leader_commit();
+
+    stop_all();
+
+    start_node_from_backup();
+    ASSERT_TRUE(wait_for_restart_leader(std::chrono::seconds(120)))
+        << "the node started from the backup never became the active leader (state="
+        << restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) << ")";
+
+    std::vector<std::int32_t> expected;
+    for (int i = 0; i < 20; ++i)
+    {
+        expected.push_back(i);
+    }
+    ASSERT_TRUE(wait_for_tracking(restart_tracking_file(), expected, std::chrono::seconds(60)))
+        << "the recovered service state:\n"
+        << tracking_dump(restart_tracking_file());
+    EXPECT_EQ(0, read_tracking(restart_tracking_file()).snapshot_loaded)
+        << "the snapshotless backup must not load a snapshot:\n"
+        << tracking_dump(restart_tracking_file());
+}
+
+/// C9-2 (the reset path of `ClusterBackupAgent.hasProgressStalled`): the
+/// cluster stops answering while the backup is BACKING_UP (the members are
+/// stopped, their directories kept). After the progress timeout the backup must
+/// go through `RESET_BACKUP`, cool down and re-query; when the cluster comes
+/// back on the same directories it must reach `BACKING_UP` again and follow the
+/// log.
+TEST_F(Xc9JavaBackupAgainstOurClusterTest, theBackupResetsWhenTheClusterStopsResponding)
+{
+    tracking_ = true;
+    // Short enough that the reset happens inside the test, long enough that the
+    // healthy cluster does not trip it.
+    backup_progress_timeout_ = "2s";
+    start_cluster();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "our cluster never became active";
+
+    send_ints(10);
+
+    start_java_backup();
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "state=" << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID);
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the backup never reached the leader's commit position";
+
+    stop_cluster();
+
+    bool saw_reset = false;
+    const auto reset_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (std::chrono::steady_clock::now() < reset_deadline && !saw_reset)
+    {
+        saw_reset = backup_state_code(ClusterBackupState::reset_backup) ==
+                    backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID);
+        if (!saw_reset)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    EXPECT_TRUE(saw_reset) << "the backup never went through RESET_BACKUP while the cluster was stopped";
+
+    start_cluster(false);
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(120))) << "the restarted cluster never became active";
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "the backup never returned to BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120))) << "the backup did not follow the restarted cluster";
 }
 
 }  // namespace
