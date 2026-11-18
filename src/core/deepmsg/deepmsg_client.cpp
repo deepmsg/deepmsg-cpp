@@ -85,12 +85,19 @@ std::expected<DeepmsgClient, Error> DeepmsgClient::connect(const ClientConfig& c
     DeepmsgClient result;
     result.client_ = std::move(client_guard);
     result.context_ = std::move(context_guard);
+    result.conductor_agent_invoker_ = config.use_conductor_agent_invoker;
     return result;
 }
 
 int DeepmsgClient::do_work() noexcept
 {
-    return nullptr == client_ ? -1 : aeron_main_do_work(client_.get());
+    if (nullptr == client_)
+    {
+        return -1;
+    }
+    // The agent mode gives the conductor its own thread; `aeron_main_do_work`
+    // would answer EINVAL there (`aeron_client.c:163-167`).
+    return conductor_agent_invoker_ ? aeron_main_do_work(client_.get()) : 0;
 }
 
 std::int64_t DeepmsgClient::next_correlation_id() noexcept

@@ -61,6 +61,7 @@ public:
         {
             client_ = std::move(other.client_);
             context_ = std::move(other.context_);
+            conductor_agent_invoker_ = other.conductor_agent_invoker_;
         }
         return *this;
     }
@@ -77,7 +78,8 @@ public:
     DeepmsgClient(const DeepmsgClient&) = delete;
     DeepmsgClient& operator=(const DeepmsgClient&) = delete;
 
-    /// Drives the client conductor once. Returns the C API result.
+    /// Drives the client conductor once. Returns the C API result; 0 when the
+    /// C client owns its conductor agent (`use_conductor_agent_invoker=false`).
     [[nodiscard]] int do_work() noexcept;
 
     /// `Aeron.nextCorrelationId()` (`Aeron.java`).
@@ -106,6 +108,9 @@ private:
     // destroyed in reverse order and the client must be closed before its context).
     ContextPtr context_{};
     ClientPtr client_{};
+    /// `use_conductor_agent_invoker`: when false the C client runs its own
+    /// conductor agent thread and `do_work` is not the owner of it.
+    bool conductor_agent_invoker_{true};
 };
 
 }  // namespace axc::core

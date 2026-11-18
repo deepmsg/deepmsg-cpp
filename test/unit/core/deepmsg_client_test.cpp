@@ -171,6 +171,39 @@ TEST(DeepmsgClient, ConnectsAndExposesCountersReader)
     EXPECT_GE(aeron_counters_reader_max_counter_id(client->counters_reader()), 0);
 }
 
+TEST(DeepmsgClient, AnAgentModeClientRunsItsOwnConductorAndDoWorkIsANoOp)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.ok());
+
+    std::optional<DeepmsgClient> client;
+    for (int attempt = 0; attempt < 200 && !client.has_value(); ++attempt)
+    {
+        auto connected = DeepmsgClient::connect({driver.dir(), false});
+        if (connected.has_value())
+        {
+            client = std::move(*connected);
+        }
+        else
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    ASSERT_TRUE(client.has_value());
+
+    // The C client owns the conductor in this mode (`aeron_main_do_work`
+    // answers EINVAL there, `aeron_client.c:163-167`); driving it by hand is a
+    // no-op, not an error, so a harness that pumps its clients can stay as is.
+    EXPECT_EQ(0, client->do_work());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (nullptr == client->counters_reader() && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_NE(nullptr, client->counters_reader());
+}
+
 TEST(DeepmsgClient, AddsCounterAndReadsPositionByAddress)
 {
     EmbeddedDriver driver;

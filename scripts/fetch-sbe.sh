@@ -16,5 +16,9 @@ fi
 
 mkdir -p "$(dirname "$dest")"
 echo "downloading $url"
-curl -fsSL -o "$dest" "$url"
+# Maven Central answers 429 to a share of the CI runners' requests (2026-11-18:
+# two gate jobs died here, while the same URL from another runner succeeded
+# minutes later). curl treats 429 as transient, so retry it with backoff; the
+# workflow also caches the jar, which keeps the cache-hit path off the network.
+curl -fsSL --retry 5 --retry-delay 3 --retry-max-time 120 -o "$dest" "$url"
 echo "$sha256  $dest" | sha256sum -c -
