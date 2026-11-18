@@ -100,11 +100,11 @@ void counter_set(const axc::core::CounterPtr& counter, std::int64_t value) noexc
     return nullptr == address ? 0 : __atomic_load_n(address, __ATOMIC_ACQUIRE);
 }
 
-void counter_propose_max(const axc::core::CounterPtr& counter, std::int64_t value) noexcept
+bool counter_propose_max(const axc::core::CounterPtr& counter, std::int64_t value) noexcept
 {
     if (!counter)
     {
-        return;
+        return false;
     }
     if (std::int64_t* address = aeron_counter_addr(counter.get()); nullptr != address)
     {
@@ -113,10 +113,11 @@ void counter_propose_max(const axc::core::CounterPtr& counter, std::int64_t valu
         {
             if (__atomic_compare_exchange_n(address, &current, value, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
             {
-                break;
+                return true;
             }
         }
     }
+    return false;
 }
 
 [[nodiscard]] std::vector<std::string> split_endpoints(std::string_view value)
@@ -209,7 +210,12 @@ std::expected<void, Error> ClusterBackupAgent::on_start()
 {
     const std::int64_t now = now_ms();
 
-    auto connected = axc::core::DeepmsgClient::connect(axc::core::ClientConfig{config_.aeron_dir});
+    axc::core::ClientConfig client_config{config_.aeron_dir};
+    // `ClusterBackupAgent.onUnavailableCounter` (`:394-404`): the live log's
+    // `RecordingPos` counter disappearing resets the backup.
+    client_config.on_unavailable_counter = &ClusterBackupAgent::unavailable_counter_trampoline;
+    client_config.on_unavailable_counter_clientd = this;
+    auto connected = axc::core::DeepmsgClient::connect(client_config);
     if (!connected)
     {
         return std::unexpected(connected.error());
@@ -850,6 +856,11 @@ int ClusterBackupAgent::update_recording_log_work(std::int64_t now)
     if (was_updated)
     {
         (void)recording_log_->force(2);
+        // `onUpdatedRecordingLog` (`ClusterBackupAgent.java:982-985`).
+        if (nullptr != config_.events_listener)
+        {
+            config_.events_listener->on_updated_recording_log(*recording_log_, snapshots_retrieved_);
+        }
         if (!snapshots_retrieved_.empty() && snapshot_retrieve_counter_)
         {
             if (std::int64_t* address = aeron_counter_addr(snapshot_retrieve_counter_.get()); nullptr != address)
@@ -887,8 +898,17 @@ int ClusterBackupAgent::backing_up_work(std::int64_t now)
                 aeron_counters_reader_addr(client_.counters_reader(), live_log_recording_counter_id_);
             nullptr != address)
         {
-            counter_propose_max(live_log_position_counter_, __atomic_load_n(address, __ATOMIC_ACQUIRE));
-            work_count++;
+            const std::int64_t live_position = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+            if (counter_propose_max(live_log_position_counter_, live_position))
+            {
+                // `onLiveLogProgress` (`ClusterBackupAgent.java:1016-1020`).
+                if (nullptr != config_.events_listener)
+                {
+                    config_.events_listener->on_live_log_progress(live_log_recording_id_,
+                                                                  live_log_recording_counter_id_, live_position);
+                }
+                work_count++;
+            }
         }
     }
     return work_count;
@@ -1233,6 +1253,12 @@ void ClusterBackupAgent::on_backup_response(std::span<const std::uint8_t> messag
     log_supplier_member_ = *supplier;
     log_supplier_member_->leadership_term_id = decoder.logLeadershipTermId();
 
+    // `onBackupResponse` (`ClusterBackupAgent.java:569-572`).
+    if (nullptr != config_.events_listener)
+    {
+        config_.events_listener->on_backup_response(cluster_members_, *log_supplier_member_, snapshots_to_retrieve_);
+    }
+
     if (nullptr == cluster_archive_ && nullptr == cluster_archive_async_connect_)
     {
         if (0 != aeron_archive_context_init(&cluster_archive_context_))
@@ -1334,6 +1360,12 @@ void ClusterBackupAgent::on_session_event(std::span<const std::uint8_t> message)
 
 void ClusterBackupAgent::state(ClusterBackupState new_state, std::int64_t /*now_ms*/)
 {
+    // `state(...)` (`ClusterBackupAgent.java:1028-1040`): entering BACKUP_QUERY
+    // is a listener event (`ClusterBackupEventsListener.onBackupQuery`).
+    if (ClusterBackupState::backup_query == new_state && nullptr != config_.events_listener)
+    {
+        config_.events_listener->on_backup_query();
+    }
     if (state_counter_)
     {
         counter_set(state_counter_, backup_state_code(new_state));
@@ -1403,9 +1435,32 @@ void ClusterBackupAgent::on_close() noexcept
     client_.close();
 }
 
+void ClusterBackupAgent::unavailable_counter_trampoline(void* clientd, aeron_counters_reader_t* /*reader*/,
+                                                        std::int64_t registration_id, std::int32_t counter_id) noexcept
+{
+    static_cast<ClusterBackupAgent*>(clientd)->on_unavailable_counter(registration_id, counter_id);
+}
+
+void ClusterBackupAgent::on_unavailable_counter(std::int64_t /*registration_id*/, std::int32_t counter_id)
+{
+    if (NULL_COUNTER_ID == live_log_recording_counter_id_ || counter_id != live_log_recording_counter_id_)
+    {
+        return;
+    }
+    on_error(make_error(ErrorCode::internal_error, "log recording counter unexpectedly unavailable"));
+    state(ClusterBackupState::reset_backup, now_ms());
+}
+
 void ClusterBackupAgent::on_error(const Error& error) noexcept
 {
     std::fprintf(stderr, "deepmsg-cluster-backup: %s\n", std::string{error.message.view()}.c_str());
+    // `onPossibleFailure` (`ClusterBackupAgent.java:293`, `:307`, `:399`). Every
+    // error the agent reports is a possible failure; the reference names three
+    // sites, this one reports them all.
+    if (nullptr != config_.events_listener)
+    {
+        config_.events_listener->on_possible_failure(error);
+    }
     if (error_counter_)
     {
         std::int64_t* address = aeron_counter_addr(error_counter_.get());

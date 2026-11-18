@@ -78,6 +78,11 @@ private:
     [[nodiscard]] int poll_backup_archive_events() noexcept;
 
     static void on_recording_signal(aeron_archive_recording_signal_t* signal, void* clientd) noexcept;
+    /// `onUnavailableCounter` (`ClusterBackupAgent.java:394-404`): the live
+    /// log's `RecordingPos` counter disappeared with its process.
+    static void unavailable_counter_trampoline(void* clientd, aeron_counters_reader_t* reader,
+                                               std::int64_t registration_id, std::int32_t counter_id) noexcept;
+    void on_unavailable_counter(std::int64_t registration_id, std::int32_t counter_id);
     void handle_recording_signal(std::int32_t signal, std::int64_t correlation_id, std::int64_t recording_id,
                                  std::int64_t position);
 

@@ -28,6 +28,7 @@ extern "C"
 #include "archive/server/archive_launch.h"
 #include "cluster/backup/cluster_backup.h"
 #include "cluster/backup/cluster_backup_context.h"
+#include "cluster/backup/cluster_backup_events_listener.h"
 #include "cluster/common/termination_hook.h"
 #include "core/config/property_source.h"
 #include "core/driver/embedded_driver.h"
@@ -103,6 +104,57 @@ void install_signal_handlers() noexcept
     }
     return value;
 }
+
+}  // namespace
+
+namespace
+{
+
+/// The reference's `ClusterBackupEventsListener` (five callbacks) written to
+/// stdout, one `BACKUP_EVENT` line each: the operator's view of a backup, and
+/// what the interop tests read from the process's log.
+class LoggingBackupEvents final : public deepmsg::cluster::backup::ClusterBackupEventsListener
+{
+public:
+    void on_backup_query() override
+    {
+        line("QUERY");
+    }
+
+    void on_possible_failure(const axc::core::Error& error) override
+    {
+        line("FAILURE " + std::string{error.message.view()});
+    }
+
+    void on_backup_response(
+        std::span<const deepmsg::cluster::common::ClusterMember> /*cluster_members*/,
+        const deepmsg::cluster::common::ClusterMember& log_source_member,
+        std::span<const deepmsg::cluster::common::RecordingLog::Snapshot> snapshots_to_retrieve) override
+    {
+        line("RESPONSE member=" + std::to_string(log_source_member.id) +
+             " snapshots=" + std::to_string(snapshots_to_retrieve.size()));
+    }
+
+    void on_updated_recording_log(
+        const deepmsg::cluster::common::RecordingLog& /*recording_log*/,
+        std::span<const deepmsg::cluster::common::RecordingLog::Snapshot> snapshots_retrieved) override
+    {
+        line("RECORDING_LOG snapshots=" + std::to_string(snapshots_retrieved.size()));
+    }
+
+    void on_live_log_progress(std::int64_t recording_id, std::int32_t /*recording_pos_counter_id*/,
+                              std::int64_t log_position) override
+    {
+        line("LIVE recordingId=" + std::to_string(recording_id) + " logPosition=" + std::to_string(log_position));
+    }
+
+private:
+    static void line(const std::string& text)
+    {
+        std::printf("BACKUP_EVENT %s\n", text.c_str());
+        std::fflush(stdout);
+    }
+};
 
 }  // namespace
 
@@ -210,6 +262,9 @@ int main(int argc, char* argv[])
         driver.reset();
         fail(std::string{config.error().message.view()});
     }
+
+    LoggingBackupEvents events;
+    config->events_listener = &events;
 
     // `ClusterBackupMediaDriver.main` wires the three termination hooks into
     // the shutdown barrier.

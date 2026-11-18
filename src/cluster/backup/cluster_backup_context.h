@@ -4,10 +4,12 @@
 #include <expected>
 #include <functional>
 #include <optional>
+
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+#include "cluster/backup/cluster_backup_events_listener.h"
 
 #include "cluster/common/termination_hook.h"
 #include "core/config/property_source.h"
@@ -97,6 +99,9 @@ struct ClusterBackupConfig
     std::string cluster_dir{"aeron-cluster"};
     std::optional<std::string> mark_file_dir{};
     bool delete_dir_on_start{false};
+
+    /// `ClusterBackup.Context.eventsListener` (the five callbacks). Not owned.
+    ClusterBackupEventsListener* events_listener{nullptr};
 
     // Misc.
     std::int32_t error_buffer_length{1024 * 1024};

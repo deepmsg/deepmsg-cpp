@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -1035,6 +1036,12 @@ protected:
         return extent;
     }
 
+    [[nodiscard]] std::string read_text(const std::string& path) const
+    {
+        std::ifstream in{path};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    }
+
     [[nodiscard]] axc::interop::ProcessResult run_tool(const std::string& directory, const std::string& command)
     {
         axc::interop::ProcessOptions options;
@@ -1262,6 +1269,58 @@ TEST_F(Xc9BackupJavaClusterTest, theBackupResumesAfterItIsStopped)
 /// reference's leader processes backup sessions through
 /// `processAllPendingSessions` (`ConsensusModuleAgent.java:2432`), not only the
 /// follower path (`:2457`), so all three reach BACKING_UP.
+/// C9-2 (`ClusterBackupEventsListener`, the reference's five callbacks): the
+/// backup reports the response with its log source and snapshots, the recording
+/// log update and the live log position. `onBackupQuery` is a *transition* to
+/// `BACKUP_QUERY` (`ClusterBackupAgent.java:1028-1040`): the reference starts in
+/// that state, so it fires only when the backup resets and re-queries.
+TEST_F(Xc9BackupJavaClusterTest, theBackupReportsItsProgressToTheEventsListener)
+{
+    start_java_cluster();
+    start_containers();
+    ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
+
+    send_messages(10);
+    take_snapshot();
+
+    start_backup();
+    ASSERT_TRUE(wait_for_backup_state(ClusterBackupState::backing_up, std::chrono::seconds(180)))
+        << "the backup never reached BACKING_UP (state="
+        << backup_counter(deepmsg::cluster::common::CLUSTER_BACKUP_STATE_TYPE_ID) << ")";
+    ASSERT_TRUE(wait_for_backup_live(std::chrono::seconds(120)))
+        << "the backup never reached the leader's commit position";
+
+    // The cluster goes away: the backup resets and re-queries, which is the
+    // transition that reports `onBackupQuery`.
+    for (auto& process : members_process_)
+    {
+        if (process)
+        {
+            process->terminate(std::chrono::seconds(10));
+            process.reset();
+        }
+    }
+    const std::string log_path = root_dir_ + "/backup.log";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (std::chrono::steady_clock::now() < deadline &&
+           std::string::npos == read_text(log_path).find("BACKUP_EVENT QUERY"))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    stop_backup();
+
+    const std::string log = read_text(log_path);
+    const std::size_t query = log.find("BACKUP_EVENT QUERY");
+    const std::size_t response = log.find("BACKUP_EVENT RESPONSE member=");
+    const std::size_t recording_log = log.find("BACKUP_EVENT RECORDING_LOG");
+    const std::size_t live = log.find("BACKUP_EVENT LIVE recordingId=");
+    ASSERT_NE(std::string::npos, response) << log;
+    ASSERT_NE(std::string::npos, recording_log) << log;
+    ASSERT_NE(std::string::npos, live) << log;
+    EXPECT_LT(response, recording_log) << "the response must precede the recording log update";
+    EXPECT_NE(std::string::npos, query) << "the re-query did not report onBackupQuery:\n" << log;
+}
+
 TEST_F(Xc9BackupJavaClusterTest, theBackupAcceptsEverySourceType)
 {
     start_java_cluster();
