@@ -156,6 +156,14 @@ public:
     /// (`RecordingLog.java:566-594`).
     [[nodiscard]] static std::expected<RecordingLog, Error> open(std::string_view cluster_dir, bool create_new);
 
+    /// `ClusterToolOperator.updateRecordingLog` (`:1381-1412`): writes
+    /// `entries` over `<cluster_dir>/recording.log` through a `.tmp` file and a
+    /// rename; an empty list deletes `recording.log` instead (the caller keeps
+    /// the `.bak`). Used by `sort-recording-log` and
+    /// `seed-recording-log-from-snapshot`.
+    [[nodiscard]] static std::expected<void, Error> rewrite(std::string_view cluster_dir,
+                                                            std::span<const Entry> entries);
+
     RecordingLog() = default;
     RecordingLog(const RecordingLog&) = delete;
     RecordingLog& operator=(const RecordingLog&) = delete;
@@ -276,6 +284,7 @@ private:
     }
 
     [[nodiscard]] std::expected<int, Error> capture_entries_from_buffer(std::span<const std::uint8_t> buffer);
+    [[nodiscard]] static std::expected<void, Error> encode_entry(const Entry& entry, std::span<std::uint8_t> buffer);
     [[nodiscard]] std::expected<Entry, Error> write_entry(Entry entry);
     [[nodiscard]] std::expected<void, Error> persist(std::int64_t position, std::span<const std::uint8_t> bytes);
     [[nodiscard]] std::expected<void, Error> write_field(std::int64_t entry_position, std::size_t offset,

@@ -165,6 +165,23 @@ private:
     std::optional<Error> error_{};
 };
 
+/// The raw-record half of the reference's `ConsensusModuleSnapshotListener`:
+/// Java hands every listener the whole record (`buffer, offset, length`), and
+/// `ConsensusModuleSnapshotPrinter` hex-dumps two of them. The decoded
+/// `SnapshotLoadHandler` callbacks stay as they are, so `LogReplay` and the
+/// unit tests need no change; the tool's printer implements this seam.
+class SnapshotRecordObserver
+{
+public:
+    SnapshotRecordObserver() = default;
+    SnapshotRecordObserver(const SnapshotRecordObserver&) = delete;
+    SnapshotRecordObserver& operator=(const SnapshotRecordObserver&) = delete;
+    virtual ~SnapshotRecordObserver() = default;
+
+    /// One complete record, starting at its SBE message header.
+    virtual void on_snapshot_record(std::span<const std::uint8_t> record) = 0;
+};
+
 /// `ConsensusModuleSnapshotAdapter` (`ConsensusModuleSnapshotAdapter.java`):
 /// decodes the consensus module's snapshot recording and stops at `END`.
 ///
@@ -188,6 +205,13 @@ public:
         handler_ = &handler;
     }
 
+    /// Optional raw-record observer (`ConsensusModuleSnapshotListener`'s
+    /// `buffer/offset/length` arguments); null detaches it.
+    void record_observer(SnapshotRecordObserver* observer) noexcept
+    {
+        observer_ = observer;
+    }
+
     /// One complete fragment (the assembler's output).
     [[nodiscard]] std::expected<void, Error> dispatch(std::span<const std::uint8_t> fragment);
 
@@ -202,6 +226,7 @@ private:
 
     aeron_controlled_fragment_assembler_t* assembler_{nullptr};
     SnapshotLoadHandler* handler_{nullptr};
+    SnapshotRecordObserver* observer_{nullptr};
     bool in_snapshot_{false};
     bool done_{false};
 };
