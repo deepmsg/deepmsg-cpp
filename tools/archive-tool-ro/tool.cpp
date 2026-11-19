@@ -1173,25 +1173,16 @@ int command_errors(const std::filesystem::path& archive_dir)
     }
 
     const std::span<const std::uint8_t> bytes = cnc->mapping();
-    if (bytes.size() < 128)
+    // The region arithmetic is shared with `cluster-tool errors`
+    // (`axc::core::cnc_error_log_region`); the error text stays this tool's.
+    auto region = axc::core::cnc_error_log_region(bytes);
+    if (!region)
     {
-        std::fprintf(stderr, "ERR: cnc file too short: %s\n", cnc_path.string().c_str());
-        return 1;
-    }
-    const std::int64_t to_driver = read_int32_le(bytes.data() + 4);
-    const std::int64_t to_clients = read_int32_le(bytes.data() + 8);
-    const std::int64_t counters_metadata = read_int32_le(bytes.data() + 12);
-    const std::int64_t counters_values = read_int32_le(bytes.data() + 16);
-    const std::int64_t error_log_length = read_int32_le(bytes.data() + 20);
-    const std::int64_t error_log_start = 128 + to_driver + to_clients + counters_metadata + counters_values;
-    if (error_log_length <= 0 || error_log_start < 0 ||
-        static_cast<std::uint64_t>(error_log_start + error_log_length) > bytes.size())
-    {
-        std::fprintf(stderr, "ERR: cnc error log region out of range: %s\n", cnc_path.string().c_str());
+        std::fprintf(stderr, "ERR: %s: %s\n", region.error().message.view().data(), cnc_path.string().c_str());
         return 1;
     }
 
-    (void)print_error_log(bytes.data() + error_log_start, static_cast<std::size_t>(error_log_length));
+    (void)print_error_log(region->data(), region->size());
     return 0;
 }
 

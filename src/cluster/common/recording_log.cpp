@@ -244,6 +244,64 @@ std::expected<RecordingLog, Error> RecordingLog::open(std::string_view cluster_d
     return log;
 }
 
+std::expected<void, Error> RecordingLog::rewrite(std::string_view cluster_dir, std::span<const Entry> entries)
+{
+    const std::string log_path = join_path(cluster_dir, FILE_NAME);
+
+    if (entries.empty())
+    {
+        if (0 != ::unlink(log_path.c_str()) && ENOENT != errno)
+        {
+            return std::unexpected(make_error(ErrorCode::io_error, "failed to delete recording.log", errno));
+        }
+        return {};
+    }
+
+    const std::string tmp_path = log_path + ".tmp";
+    (void)::unlink(tmp_path.c_str());
+
+    const int fd = ::open(tmp_path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+    if (fd < 0)
+    {
+        return std::unexpected(make_error(ErrorCode::io_error, "create recording.log.tmp failed", errno));
+    }
+
+    std::array<std::uint8_t, MAX_ENTRY_LENGTH> buffer{};
+    std::int64_t position = 0;
+    for (const auto& entry : entries)
+    {
+        auto encoded = encode_entry(entry, buffer);
+        if (!encoded)
+        {
+            (void)::close(fd);
+            (void)::unlink(tmp_path.c_str());
+            return std::unexpected(encoded.error());
+        }
+
+        auto written = pwrite_full(fd, std::span<const std::uint8_t>(buffer.data(), entry.length()), position);
+        if (!written)
+        {
+            (void)::close(fd);
+            (void)::unlink(tmp_path.c_str());
+            return std::unexpected(written.error());
+        }
+        position += static_cast<std::int64_t>(entry.length());
+    }
+
+    if (0 != ::close(fd))
+    {
+        (void)::unlink(tmp_path.c_str());
+        return std::unexpected(make_error(ErrorCode::io_error, "close recording.log.tmp failed", errno));
+    }
+
+    if (0 != ::rename(tmp_path.c_str(), log_path.c_str()))
+    {
+        (void)::unlink(tmp_path.c_str());
+        return std::unexpected(make_error(ErrorCode::io_error, "rename recording.log.tmp failed", errno));
+    }
+    return {};
+}
+
 std::expected<void, Error> RecordingLog::force(std::int32_t file_sync_level) noexcept
 {
     if (file_sync_level > 0)
@@ -1235,9 +1293,17 @@ std::expected<std::int32_t, Error> RecordingLog::append(std::int32_t entry_type,
     return index;
 }
 
-std::expected<RecordingLog::Entry, Error> RecordingLog::write_entry(Entry entry)
+std::expected<void, Error> RecordingLog::encode_entry(const Entry& entry, std::span<std::uint8_t> buffer)
 {
-    std::array<std::uint8_t, MAX_ENTRY_LENGTH> buffer{};
+    if (!entry.archive_endpoint.empty())
+    {
+        if (entry.archive_endpoint.size() > MAX_ENDPOINT_LENGTH)
+        {
+            return std::unexpected(make_error(ErrorCode::invalid_argument,
+                                              "Endpoint is too long: " + std::to_string(entry.archive_endpoint.size()) +
+                                                  " vs " + std::to_string(MAX_ENDPOINT_LENGTH)));
+        }
+    }
 
     put_le64(buffer.data() + RECORDING_ID_OFFSET, entry.recording_id);
     put_le64(buffer.data() + LEADERSHIP_TERM_ID_OFFSET, entry.leadership_term_id);
@@ -1249,16 +1315,21 @@ std::expected<RecordingLog::Entry, Error> RecordingLog::write_entry(Entry entry)
 
     if (!entry.archive_endpoint.empty())
     {
-        if (entry.archive_endpoint.size() > MAX_ENDPOINT_LENGTH)
-        {
-            return std::unexpected(make_error(ErrorCode::invalid_argument,
-                                              "Endpoint is too long: " + std::to_string(entry.archive_endpoint.size()) +
-                                                  " vs " + std::to_string(MAX_ENDPOINT_LENGTH)));
-        }
-
         put_le32(buffer.data() + ENDPOINT_OFFSET, static_cast<std::int32_t>(entry.archive_endpoint.size()));
         std::memcpy(buffer.data() + ENDPOINT_OFFSET + sizeof(std::int32_t), entry.archive_endpoint.data(),
                     entry.archive_endpoint.size());
+    }
+    return {};
+}
+
+std::expected<RecordingLog::Entry, Error> RecordingLog::write_entry(Entry entry)
+{
+    std::array<std::uint8_t, MAX_ENTRY_LENGTH> buffer{};
+
+    auto encoded = encode_entry(entry, buffer);
+    if (!encoded)
+    {
+        return std::unexpected(encoded.error());
     }
 
     if (NULL_VALUE == entry.position)

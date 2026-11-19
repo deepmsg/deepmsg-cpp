@@ -422,6 +422,13 @@ std::expected<void, Error> ConsensusModuleSnapshotAdapter::dispatch(std::span<co
         return std::unexpected(header.error());
     }
 
+    // The reference's listener receives the whole record on every dispatch;
+    // the tool's printer is the only consumer (`describe-latest-cm-snapshot`).
+    if (nullptr != observer_)
+    {
+        observer_->on_snapshot_record(fragment);
+    }
+
     switch (header->templateId())
     {
         case codecs::SnapshotMarker::SBE_TEMPLATE_ID:

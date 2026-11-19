@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <span>
 #include <string>
+
+#include "core/error/error.h"
 
 namespace axc::core
 {
@@ -31,5 +34,12 @@ struct RenderedErrorLog
 /// each entry, the `0 distinct errors observed` summary without the trailing
 /// period when there are no entries).
 [[nodiscard]] RenderedErrorLog render_distinct_error_log(std::span<const std::uint8_t> buffer);
+
+/// The media driver's error-log region inside a mapped `cnc.dat`
+/// (`CncFileDescriptor.createErrorLogBuffer`): the 128-byte metadata header
+/// holds `toDriver`, `toClients`, `countersMetadata`, `countersValues` and
+/// `errorLogLength` as little-endian int32 from offset 4.
+[[nodiscard]] std::expected<std::span<const std::uint8_t>, Error> cnc_error_log_region(
+    std::span<const std::uint8_t> cnc);
 
 }  // namespace axc::core
