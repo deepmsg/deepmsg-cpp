@@ -1,6 +1,6 @@
-#include "apps/skeleton_main.h"
+#include "tool.h"
 
-int main()
+int main(int argc, char* argv[])
 {
-    return skeleton_main("cluster-tool");
+    return deepmsg::tools::run_cluster_tool(argc, argv);
 }

@@ -114,6 +114,15 @@ axc_add_executable(axc_cluster_unit_tests
 target_compile_definitions(axc_cluster_unit_tests PRIVATE
     "AXC_GOLDEN_DIR=\"${PROJECT_SOURCE_DIR}/test/golden\"")
 
+# T2: the ClusterTool's file commands and its command table, in-process.
+axc_add_executable(axc_cluster_tool_unit_tests
+    SOURCES
+        cluster/tool/cluster_tool_test.cpp
+    DEPS
+        axc_cluster_tool
+        axc_cluster_common
+        GTest::gtest_main)
+
 # C9-2: the reference's `ClusterBackupAgentTest` (the replay-start cases) and
 # `ClusterBackupContextTest` (the directory conclusion and the active mark file).
 axc_add_executable(axc_cluster_backup_unit_tests
@@ -190,6 +199,7 @@ gtest_discover_tests(axc_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS un
 gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_tool_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_election_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_consensus_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
