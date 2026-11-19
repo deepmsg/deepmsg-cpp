@@ -1,6 +1,7 @@
 #include "cluster/consensus/consensus_adapter.h"
 
 #include "io_aeron_cluster_codecs/AppendPosition.h"
+#include "io_aeron_cluster_codecs/BackupQuery.h"
 #include "io_aeron_cluster_codecs/CanvassPosition.h"
 #include "io_aeron_cluster_codecs/CatchupPosition.h"
 #include "io_aeron_cluster_codecs/ChallengeResponse.h"
@@ -156,6 +157,22 @@ std::expected<void, Error> ConsensusAdapter::dispatch(std::span<const std::uint8
             auto m = wrap_body<codecs::ChallengeResponse>(message, *header);
             handler_->on_consensus_challenge_response(m.correlationId(), m.clusterSessionId(),
                                                       m.getEncodedCredentialsAsStringView());
+            return {};
+        }
+        case codecs::BackupQuery::SBE_TEMPLATE_ID:
+        {
+            auto m = wrap_body<codecs::BackupQuery>(message, *header);
+            const std::int64_t log_position =
+                m.logPosition() == codecs::BackupQuery::logPositionNullValue() ? -1 : m.logPosition();
+            // SBE var-data readers advance the decoder position, so read them
+            // in wire order into locals: passing both calls as arguments would
+            // read the channel after the credentials advanced past it.
+            const std::string_view response_channel = m.getResponseChannelAsStringView();
+            const std::string_view credentials = m.getEncodedCredentialsAsStringView();
+            handler_->on_backup_query(
+                m.correlationId(), m.responseStreamId(), m.version(), log_position, response_channel,
+                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(credentials.data()),
+                                              credentials.size()));
             return {};
         }
         default:

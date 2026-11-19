@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -95,6 +96,23 @@ public:
     /// `onChallengeResponseForUserSession` (`:408-419`).
     void on_challenge_response(std::int64_t correlation_id, std::int64_t cluster_session_id,
                                std::span<const std::uint8_t> encoded_credentials);
+
+    /// `onBackupQuery` (`SessionManager.java:331-341`): a backup session joins
+    /// `pendingBackupSessions` for authentication; the response is built when
+    /// it reaches AUTHENTICATED.
+    void on_backup_query(std::int64_t correlation_id, std::int32_t response_stream_id, std::int32_t version,
+                         std::int64_t log_position, std::string response_channel,
+                         std::span<const std::uint8_t> encoded_credentials);
+
+    /// `processPendingBackupSessions` (`:569-580`).
+    int process_pending_backup_sessions(std::int64_t now_ns, std::int32_t leader_member_id);
+
+    /// The agent's `ConsensusPublisher.backupResponse` closure: true when the
+    /// response was offered and the session may close.
+    void set_backup_responder(std::function<bool(ClusterSession&, std::optional<std::int64_t>)> responder)
+    {
+        backup_responder_ = std::move(responder);
+    }
 
     /// `onServiceCloseSession` (`:454-476`): the service asked for the session
     /// to close. The uncommitted-closed-session tracking is C4d.
@@ -194,6 +212,9 @@ private:
     std::vector<std::unique_ptr<ClusterSession>> pending_sessions_{};
     std::vector<std::unique_ptr<ClusterSession>> rejected_sessions_{};
     std::vector<std::unique_ptr<ClusterSession>> redirect_sessions_{};
+    std::vector<std::unique_ptr<ClusterSession>> pending_backup_sessions_{};
+    std::vector<std::unique_ptr<ClusterSession>> rejected_backup_sessions_{};
+    std::function<bool(ClusterSession&, std::optional<std::int64_t>)> backup_responder_{};
     std::int64_t next_session_id_{1};
     std::int64_t next_committed_session_id_{1};
     std::deque<std::unique_ptr<ClusterSession>> uncommitted_closed_sessions_{};

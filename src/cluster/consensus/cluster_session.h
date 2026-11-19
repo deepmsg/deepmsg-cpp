@@ -107,6 +107,22 @@ public:
         return correlation_id_;
     }
 
+    /// `ClusterSession.requestInput(Object)` for a backup session: the query's
+    /// log position, when it named one (`SessionManager.java:331-341`).
+    void request_log_position(std::int64_t log_position) noexcept
+    {
+        request_log_position_ = log_position;
+        has_log_position_request_ = true;
+    }
+    [[nodiscard]] bool has_log_position_request() const noexcept
+    {
+        return has_log_position_request_;
+    }
+    [[nodiscard]] std::int64_t log_position_request() const noexcept
+    {
+        return request_log_position_;
+    }
+
     [[nodiscard]] const std::span<const std::uint8_t> encoded_principal() const noexcept
     {
         return encoded_principal_;
@@ -271,6 +287,8 @@ private:
     bool has_new_leader_event_pending_{false};
     bool has_open_event_pending_{true};
     std::int64_t correlation_id_{0};
+    std::int64_t request_log_position_{-1};
+    bool has_log_position_request_{false};
     std::int64_t opened_log_position_{NULL_POSITION};
     std::int64_t closed_log_position_{NULL_POSITION};
     std::int64_t time_of_last_activity_ns_{0};

@@ -3,4 +3,7 @@ axc_add_executable(deepmsg-cluster-backup
         main.cpp
     DEPS
         axc_cluster_backup
-        aeron_driver_static)
+        axc_archive_server
+        axc_driver
+        aeron_driver_static
+        aeron_archive_c_client_static)

@@ -264,10 +264,9 @@ protected:
             "-Daeron.dir=" + aeron_dir(),
             "-Daeron.dir.delete.on.start=true",
             "-Daeron.cluster.dir=" + cluster_dir(),
-            "-Daeron.cluster.dir.delete.on.start=true",
+            "-Daeron.cluster.dir.delete.on.start=" + wipe,
             "-Daeron.archive.dir=" + archive_dir(),
             "-Daeron.archive.dir.delete.on.start=" + wipe,
-            "-Daeron.archive.dir.delete.on.start=true",
             "-Daeron.cluster.id=" + std::to_string(CLUSTER_ID),
             "-Daeron.cluster.member.id=0",
             "-Daeron.cluster.members=0,localhost:0,localhost:0,localhost:0,localhost:0,localhost:0",
@@ -485,12 +484,7 @@ TEST_F(Xc0JavaClusterTest, theJavaClusterOnOurArchiveSnapshotsAndRestarts)
     stop_all();
 }
 
-// The reference arm's restart does not come back in this harness: a second
-// `ClusteredMediaDriver` on the kept cluster and archive directories never
-// turns ACTIVE within 60 s (no exception; the control arm keeps the form+echo
-// subset). Kept as the witness, disabled; the our-archive arm restarts and
-// replays over the same archived state.
-TEST_F(Xc0JavaClusterTest, DISABLED_theJavaClusterOnTheReferenceStackSnapshotsAndRestarts)
+TEST_F(Xc0JavaClusterTest, theJavaClusterOnTheReferenceStackSnapshotsAndRestarts)
 {
     start_reference_cluster();
     start_container();

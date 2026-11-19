@@ -1,7 +1,16 @@
 axc_add_library(axc_cluster_backup
     SOURCES
         module.cpp
+        cluster_backup_context.cpp
+        cluster_backup_agent.cpp
+        cluster_backup.cpp
+        channel_uri.cpp
+        publication_group.cpp
+        backup_publisher.cpp
+        snapshot_replication.cpp
     DEPS
         axc_cluster_common
         axc_cluster_consensus
-        aeron_static)
+        axc_cluster_client
+        aeron_static
+        aeron_archive_c_client_static)

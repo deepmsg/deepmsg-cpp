@@ -10,6 +10,8 @@
 #include <aeronc.h>
 
 #include "cluster/common/cluster_member.h"
+#include "cluster/common/recording_log.h"
+#include "cluster/consensus/cluster_session.h"
 #include "cluster/election/election_host.h"
 #include "core/deepmsg/deepmsg_client.h"
 #include "core/deepmsg/handles.h"
@@ -81,6 +83,14 @@ public:
     [[nodiscard]] bool challenge_response(std::int32_t member_id, std::int64_t next_correlation_id,
                                           std::int64_t cluster_session_id,
                                           std::span<const std::uint8_t> encoded_credentials);
+
+    /// `backupResponse` (`ConsensusPublisher.java:482-540`): the answer to a
+    /// backup's `BackupQuery`, written straight to the backup session's
+    /// response publication.
+    [[nodiscard]] bool backup_response(ClusterSession& session, std::int32_t commit_position_counter_id,
+                                       std::int32_t leader_member_id, std::int32_t member_id,
+                                       const common::RecordingLog::Entry& last_entry, std::string_view cluster_members,
+                                       const std::vector<common::RecordingLog::Snapshot>& snapshots);
 
     /// `stopCatchup` (`ConsensusPublisher.java:351-380`).
     [[nodiscard]] bool stop_catchup(std::int32_t member_id, std::int64_t leadership_term_id,

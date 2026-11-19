@@ -10,6 +10,7 @@
 #include "cluster/consensus/consensus_constants.h"
 #include "core/time/clock.h"
 #include "io_aeron_cluster_codecs/AppendPosition.h"
+#include "io_aeron_cluster_codecs/BackupResponse.h"
 #include "io_aeron_cluster_codecs/CanvassPosition.h"
 #include "io_aeron_cluster_codecs/CatchupPosition.h"
 #include "io_aeron_cluster_codecs/ChallengeResponse.h"
@@ -247,6 +248,45 @@ bool ConsensusPublisher::catchup_position(std::int32_t member_id, std::int64_t l
                 .putCatchupEndpoint(catchup_endpoint);
         });
     return offer(member_id, buffer);
+}
+
+bool ConsensusPublisher::backup_response(ClusterSession& session, std::int32_t commit_position_counter_id,
+                                         std::int32_t leader_member_id, std::int32_t member_id,
+                                         const common::RecordingLog::Entry& last_entry,
+                                         std::string_view cluster_members,
+                                         const std::vector<common::RecordingLog::Snapshot>& snapshots)
+{
+    // `ConsensusPublisher.backupResponse` (`ConsensusPublisher.java:482-540`).
+    std::vector<std::uint8_t> buffer(common::MESSAGE_HEADER_LENGTH + 4096 + snapshots.size() * 64, 0);
+    codecs::BackupResponse encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.correlationId(session.correlation_id())
+        .logRecordingId(last_entry.recording_id)
+        .logLeadershipTermId(last_entry.leadership_term_id)
+        .logTermBaseLogPosition(last_entry.term_base_log_position)
+        .lastLeadershipTermId(last_entry.leadership_term_id)
+        .lastTermBaseLogPosition(last_entry.term_base_log_position)
+        .commitPositionCounterId(commit_position_counter_id)
+        .leaderMemberId(leader_member_id)
+        .memberId(member_id);
+
+    // Wire order is the schema's: the `snapshots` group (id 9) comes before the
+    // `clusterMembers` var-data (id 16).
+    auto group = encoder.snapshotsCount(static_cast<std::uint16_t>(snapshots.size()));
+    for (const auto& snapshot : snapshots)
+    {
+        group.next()
+            .recordingId(snapshot.recording_id)
+            .leadershipTermId(snapshot.leadership_term_id)
+            .termBaseLogPosition(snapshot.term_base_log_position)
+            .logPosition(snapshot.log_position)
+            .timestamp(snapshot.timestamp)
+            .serviceId(snapshot.service_id);
+    }
+    encoder.putClusterMembers(reinterpret_cast<const char*>(cluster_members.data()), cluster_members.size());
+
+    const std::size_t length = common::MESSAGE_HEADER_LENGTH + encoder.encodedLength();
+    return session.offer(buffer.data(), length) > 0;
 }
 
 bool ConsensusPublisher::challenge_response(std::int32_t member_id, std::int64_t next_correlation_id,

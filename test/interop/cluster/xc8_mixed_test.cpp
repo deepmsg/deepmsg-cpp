@@ -52,6 +52,13 @@ using axc::interop::ClusterClientSession;
 
 constexpr std::int32_t CLUSTER_ID = 8;
 
+/// The C client's default error handler prints and calls `exit(EXIT_FAILURE)`
+/// (`aeron_context.c`), so one counter client left unserviced for ten seconds
+/// during a restart would kill the test binary without a gtest summary. The
+/// rig's counters are read lazily and reconnect after a force-close, so a
+/// starved conductor must not be fatal.
+void on_client_error(void* /*clientd*/, int /*errcode*/, const char* /*message*/) {}
+
 enum class Stack
 {
     java,
@@ -192,9 +199,9 @@ protected:
             {
                 arguments.push_back("-D" + name + "=" + value);
             }
-            arguments.insert(arguments.end(), {"-Daeron.threading.mode=SHARED", "-Daeron.print.configuration=false",
+            arguments.insert(arguments.end(), {"-Daeron.threading.mode=SHARED", "-Daeron.print.configuration=true",
                                                "-cp", jar_, "io.aeron.cluster.ClusteredMediaDriver"});
-            auto spawned = ChildProcess::spawn("/usr/bin/java", arguments);
+            auto spawned = ChildProcess::spawn("/usr/bin/java", arguments, {}, node_dir + "/node.log");
             ASSERT_TRUE(spawned) << spawned.error().message.view();
             members_[index] = std::make_unique<ChildProcess>(std::move(*spawned));
         }
@@ -207,8 +214,8 @@ protected:
                 out << name << "=" << value << "\n";
             }
             out.close();
-            auto spawned =
-                ChildProcess::spawn(AXC_CLUSTER_NODE_BIN, {"--embedded-driver", node_dir + "/node.properties"});
+            auto spawned = ChildProcess::spawn(
+                AXC_CLUSTER_NODE_BIN, {"--embedded-driver", node_dir + "/node.properties"}, {}, node_dir + "/node.log");
             ASSERT_TRUE(spawned) << spawned.error().message.view();
             members_[index] = std::make_unique<ChildProcess>(std::move(*spawned));
         }
@@ -359,7 +366,9 @@ protected:
         if (!clients_[index])
         {
             const std::string dir = root_dir_ + "/node" + std::to_string(index) + "/aeron";
-            auto client = DeepmsgClient::connect(axc::core::ClientConfig{dir});
+            axc::core::ClientConfig config{dir};
+            config.on_error = &on_client_error;
+            auto client = DeepmsgClient::connect(config);
             if (!client)
             {
                 return nullptr;
@@ -886,6 +895,59 @@ TEST_F(MixedRig, DISABLED_theMembersConsensusModuleSnapshotsCarryTheSameBytes)
     }
 }
 
+// S9 kept this direction as a witness: the Java member never reached ACTIVE
+// on our leader's directory. The XC-0 reference restart showed the same
+// family's real cause — a restart that wipes the directory it should recover
+// from — so this arm now restarts on the kept directory (`fresh=false`). The
+// leader is not appointed: `Election.canvass` refuses to nominate anyone but
+// an appointed leader (`Election.java:715`), so a pinned member that dies
+// leaves the survivors unable to elect at all. The natural election may pick
+// the Java member first; the test turns the leadership over to one of ours
+// before the measured step instead of asserting the luck of the election.
+TEST_F(MixedRig, ourLeadersDirectoryRestartsUnderAJavaMember)
+{
+    // The other direction: our member leads, goes, and the Java member takes
+    // its directory over.
+    start_cluster({Stack::cpp, Stack::java, Stack::cpp});
+    ASSERT_TRUE(echo_round(3, 1, 10, 0)) << member_dump(3);
+    int leader = leader_of(3);
+    ASSERT_GE(leader, 0) << member_dump(3);
+    if (Stack::java == stack_of(leader))
+    {
+        // The natural election may pick the Java member first. Turn the
+        // leadership over before the measured step: killing it leaves two of
+        // ours, which elect one of themselves; the Java member then rejoins
+        // on its own directory.
+        const std::int64_t java_term = term_of(leader);
+        kill_member(leader);
+        ASSERT_TRUE(await_leader_above(3, java_term, std::chrono::seconds(90))) << member_dump(3);
+        restart_with(leader, Stack::java, 3);
+        leader = leader_of(3);
+        ASSERT_GE(leader, 0) << member_dump(3);
+    }
+    ASSERT_EQ(Stack::cpp, stack_of(leader)) << "expected one of our members to lead: " << member_dump(3);
+    const std::int64_t term = term_of(leader);
+    kill_member(leader);
+    ASSERT_TRUE(await_leader_above(3, term, std::chrono::seconds(90))) << member_dump(3);
+
+    start_member(leader, 3, Stack::java, false);
+    start_container(leader, Stack::java);
+    stacks_[static_cast<std::size_t>(leader)] = Stack::java;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (1 == counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_EQ(1, counter(leader, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+        << "the Java member could not take over our leader's directory: " << member_dump(3) << node_log(leader);
+    ASSERT_TRUE(echo_round(3, 21, 10, 0)) << member_dump(3);
+    stop_members();
+}
+
 TEST_F(MixedRig, threeMembersFormACluster)
 {
     // Probe only: the three-member mixed cluster elects.
@@ -894,23 +956,12 @@ TEST_F(MixedRig, threeMembersFormACluster)
     stop_members();
 }
 
-// The mixed cluster forms (see `threeMembersFormACluster`), but a client
-// session against a three-member cluster whose leader is ours never finishes
-// `AsyncConnect` — it hangs in the egress handshake while `start_cluster`
-// succeeded. The two-member probe commits, so the break is in the client path
-// of the three-member mix; disabled until it is attributed.
-// The full turn-taking loop needs the generic restart machinery (it kills and
-// respawns members between elections). The same properties it checks — a
-// mixed cluster elects and serves a client, with either stack leading — are
-// covered by the four probes above and by
-// `ourAppointedLeaderServesAClientWithThreeMembers`; the loop is disabled
-// until the restart path stops starving the counter clients.
-// The restart in this loop keeps the member's directory now (`fresh=false`),
-// but the mixed rig's restart path still starves the counter clients and the
-// member comes back without counters. The loop's properties are covered by the
-// four probes above and by `aJavaLeadersDirectoryRestartsUnderOurNode`; the
-// restart machinery stays the open fixture item.
-TEST_F(MixedRig, DISABLED_membersOfBothStacksLeadATurn)
+// XC-3's turn-taking arm: whoever leads is killed, the other stack must take
+// over, the killed member rejoins, and the cluster echoes through every step.
+// The restart keeps the member's directory (`fresh=false`). The counter
+// clients are non-fatal and reconnect lazily (see `on_client_error`), so the
+// ten-second gaps of a restart no longer kill the test binary.
+TEST_F(MixedRig, membersOfBothStacksLeadATurn)
 {
     // XC-3's first arm: a three-member cluster of both stacks; whoever leads
     // is killed, the other stack must take over, the killed member rejoins
@@ -926,16 +977,23 @@ TEST_F(MixedRig, DISABLED_membersOfBothStacksLeadATurn)
     {
         const int leader = leader_of(3);
         ASSERT_GE(leader, 0) << member_dump(3);
+        std::fprintf(stderr, "C8 turn round %d: killing %d (%s) ", round, leader,
+                     Stack::java == stack_of(leader) ? "java" : "cpp");
         kill_member(leader);
+        std::fprintf(stderr, "killed\n");
         ASSERT_TRUE(await_leader_above(3, term, std::chrono::seconds(90))) << member_dump(3);
         term = term_of(leader_of(3));
+        std::fprintf(stderr, "C8 turn round %d: new leader %d term=%lld\n", round, leader_of(3),
+                     static_cast<long long>(term));
         led_stacks.insert(stack_of(leader_of(3)) == Stack::java ? 1 : 0);
         ASSERT_TRUE(echo_round(3, 1 + echo_base, 10, 0)) << member_dump(3);
+        std::fprintf(stderr, "C8 turn round %d: echoed\n", round);
         echo_base += 10;
         // Bring the killed member back with its own stack so the quorum holds
         // for the next round; the *other* stack on the same directory is
         // XC-5's case (`aJavaDirectoryRestartsUnderOurNode`).
         restart_with(leader, stack_of(leader), 3);
+        std::fprintf(stderr, "C8 turn round %d: %d back\n", round, leader);
     }
     EXPECT_EQ(2U, led_stacks.size()) << "only one stack led: " << member_dump(3);
 

@@ -588,6 +588,27 @@ std::expected<void, Error> ConsensusModuleAgent::open_session_layer()
         session_config, client_, *log_publisher_, *egress_publisher_, authenticator_, *authorisation_service_,
         [this]() { return now_ns(); }, [this]() { return now_ms(); },
         [this]() { counter_increment(timed_out_client_counter_); }, [this](const Error& error) { report(error); });
+
+    // `ConsensusPublisher.backupResponse` (`SessionManager.java:673-693`): the
+    // response uses this member's last term entry, the commit counter, and the
+    // snapshots at or before the requested log position.
+    session_manager_->set_backup_responder(
+        [this](ClusterSession& session, std::optional<std::int64_t> log_position) -> bool
+        {
+            const auto* entry = recording_log_.find_last_term();
+            if (nullptr == entry)
+            {
+                return false;
+            }
+            const std::int64_t position = log_position.value_or(std::numeric_limits<std::int64_t>::max());
+            auto snapshots = recording_log_.find_snapshot_at_or_before_or_lowest(position, config_.service_count);
+            const std::int32_t commit_counter_id = common::find_cluster_counter(
+                client_.counters_reader(), common::CLUSTER_COMMIT_POSITION_TYPE_ID, config_.cluster_id);
+            return consensus_publisher_->backup_response(
+                session, commit_counter_id, leader_member_.id, config_.member_id, *entry,
+                common::encode_cluster_members(active_members_),
+                snapshots.has_value() ? *snapshots : std::vector<common::RecordingLog::Snapshot>{});
+        });
     return {};
 }
 
@@ -982,6 +1003,12 @@ int ConsensusModuleAgent::slow_tick_work(std::int64_t now_ns) noexcept
     {
         work_count += session_manager_->send_redirects(leadership_term_id_, leader_member_.id, now_ns);
         work_count += session_manager_->send_rejections(leadership_term_id_, leader_member_.id, now_ns);
+    }
+    // `ConsensusModuleAgent.slowTickWork:2454-2458`: backup sessions are
+    // served by followers, not by the leader.
+    if (nullptr != session_manager_ && ClusterRole::follower == role_ && state_ == ConsensusModuleState::active)
+    {
+        work_count += session_manager_->process_pending_backup_sessions(now_ns, leader_member_.id);
     }
     if (nullptr != session_manager_ && ClusterRole::leader == role_ && state_ == ConsensusModuleState::active)
     {
@@ -1466,6 +1493,22 @@ void ConsensusModuleAgent::on_challenge_response(std::int64_t correlation_id, st
     else
     {
         report(make_error(ErrorCode::internal_error, "no leader publication to forward the challenge response"));
+    }
+}
+
+/// `ConsensusModuleAgent.onBackupQuery` (`ConsensusModuleAgent.java:1217-1246`):
+/// only a settled module (no election in flight) answers, and only while the
+/// log can be replayed: ACTIVE, SUSPENDED or SNAPSHOT.
+void ConsensusModuleAgent::on_backup_query(std::int64_t correlation_id, std::int32_t response_stream_id,
+                                           std::int32_t version, std::int64_t log_position,
+                                           std::string_view response_channel,
+                                           std::span<const std::uint8_t> encoded_credentials)
+{
+    if (nullptr == election_ && (ConsensusModuleState::active == state_ || ConsensusModuleState::suspended == state_ ||
+                                 ConsensusModuleState::snapshot == state_))
+    {
+        session_manager_->on_backup_query(correlation_id, response_stream_id, version, log_position,
+                                          std::string{response_channel}, encoded_credentials);
     }
 }
 
