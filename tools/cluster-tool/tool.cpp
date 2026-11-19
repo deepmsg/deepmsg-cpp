@@ -173,7 +173,15 @@ std::optional<std::int64_t> parse_duration_ns(std::string_view text)
         return std::nullopt;
     }
 
-    const std::int64_t value = std::stoll(trimmed.substr(0, digits));
+    std::int64_t value = 0;
+    try
+    {
+        value = std::stoll(trimmed.substr(0, digits));
+    }
+    catch (const std::exception&)
+    {
+        return std::nullopt;
+    }
     const std::string suffix = trimmed.substr(digits);
     std::int64_t multiplier = 1;
     if (suffix.empty() || "ns" == suffix)
