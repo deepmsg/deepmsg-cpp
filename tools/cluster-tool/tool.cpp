@@ -8,6 +8,7 @@
 
 #include "tool.h"
 
+#include <sched.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -21,7 +22,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -331,7 +331,7 @@ std::optional<common::ClusterMarkFile> open_mark_file(const std::string& cluster
             error = path + " does not exist";
             return std::nullopt;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+        ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
     }
 }
 
@@ -704,7 +704,7 @@ std::expected<H, Error> await_handle(DeepmsgClient& client, axc::core::AsyncAdd<
         {
             return std::unexpected(make_error(ErrorCode::no_capacity, std::string{what} + " timed out"));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+        ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
     }
 }
 
@@ -749,7 +749,7 @@ std::optional<Membership> query_cluster_members(const ControlProperties& control
         {
             return std::nullopt;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+        ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
     }
 
     while (true)
@@ -768,7 +768,7 @@ std::optional<Membership> query_cluster_members(const ControlProperties& control
         {
             return std::nullopt;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+        ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
     }
 
     MembershipDecode decode;
@@ -797,7 +797,7 @@ std::optional<Membership> query_cluster_members(const ControlProperties& control
         }
         if (0 == polled)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+            ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
         }
     }
 
@@ -1728,7 +1728,7 @@ private:
                     break;
                 }
                 (void)client->do_work();
-                std::this_thread::yield();
+                ::sched_yield();
             }
             if (!neutral)
             {
@@ -1828,7 +1828,7 @@ private:
                     (void)aeron_archive_context_close(context);
                     return std::nullopt;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+                ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
             }
         }
 
@@ -1860,7 +1860,7 @@ private:
                 failed = true;
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP_MS));
+            ::usleep(static_cast<useconds_t>(WAIT_STEP_MS) * 1'000);
         }
 
         const std::int64_t length = failed ? 0 : aeron_image_position(image);
