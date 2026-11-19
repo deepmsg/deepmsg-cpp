@@ -65,6 +65,31 @@ std::string format_file_name_time(std::int64_t epoch_millis)
     return std::string{date} + with_micros_and_offset(local, epoch_millis);
 }
 
+std::expected<std::span<const std::uint8_t>, Error> cnc_error_log_region(std::span<const std::uint8_t> cnc)
+{
+    constexpr std::size_t METADATA_LENGTH = 128;
+    if (cnc.size() < METADATA_LENGTH)
+    {
+        return std::unexpected(make_error(ErrorCode::protocol_error, "cnc file too short"));
+    }
+
+    const std::int64_t to_driver = read_int32(cnc.data() + 4);
+    const std::int64_t to_clients = read_int32(cnc.data() + 8);
+    const std::int64_t counters_metadata = read_int32(cnc.data() + 12);
+    const std::int64_t counters_values = read_int32(cnc.data() + 16);
+    const std::int64_t error_log_length = read_int32(cnc.data() + 20);
+    const std::int64_t error_log_start =
+        static_cast<std::int64_t>(METADATA_LENGTH) + to_driver + to_clients + counters_metadata + counters_values;
+
+    if (error_log_length < 0 || error_log_start < 0 ||
+        static_cast<std::uint64_t>(error_log_start) + static_cast<std::uint64_t>(error_log_length) > cnc.size())
+    {
+        return std::unexpected(make_error(ErrorCode::protocol_error, "cnc error log region out of range"));
+    }
+
+    return cnc.subspan(static_cast<std::size_t>(error_log_start), static_cast<std::size_t>(error_log_length));
+}
+
 RenderedErrorLog render_distinct_error_log(std::span<const std::uint8_t> buffer)
 {
     RenderedErrorLog rendered;
