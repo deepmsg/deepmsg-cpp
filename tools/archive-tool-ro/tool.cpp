@@ -1330,7 +1330,7 @@ int run_archive_tool_ro(int argc, char* argv[])
             return 1;
         }
         const bool all_files = arguments >= 4 && std::string_view(argv[5]) == "-a";
-        return command_checksum(archive_dir, all_files, checksum_name, *id);
+        return command_checksum(archive_dir, all_files, checksum_name, id);
     }
 
     if (command == "verify" && arguments >= 1)
@@ -1371,7 +1371,7 @@ int run_archive_tool_ro(int argc, char* argv[])
                     std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
                     return 1;
                 }
-                recording_id = *parsed_id;
+                recording_id = parsed_id;
             }
         }
         else if (option_count == 2)
@@ -1391,7 +1391,7 @@ int run_archive_tool_ro(int argc, char* argv[])
                     std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
                     return 1;
                 }
-                recording_id = *parsed_id;
+                recording_id = parsed_id;
                 all_segments = std::string_view(argv[4]) == "-a";
             }
         }
@@ -1413,7 +1413,7 @@ int run_archive_tool_ro(int argc, char* argv[])
                     std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
                     return 1;
                 }
-                recording_id = *parsed_id;
+                recording_id = parsed_id;
                 if (!checksum_option(argv[5]))
                 {
                     return 1;
@@ -1428,7 +1428,7 @@ int run_archive_tool_ro(int argc, char* argv[])
                 std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
                 return 1;
             }
-            recording_id = *parsed_id;
+            recording_id = parsed_id;
             all_segments = true;
             if (!checksum_option(argv[6]))
             {
