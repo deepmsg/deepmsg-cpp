@@ -200,6 +200,7 @@ gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERT
 gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_tool_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_backup_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_election_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_consensus_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
