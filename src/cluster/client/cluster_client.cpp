@@ -511,6 +511,7 @@ std::expected<int, Error> ClusterClient::poll_egress(std::size_t fragment_limit)
         return 0;
     }
 
+    reset_assemblers_if_pending();
     if (nullptr == assembler_)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "the egress fragment assembler was not created"));
@@ -555,6 +556,7 @@ std::expected<int, Error> ClusterClient::controlled_poll_egress(std::size_t frag
         return 0;
     }
 
+    reset_assemblers_if_pending();
     if (nullptr == controlled_assembler_)
     {
         return std::unexpected(
@@ -631,6 +633,25 @@ void ClusterClient::on_disconnected()
     state(State::await_new_leader, now_ns() + timeout);
 }
 
+void ClusterClient::reset_assemblers_if_pending()
+{
+    if (!assembler_reset_pending_)
+    {
+        return;
+    }
+    assembler_reset_pending_ = false;
+    if (nullptr != assembler_)
+    {
+        (void)aeron_fragment_assembler_delete(assembler_);
+    }
+    if (nullptr != controlled_assembler_)
+    {
+        (void)aeron_controlled_fragment_assembler_delete(controlled_assembler_);
+    }
+    (void)aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this);
+    (void)aeron_controlled_fragment_assembler_create(&controlled_assembler_, &ClusterClient::on_fragment, this);
+}
+
 std::expected<void, Error> ClusterClient::on_new_leader(std::int64_t cluster_session_id,
                                                         std::int64_t leadership_term_id, std::int32_t leader_member_id,
                                                         std::string_view ingress_endpoints)
@@ -675,17 +696,10 @@ std::expected<void, Error> ClusterClient::on_new_leader(std::int64_t cluster_ses
     }
 
     // `fragmentAssembler.clear()`: the C assembler has no clear, so the only
-    // equivalent is a fresh one.
-    if (nullptr != assembler_)
-    {
-        (void)aeron_fragment_assembler_delete(assembler_);
-    }
-    if (nullptr != controlled_assembler_)
-    {
-        (void)aeron_controlled_fragment_assembler_delete(controlled_assembler_);
-    }
-    (void)aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this);
-    (void)aeron_controlled_fragment_assembler_create(&controlled_assembler_, &ClusterClient::on_fragment, this);
+    // equivalent is a fresh one. It cannot be done here: this method runs
+    // inside that assembler's own callback, and the C poll reads the struct
+    // again after the callback returns. The reset is deferred to the next poll.
+    assembler_reset_pending_ = true;
 
     if (nullptr != egress_listener_)
     {
