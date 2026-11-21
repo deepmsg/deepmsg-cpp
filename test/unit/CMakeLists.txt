@@ -105,6 +105,7 @@ axc_add_executable(axc_cluster_unit_tests
         cluster/common/wheel_timer_service_test.cpp
         cluster/common/timer_golden_test.cpp
         cluster/service/container_components_test.cpp
+        cluster/service/snapshot_retry_test.cpp
         cluster/service/basic_auction_test.cpp
     DEPS
         axc_cluster_common

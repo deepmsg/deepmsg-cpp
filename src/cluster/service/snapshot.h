@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -23,6 +24,31 @@ namespace deepmsg::cluster::service
 {
 
 using axc::core::Error;
+
+/// Retries a claim while the publication is back-pressured.
+///
+/// The service snapshot taker used to call itself here; under sustained
+/// back-pressure in a Debug build (-O0, no tail-call optimisation) that grows
+/// the stack until it overflows. The loop is the same retry without the frame.
+template <class ClaimFunction, class IdleFunction>
+[[nodiscard]] auto retry_while_back_pressured(ClaimFunction&& claim, IdleFunction&& idle)
+    -> std::invoke_result_t<ClaimFunction>
+{
+    while (true)
+    {
+        auto claimed = claim();
+        if (claimed.has_value())
+        {
+            return claimed;
+        }
+        if (AERON_PUBLICATION_BACK_PRESSURED != claimed.error() &&
+            AERON_PUBLICATION_ADMIN_ACTION != claimed.error())
+        {
+            return claimed;
+        }
+        idle();
+    }
+}
 
 namespace detail
 {
