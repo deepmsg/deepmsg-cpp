@@ -610,14 +610,37 @@ protected:
     [[nodiscard]] QueryResult query_snapshots(std::int64_t log_position, int query_index)
     {
         const int member = follower_index();
-        EXPECT_GE(member, 0) << "no follower to answer a backup query";
+        if (member < 0)
+        {
+            // A failure here used to fall through to `node_dir(-1)` and then
+            // dereference the failed connect: the process dumped core instead of
+            // reporting which member was missing (2026-11-21, iteration 6 of the
+            // repeated suite). Report role/state per member and stop.
+            std::string members;
+            for (int i = 0; i < MEMBERS; ++i)
+            {
+                members.append(" node")
+                    .append(std::to_string(i))
+                    .append("=role/state ")
+                    .append(std::to_string(counter(i, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID)))
+                    .append("/")
+                    .append(
+                        std::to_string(counter(i, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID)));
+            }
+            ADD_FAILURE() << "no follower to answer a backup query:" << members;
+            return {};
+        }
 
         // `ClientConfig.dir` is a view: the path must outlive the connect.
         const std::string client_dir = node_dir(member) + "/aeron";
         axc::core::ClientConfig client_config{client_dir};
         client_config.on_error = &on_client_error;
         auto connected = DeepmsgClient::connect(client_config);
-        EXPECT_TRUE(connected) << connected.error().message.view();
+        if (!connected)
+        {
+            ADD_FAILURE() << "backup query client: " << connected.error().message.view();
+            return {};
+        }
 
         const std::string response_channel =
             "aeron:udp?endpoint=localhost:" + std::to_string(base_port_ + 300 + query_index);
