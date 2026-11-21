@@ -161,16 +161,16 @@ int main(int argc, char* argv[])
     }
     (void)properties->load_environment("AERON_");
 
-    // The embedded driver reads its configuration from the environment, as
-    // `aeronmd` does with `-D` (same mapping as the archive server binary).
-    // `deepmsg.*` is our own namespace: it stays out of the C driver's
-    // environment and is what `EmbeddedDriver` installs a media from.
+    // The environment is loaded after the files (precedence: `-D` > file >
+    // environment). `deepmsg.*` is our own namespace: it stays out of the C
+    // driver's environment and is what `EmbeddedDriver` installs a media from,
+    // so it is read for the external-driver shape too.
+    if (auto loaded = properties->load_environment("DEEPMSG_", "deepmsg."); !loaded)
+    {
+        fail(std::string{loaded.error().message.view()});
+    }
     if (embedded_driver)
     {
-        if (auto loaded = properties->load_environment("DEEPMSG_", "deepmsg."); !loaded)
-        {
-            fail(std::string{loaded.error().message.view()});
-        }
         properties->for_each(
             [](std::string_view name, std::string_view value)
             {

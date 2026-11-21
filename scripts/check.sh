@@ -24,6 +24,18 @@ if [ "$undiscovered" -ne 0 ]; then
     exit 1
 fi
 
+# Config precedence: a properties file beats the environment, and every source
+# is insert-if-absent, so an app that loads the environment first has the
+# precedence backwards (`PropertySource`'s contract: -D > file > environment).
+while read -r app_main; do
+    file_line=$(grep -n "load_file(" "$app_main" | head -1 | cut -d: -f1)
+    env_line=$(grep -n "load_environment(" "$app_main" | head -1 | cut -d: -f1)
+    if [ -n "$file_line" ] && [ -n "$env_line" ] && [ "$env_line" -lt "$file_line" ]; then
+        echo "check: ${app_main} loads the environment before its properties file" >&2
+        exit 1
+    fi
+done < <(find apps -name 'main.cpp')
+
 presets=("$@")
 if [ ${#presets[@]} -eq 0 ]; then
     presets=(debug)

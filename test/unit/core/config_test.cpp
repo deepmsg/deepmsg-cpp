@@ -84,6 +84,35 @@ TEST(PropertySource, FileValuesDoNotOverrideArguments)
     EXPECT_EQ("2", source->get_or("b", ""));
 }
 
+TEST(PropertySource, APropertiesFileOverridesTheEnvironment)
+{
+    // The launch order the apps must keep: files first, environment second
+    // (both are insert-if-absent, so the earlier source wins).
+    TempDir temp;
+    ASSERT_FALSE(temp.path().empty());
+
+    const std::string file = temp.path() + "/config.properties";
+    {
+        std::ofstream out{file};
+        out << "aeron.test.precedence=file\n";
+    }
+
+    ::setenv("AERON_TEST_PRECEDENCE", "environment", 1);
+    ::setenv("AERON_TEST_ONLY_IN_ENVIRONMENT", "environment", 1);
+
+    const char* argv[] = {"prog"};
+    auto source = axc::core::PropertySource::from_args(1, argv);
+    ASSERT_TRUE(source.has_value());
+    ASSERT_TRUE(source->load_file(file).has_value());
+    ASSERT_TRUE(source->load_environment().has_value());
+
+    EXPECT_EQ("file", source->get_or("aeron.test.precedence", ""));
+    EXPECT_EQ("environment", source->get_or("aeron.test.only.in.environment", ""));
+
+    ::unsetenv("AERON_TEST_PRECEDENCE");
+    ::unsetenv("AERON_TEST_ONLY_IN_ENVIRONMENT");
+}
+
 TEST(PropertySource, EnvironmentMapsUnderscoresToDots)
 {
     ::setenv("AERON_TEST_SAMPLE", "42", 1);
