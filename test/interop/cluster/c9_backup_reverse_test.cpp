@@ -1282,6 +1282,10 @@ TEST_F(Xc9JavaBackupAgainstOurClusterTest, theBackupFollowsTheClusterThroughALea
         << "the node started from the backup never became the active leader (state="
         << restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) << ")";
 
+    // Known flake, and pre-existing: on `main` (3c38481) the tracking check
+    // below fails 2 in 5 in the release preset with the recovered state
+    // stopping after the first batch (baseline in `/tmp/dp-main`, 2026-11-21).
+    // Debug passes. Left active so the gap stays visible.
     std::vector<std::int32_t> expected;
     for (int i = 0; i < 20; ++i)
     {
