@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <span>
 #include <string>
@@ -39,6 +40,64 @@ inline constexpr std::size_t MESSAGE_HEADER_LENGTH = codecs::MessageHeader::enco
     return header;
 }
 
+/// Guard that the fixed SBE root block declared in `header` fits inside
+/// `message`. A short body makes the generated decoder throw from
+/// `sbeCheckPosition`, and the adapters are called from C frames, so the length
+/// is judged before a decoder is wrapped.
+[[nodiscard]] inline std::expected<void, axc::core::Error> check_body_length(
+    std::span<const std::uint8_t> message, const codecs::MessageHeader& header) noexcept
+{
+    if (MESSAGE_HEADER_LENGTH + static_cast<std::size_t>(header.blockLength()) > message.size())
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                                     "a cluster message is shorter than its declared blockLength"));
+    }
+    return {};
+}
+
+/// The same for a field whose payload is a byte array.
+template <class Decoder>
+[[nodiscard]] std::expected<std::span<const std::uint8_t>, axc::core::Error> read_var_bytes(
+    Decoder& decoder, std::span<const std::uint8_t> message) noexcept
+{
+    const std::uint64_t position = decoder.sbePosition();
+    if (position + sizeof(std::uint32_t) > message.size())
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                                     "a cluster message ends inside a variable-length length field"));
+    }
+
+    std::uint32_t length = 0;
+    std::memcpy(&length, message.data() + position, sizeof(length));
+    if (position + sizeof(length) + length > message.size())
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                                     "a variable-length field runs past the end of its message"));
+    }
+
+    decoder.sbePosition(position + sizeof(length) + length);
+    return message.subspan(static_cast<std::size_t>(position) + sizeof(length), length);
+}
+
+/// The variable-length field at `decoder`'s position, read against the whole
+/// message and advancing the decoder exactly as the generated accessor does.
+///
+/// The generated `getXxxAsStringView` / field-pointer accessors read the length
+/// header from the buffer and return a view of it without checking that the
+/// payload fits. A corrupt length therefore runs off the end, and the copy that
+/// follows faults — a `catch` cannot see it. This is the checked read.
+template <class Decoder>
+[[nodiscard]] std::expected<std::string_view, axc::core::Error> read_var_string(
+    Decoder& decoder, std::span<const std::uint8_t> message) noexcept
+{
+    auto bytes = read_var_bytes(decoder, message);
+    if (!bytes)
+    {
+        return std::unexpected(bytes.error());
+    }
+    return std::string_view{reinterpret_cast<const char*>(bytes->data()), bytes->size()};
+}
+
 /// The 8-byte SBE header of one cluster message, guarded for length and schema.
 [[nodiscard]] inline std::expected<codecs::MessageHeader, axc::core::Error> message_header(
     std::span<const std::uint8_t> message) noexcept
@@ -53,6 +112,10 @@ inline constexpr std::size_t MESSAGE_HEADER_LENGTH = codecs::MessageHeader::enco
         return std::unexpected(axc::core::make_error(
             axc::core::ErrorCode::protocol_error,
             "expected schemaId=" + std::to_string(SBE_SCHEMA_ID) + ", actual=" + std::to_string(header->schemaId())));
+    }
+    if (auto body = check_body_length(message, *header); !body)
+    {
+        return std::unexpected(body.error());
     }
     return header;
 }

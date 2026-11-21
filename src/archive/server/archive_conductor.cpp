@@ -3257,6 +3257,14 @@ aeron_image_t* ArchiveConductor::image_by_session_id(std::int64_t registration_i
     return aeron_subscription_image_by_session_id(subscription->second.subscription.get(), session_id);
 }
 
+void ArchiveConductor::release_image(aeron_image_t* image)
+{
+    if (nullptr != image)
+    {
+        (void)aeron_image_release(image);
+    }
+}
+
 std::int64_t ArchiveConductor::image_position(aeron_image_t* image)
 {
     return aeron_image_position(image);

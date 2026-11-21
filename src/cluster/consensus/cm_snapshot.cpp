@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <string>
 #include <utility>
@@ -429,86 +430,97 @@ std::expected<void, Error> ConsensusModuleSnapshotAdapter::dispatch(std::span<co
         observer_->on_snapshot_record(fragment);
     }
 
-    switch (header->templateId())
+    try
     {
-        case codecs::SnapshotMarker::SBE_TEMPLATE_ID:
+        switch (header->templateId())
         {
-            auto marker = wrap_body<codecs::SnapshotMarker>(fragment, *header);
-            if (CM_SNAPSHOT_TYPE_ID != marker.typeId())
+            case codecs::SnapshotMarker::SBE_TEMPLATE_ID:
             {
-                return std::unexpected(
-                    axc::core::make_error(axc::core::ErrorCode::protocol_error,
-                                          "unexpected snapshot type: " + std::to_string(marker.typeId())));
-            }
-
-            if (codecs::SnapshotMark::BEGIN == marker.mark())
-            {
-                if (in_snapshot_)
+                auto marker = wrap_body<codecs::SnapshotMarker>(fragment, *header);
+                if (CM_SNAPSHOT_TYPE_ID != marker.typeId())
                 {
                     return std::unexpected(
-                        axc::core::make_error(axc::core::ErrorCode::protocol_error, "already in snapshot"));
+                        axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                              "unexpected snapshot type: " + std::to_string(marker.typeId())));
                 }
-                in_snapshot_ = true;
-                return handler_->on_load_begin_snapshot(
-                    marker.appVersion(), cm_time_unit_from_code(static_cast<std::int32_t>(marker.timeUnit())));
-            }
 
-            if (codecs::SnapshotMark::END == marker.mark())
-            {
-                if (!in_snapshot_)
+                if (codecs::SnapshotMark::BEGIN == marker.mark())
                 {
-                    return std::unexpected(
-                        axc::core::make_error(axc::core::ErrorCode::protocol_error, "missing begin snapshot"));
+                    if (in_snapshot_)
+                    {
+                        return std::unexpected(
+                            axc::core::make_error(axc::core::ErrorCode::protocol_error, "already in snapshot"));
+                    }
+                    in_snapshot_ = true;
+                    return handler_->on_load_begin_snapshot(
+                        marker.appVersion(), cm_time_unit_from_code(static_cast<std::int32_t>(marker.timeUnit())));
                 }
-                done_ = true;
-                return handler_->on_load_end_snapshot();
+
+                if (codecs::SnapshotMark::END == marker.mark())
+                {
+                    if (!in_snapshot_)
+                    {
+                        return std::unexpected(
+                            axc::core::make_error(axc::core::ErrorCode::protocol_error, "missing begin snapshot"));
+                    }
+                    done_ = true;
+                    return handler_->on_load_end_snapshot();
+                }
+                break;
             }
-            break;
+
+            case codecs::ClusterSession::SBE_TEMPLATE_ID:
+            {
+                auto session = wrap_body<codecs::ClusterSession>(fragment, *header);
+                auto response_channel = common::read_var_string(session, fragment);
+                if (!response_channel)
+                {
+                    return std::unexpected(response_channel.error());
+                }
+                return handler_->on_load_cluster_session(
+                    session.clusterSessionId(), session.correlationId(), session.openedLogPosition(),
+                    session.timeOfLastActivity(), session.closeReason(), session.responseStreamId(), *response_channel);
+            }
+
+            case codecs::Timer::SBE_TEMPLATE_ID:
+            {
+                auto timer = wrap_body<codecs::Timer>(fragment, *header);
+                return handler_->on_load_timer(timer.correlationId(), timer.deadline());
+            }
+
+            case codecs::ConsensusModule::SBE_TEMPLATE_ID:
+            {
+                auto state = wrap_body<codecs::ConsensusModule>(fragment, *header);
+                return handler_->on_load_consensus_module_state(state.nextSessionId(), state.nextServiceSessionId(),
+                                                                state.logServiceSessionId(),
+                                                                state.pendingMessageCapacity());
+            }
+
+            case codecs::ClusterMembers::SBE_TEMPLATE_ID:
+                // Ignored, as the reference does (`:179-181`).
+                break;
+
+            case codecs::PendingMessageTracker::SBE_TEMPLATE_ID:
+            {
+                auto tracker = wrap_body<codecs::PendingMessageTracker>(fragment, *header);
+                return handler_->on_load_pending_message_tracker(tracker.nextServiceSessionId(),
+                                                                 tracker.logServiceSessionId(),
+                                                                 tracker.pendingMessageCapacity(), tracker.serviceId());
+            }
+
+            case codecs::SessionMessageHeader::SBE_TEMPLATE_ID:
+            {
+                auto session_header = wrap_body<codecs::SessionMessageHeader>(fragment, *header);
+                return handler_->on_load_pending_message(session_header.clusterSessionId(), fragment);
+            }
+
+            default:
+                break;
         }
-
-        case codecs::ClusterSession::SBE_TEMPLATE_ID:
-        {
-            auto session = wrap_body<codecs::ClusterSession>(fragment, *header);
-            return handler_->on_load_cluster_session(session.clusterSessionId(), session.correlationId(),
-                                                     session.openedLogPosition(), session.timeOfLastActivity(),
-                                                     session.closeReason(), session.responseStreamId(),
-                                                     session.getResponseChannelAsString());
-        }
-
-        case codecs::Timer::SBE_TEMPLATE_ID:
-        {
-            auto timer = wrap_body<codecs::Timer>(fragment, *header);
-            return handler_->on_load_timer(timer.correlationId(), timer.deadline());
-        }
-
-        case codecs::ConsensusModule::SBE_TEMPLATE_ID:
-        {
-            auto state = wrap_body<codecs::ConsensusModule>(fragment, *header);
-            return handler_->on_load_consensus_module_state(state.nextSessionId(), state.nextServiceSessionId(),
-                                                            state.logServiceSessionId(),
-                                                            state.pendingMessageCapacity());
-        }
-
-        case codecs::ClusterMembers::SBE_TEMPLATE_ID:
-            // Ignored, as the reference does (`:179-181`).
-            break;
-
-        case codecs::PendingMessageTracker::SBE_TEMPLATE_ID:
-        {
-            auto tracker = wrap_body<codecs::PendingMessageTracker>(fragment, *header);
-            return handler_->on_load_pending_message_tracker(tracker.nextServiceSessionId(),
-                                                             tracker.logServiceSessionId(),
-                                                             tracker.pendingMessageCapacity(), tracker.serviceId());
-        }
-
-        case codecs::SessionMessageHeader::SBE_TEMPLATE_ID:
-        {
-            auto session_header = wrap_body<codecs::SessionMessageHeader>(fragment, *header);
-            return handler_->on_load_pending_message(session_header.clusterSessionId(), fragment);
-        }
-
-        default:
-            break;
+    }
+    catch (const std::exception& exception)
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error, exception.what()));
     }
 
     return {};

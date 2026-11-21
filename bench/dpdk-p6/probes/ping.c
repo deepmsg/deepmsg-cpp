@@ -42,6 +42,7 @@ typedef struct
     int64_t total;
     int64_t received;
     int64_t first_send_ns;
+    int64_t last_send_ns;
     int64_t last_receive_ns;
 } Pong;
 
@@ -191,6 +192,7 @@ int main(int argc, char** argv)
                     {
                         pong.first_send_ns = now;
                     }
+                    pong.last_send_ns = now;
                     ++next_sequence;
                     if (rate > 0)
                     {
@@ -261,7 +263,9 @@ int main(int argc, char** argv)
         int64_t achieved = 0;
         if (rate > 0)
         {
-            const int64_t span = pong.last_receive_ns - pong.first_send_ns;
+            /* The send-side span: `last_receive_ns - first_send_ns` includes
+             * the last message's round trip and understates a small sample. */
+            const int64_t span = pong.last_send_ns - pong.first_send_ns;
             /* The first message was the handshake; the paced count is what
              * went out after it. */
             const int64_t paced = total > 1 ? total - 1 : total;

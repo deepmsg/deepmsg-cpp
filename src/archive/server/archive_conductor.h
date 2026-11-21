@@ -212,6 +212,7 @@ public:
     [[nodiscard]] std::optional<ExtendRecordingOutcome> take_extend_recording_outcome(std::int64_t token) override;
     void cancel_extend_recording(std::int64_t token) override;
     [[nodiscard]] aeron_image_t* image_by_session_id(std::int64_t registration_id, std::int32_t session_id) override;
+    void release_image(aeron_image_t* image) override;
     [[nodiscard]] std::int64_t image_position(aeron_image_t* image) override;
     [[nodiscard]] bool image_is_closed(aeron_image_t* image) override;
     [[nodiscard]] bool image_is_end_of_stream(aeron_image_t* image) override;

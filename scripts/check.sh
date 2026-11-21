@@ -8,6 +8,46 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
+# Every unit-test binary has to reach ctest. A target defined without a
+# `gtest_discover_tests` line is built and then never run, and nothing says so
+# (`axc_cluster_backup_unit_tests` was in that state; the cluster backup tests
+# had never executed, 2026-11-21).
+unit_cmake=test/unit/CMakeLists.txt
+undiscovered=0
+while read -r unit_target; do
+    if ! grep -q "gtest_discover_tests(${unit_target}[ )]" "$unit_cmake"; then
+        echo "check: ${unit_target} is defined in ${unit_cmake} but never discovered by ctest" >&2
+        undiscovered=1
+    fi
+done < <(sed -n 's/^axc_add_executable(\([A-Za-z0-9_]*\).*/\1/p' "$unit_cmake")
+if [ "$undiscovered" -ne 0 ]; then
+    exit 1
+fi
+
+# Config precedence: a properties file beats the environment, and every source
+# is insert-if-absent, so an app that loads the environment first has the
+# precedence backwards (`PropertySource`'s contract: -D > file > environment).
+while read -r app_main; do
+    # `|| true`: an app with neither call is not a precedence problem (the
+    # skeleton services have no configuration yet).
+    file_line=$(grep -n "load_file(" "$app_main" | head -1 | cut -d: -f1 || true)
+    env_line=$(grep -n "load_environment(" "$app_main" | head -1 | cut -d: -f1 || true)
+    if [ -n "$file_line" ] && [ -n "$env_line" ] && [ "$env_line" -lt "$file_line" ]; then
+        echo "check: ${app_main} loads the environment before its properties file" >&2
+        exit 1
+    fi
+done < <(find apps -name 'main.cpp')
+
+# A name declared `honoured` must have a reader: the disposition is the promise
+# that the property changes behaviour. `cluster_config_test` only asserts the
+# enumeration, so this is the check that keeps the table honest.
+while read -r honoured_name; do
+    if ! grep -rqF "\"${honoured_name}\"" src apps tools --include='*.cpp' --include='*.h' --exclude='cluster_config.cpp'; then
+        echo "check: honoured config ${honoured_name} is not read anywhere" >&2
+        exit 1
+    fi
+done < <(sed -n 's/^[[:space:]]*table\.add_honoured("\([^"]*\)").*/\1/p' src/cluster/common/cluster_config.cpp)
+
 presets=("$@")
 if [ ${#presets[@]} -eq 0 ]; then
     presets=(debug)
@@ -50,7 +90,10 @@ fi
 
 clang_tidy=$(find_tool clang-tidy || true)
 if [ -n "$clang_tidy" ] && [ -f "build/${presets[0]}/compile_commands.json" ]; then
-    find src -name '*.cpp' -print0 | xargs -0 -r "$clang_tidy" -p "build/${presets[0]}"
+    # Parallel: each file is a full front-end run, and the tree is now 149
+    # translation units once `apps/` and `tools/` are included.
+    find src apps tools -name '*.cpp' -print0 |
+        xargs -0 -r -P "$(nproc)" "$clang_tidy" -p "build/${presets[0]}"
 else
     echo "clang-tidy-20/clang-tidy or compile_commands.json not found: skipping the tidy gate"
 fi

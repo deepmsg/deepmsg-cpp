@@ -24,7 +24,9 @@
 // (`ConsensusModuleAgent` includes it the same way).
 extern "C"
 {
+#include <client/aeron_archive_async_connect.h>
 #include <client/aeron_archive_client.h>
+#include <exception>
 }
 
 namespace deepmsg::cluster::backup
@@ -1028,13 +1030,18 @@ void ClusterBackupAgent::reset()
     consensus_publications_->shuffle();
     if (nullptr != cluster_archive_async_connect_)
     {
-        (void)aeron_archive_async_connect_poll(&cluster_archive_, cluster_archive_async_connect_);
+        aeron_archive_async_connect_delete(cluster_archive_async_connect_);
         cluster_archive_async_connect_ = nullptr;
     }
     if (nullptr != cluster_archive_)
     {
         (void)aeron_archive_close(cluster_archive_);
         cluster_archive_ = nullptr;
+    }
+    if (nullptr != cluster_archive_context_)
+    {
+        (void)aeron_archive_context_close(cluster_archive_context_);
+        cluster_archive_context_ = nullptr;
     }
     recording_subscription_.reset();
 }
@@ -1147,19 +1154,27 @@ bool ClusterBackupAgent::dispatch(std::span<const std::uint8_t> message)
         return false;
     }
 
-    switch (header->templateId())
+    try
     {
-        case codecs::BackupResponse::SBE_TEMPLATE_ID:
-            on_backup_response(message);
-            break;
-        case codecs::Challenge::SBE_TEMPLATE_ID:
-            on_challenge(message);
-            break;
-        case codecs::SessionEvent::SBE_TEMPLATE_ID:
-            on_session_event(message);
-            break;
-        default:
-            break;
+        switch (header->templateId())
+        {
+            case codecs::BackupResponse::SBE_TEMPLATE_ID:
+                on_backup_response(message);
+                break;
+            case codecs::Challenge::SBE_TEMPLATE_ID:
+                on_challenge(message);
+                break;
+            case codecs::SessionEvent::SBE_TEMPLATE_ID:
+                on_session_event(message);
+                break;
+            default:
+                break;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        on_error(make_error(ErrorCode::protocol_error, exception.what()));
+        return false;
     }
     return true;
 }
@@ -1369,10 +1384,19 @@ void ClusterBackupAgent::on_session_event(std::span<const std::uint8_t> message)
     {
         case codecs::EventCode::ERROR:
         case codecs::EventCode::AUTHENTICATION_REJECTED:
+        {
+            auto detail = common::read_var_string(decoder, message);
+            if (!detail)
+            {
+                on_error(detail.error());
+                state(ClusterBackupState::reset_backup, now_ms());
+                break;
+            }
             on_error(
-                make_error(ErrorCode::protocol_error, std::string{"backup session rejected: "} + decoder.detail()));
+                make_error(ErrorCode::protocol_error, std::string{"backup session rejected: "} + std::string{*detail}));
             state(ClusterBackupState::reset_backup, now_ms());
             break;
+        }
         case codecs::EventCode::REDIRECT:
             consensus_publications_->close_and_exclude_current();
             state(ClusterBackupState::reset_backup, now_ms());
@@ -1420,7 +1444,7 @@ void ClusterBackupAgent::on_close() noexcept
     }
     if (nullptr != cluster_archive_async_connect_)
     {
-        (void)aeron_archive_async_connect_poll(&cluster_archive_, cluster_archive_async_connect_);
+        aeron_archive_async_connect_delete(cluster_archive_async_connect_);
         cluster_archive_async_connect_ = nullptr;
     }
     if (nullptr != cluster_archive_)

@@ -1,5 +1,6 @@
 #include "cluster/service/service_adapter.h"
 
+#include <exception>
 #include <utility>
 
 #include "cluster/service/codecs.h"
@@ -105,39 +106,51 @@ std::expected<void, Error> ServiceAdapter::dispatch_message(ServiceEvents& event
         return std::unexpected(header.error());
     }
 
-    switch (header->templateId())
+    try
     {
-        case codecs::JoinLog::SBE_TEMPLATE_ID:
+        switch (header->templateId())
         {
-            auto decoder = wrap_body<codecs::JoinLog>(message, *header);
-            JoinLogEvent event;
-            event.log_position = decoder.logPosition();
-            event.max_log_position = decoder.maxLogPosition();
-            event.member_id = decoder.memberId();
-            event.log_session_id = decoder.logSessionId();
-            event.log_stream_id = decoder.logStreamId();
-            event.is_startup = codecs::BooleanType::TRUE == decoder.isStartup();
-            event.role = decoder.role();
-            event.is_standby = codecs::BooleanType::TRUE == decoder.isStandby();
-            event.log_channel = decoder.getLogChannelAsString();
-            events.join_log = std::move(event);
-            return {};
+            case codecs::JoinLog::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::JoinLog>(message, *header);
+                JoinLogEvent event;
+                event.log_position = decoder.logPosition();
+                event.max_log_position = decoder.maxLogPosition();
+                event.member_id = decoder.memberId();
+                event.log_session_id = decoder.logSessionId();
+                event.log_stream_id = decoder.logStreamId();
+                event.is_startup = codecs::BooleanType::TRUE == decoder.isStartup();
+                event.role = decoder.role();
+                event.is_standby = codecs::BooleanType::TRUE == decoder.isStandby();
+                auto log_channel = common::read_var_string(decoder, message);
+                if (!log_channel)
+                {
+                    return std::unexpected(log_channel.error());
+                }
+                event.log_channel = std::string{*log_channel};
+                events.join_log = std::move(event);
+                return {};
+            }
+            case codecs::ServiceTerminationPosition::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::ServiceTerminationPosition>(message, *header);
+                events.termination_position =
+                    std::make_pair(decoder.logPosition(), codecs::BooleanType::TRUE == decoder.ackRequired());
+                return {};
+            }
+            case codecs::RequestServiceAck::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::RequestServiceAck>(message, *header);
+                events.requested_ack_position = decoder.logPosition();
+                return {};
+            }
+            default:
+                return {};
         }
-        case codecs::ServiceTerminationPosition::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::ServiceTerminationPosition>(message, *header);
-            events.termination_position =
-                std::make_pair(decoder.logPosition(), codecs::BooleanType::TRUE == decoder.ackRequired());
-            return {};
-        }
-        case codecs::RequestServiceAck::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::RequestServiceAck>(message, *header);
-            events.requested_ack_position = decoder.logPosition();
-            return {};
-        }
-        default:
-            return {};
+    }
+    catch (const std::exception& exception)
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error, exception.what()));
     }
 }
 

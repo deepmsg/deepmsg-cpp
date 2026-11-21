@@ -473,12 +473,32 @@ std::vector<common::ClusterMarkFile> open_service_mark_files(const std::string& 
     }
 
     std::vector<common::ClusterMarkFile> files;
+    // `new ClusterMarkFile(dir, name, clock, timeoutMs, logger)`: the reference
+    // waits up to `timeoutMs` for the file to become valid, and so do we.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max<std::int64_t>(0, timeout_ms));
     for (const auto& path : paths)
     {
-        auto file = common::ClusterMarkFile::open_existing(path, now_ms());
-        if (!file)
+        std::optional<common::ClusterMarkFile> opened;
+        std::string last_error;
+        while (true)
         {
-            out += file.error().message.view();
+            auto file = common::ClusterMarkFile::open_existing(path, now_ms());
+            if (file)
+            {
+                opened.emplace(std::move(*file));
+                break;
+            }
+            last_error = file.error().message.view();
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                break;
+            }
+            ::usleep(10'000);
+        }
+        if (!opened)
+        {
+            out += last_error;
             out += "\n";
             continue;
         }
@@ -487,7 +507,7 @@ std::vector<common::ClusterMarkFile> open_service_mark_files(const std::string& 
         out += "INFO: mark file exists: ";
         out += path;
         out += "\n";
-        files.push_back(std::move(*file));
+        files.push_back(std::move(*opened));
     }
     return files;
 }

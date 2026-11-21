@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstring>
+#include <exception>
 #include <utility>
 
 #include "cluster/client/channel_util.h"
@@ -510,6 +511,7 @@ std::expected<int, Error> ClusterClient::poll_egress(std::size_t fragment_limit)
         return 0;
     }
 
+    reset_assemblers_if_pending();
     if (nullptr == assembler_)
     {
         return std::unexpected(make_error(ErrorCode::internal_error, "the egress fragment assembler was not created"));
@@ -554,6 +556,7 @@ std::expected<int, Error> ClusterClient::controlled_poll_egress(std::size_t frag
         return 0;
     }
 
+    reset_assemblers_if_pending();
     if (nullptr == controlled_assembler_)
     {
         return std::unexpected(
@@ -630,6 +633,25 @@ void ClusterClient::on_disconnected()
     state(State::await_new_leader, now_ns() + timeout);
 }
 
+void ClusterClient::reset_assemblers_if_pending()
+{
+    if (!assembler_reset_pending_)
+    {
+        return;
+    }
+    assembler_reset_pending_ = false;
+    if (nullptr != assembler_)
+    {
+        (void)aeron_fragment_assembler_delete(assembler_);
+    }
+    if (nullptr != controlled_assembler_)
+    {
+        (void)aeron_controlled_fragment_assembler_delete(controlled_assembler_);
+    }
+    (void)aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this);
+    (void)aeron_controlled_fragment_assembler_create(&controlled_assembler_, &ClusterClient::on_fragment, this);
+}
+
 std::expected<void, Error> ClusterClient::on_new_leader(std::int64_t cluster_session_id,
                                                         std::int64_t leadership_term_id, std::int32_t leader_member_id,
                                                         std::string_view ingress_endpoints)
@@ -674,17 +696,10 @@ std::expected<void, Error> ClusterClient::on_new_leader(std::int64_t cluster_ses
     }
 
     // `fragmentAssembler.clear()`: the C assembler has no clear, so the only
-    // equivalent is a fresh one.
-    if (nullptr != assembler_)
-    {
-        (void)aeron_fragment_assembler_delete(assembler_);
-    }
-    if (nullptr != controlled_assembler_)
-    {
-        (void)aeron_controlled_fragment_assembler_delete(controlled_assembler_);
-    }
-    (void)aeron_fragment_assembler_create(&assembler_, &ClusterClient::on_fragment_dispatch, this);
-    (void)aeron_controlled_fragment_assembler_create(&controlled_assembler_, &ClusterClient::on_fragment, this);
+    // equivalent is a fresh one. It cannot be done here: this method runs
+    // inside that assembler's own callback, and the C poll reads the struct
+    // again after the callback returns. The reset is deferred to the next poll.
+    assembler_reset_pending_ = true;
 
     if (nullptr != egress_listener_)
     {
@@ -877,133 +892,164 @@ aeron_controlled_fragment_handler_action_t ClusterClient::dispatch(std::span<con
         return AERON_ACTION_ABORT;
     }
 
-    const std::int32_t template_id = header->templateId();
-    switch (template_id)
+    try
     {
-        case codecs::SessionMessageHeader::sbeTemplateId():
+        const std::int32_t template_id = header->templateId();
+        switch (template_id)
         {
-            auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
-            const std::int64_t session_id = decoder.clusterSessionId();
-            if (session_id != cluster_session_id_)
+            case codecs::SessionMessageHeader::sbeTemplateId():
             {
-                return AERON_ACTION_CONTINUE;
-            }
-
-            const std::span<const std::uint8_t> payload = message.subspan(SESSION_HEADER_LENGTH);
-            const std::int64_t timestamp = decoder.timestamp();
-
-            if (controlled)
-            {
-                if (nullptr == controlled_egress_listener_)
+                auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
+                const std::int64_t session_id = decoder.clusterSessionId();
+                if (session_id != cluster_session_id_)
                 {
-                    pending_error_ = make_error(ErrorCode::config_error,
-                                                "controlledEgressListener must be specified on the cluster client");
+                    return AERON_ACTION_CONTINUE;
+                }
+
+                const std::span<const std::uint8_t> payload = message.subspan(SESSION_HEADER_LENGTH);
+                const std::int64_t timestamp = decoder.timestamp();
+
+                if (controlled)
+                {
+                    if (nullptr == controlled_egress_listener_)
+                    {
+                        pending_error_ = make_error(ErrorCode::config_error,
+                                                    "controlledEgressListener must be specified on the cluster client");
+                        return AERON_ACTION_ABORT;
+                    }
+                    return controlled_egress_listener_->on_message(session_id, timestamp, payload);
+                }
+
+                if (nullptr == egress_listener_)
+                {
+                    pending_error_ =
+                        make_error(ErrorCode::config_error, "egressListener must be specified on the cluster client");
                     return AERON_ACTION_ABORT;
                 }
-                return controlled_egress_listener_->on_message(session_id, timestamp, payload);
-            }
-
-            if (nullptr == egress_listener_)
-            {
-                pending_error_ =
-                    make_error(ErrorCode::config_error, "egressListener must be specified on the cluster client");
-                return AERON_ACTION_ABORT;
-            }
-            egress_listener_->on_message(session_id, timestamp, payload);
-            return AERON_ACTION_CONTINUE;
-        }
-
-        case codecs::SessionEvent::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
-            const std::int64_t session_id = decoder.clusterSessionId();
-            if (session_id != cluster_session_id_)
-            {
+                egress_listener_->on_message(session_id, timestamp, payload);
                 return AERON_ACTION_CONTINUE;
             }
 
-            const codecs::EventCode::Value code = decoder.code();
-            const std::string detail = decoder.getDetailAsString();
-            if (codecs::EventCode::CLOSED == code)
+            case codecs::SessionEvent::sbeTemplateId():
             {
-                state(State::pending_close, 0);
-            }
-
-            if (controlled)
-            {
-                if (nullptr != controlled_egress_listener_)
+                auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
+                const std::int64_t session_id = decoder.clusterSessionId();
+                if (session_id != cluster_session_id_)
                 {
-                    controlled_egress_listener_->on_session_event(decoder.correlationId(), session_id,
-                                                                  decoder.leadershipTermId(), decoder.leaderMemberId(),
-                                                                  code, detail);
+                    return AERON_ACTION_CONTINUE;
                 }
-            }
-            else if (nullptr != egress_listener_)
-            {
-                egress_listener_->on_session_event(decoder.correlationId(), session_id, decoder.leadershipTermId(),
-                                                   decoder.leaderMemberId(), code, detail);
-            }
-            return AERON_ACTION_CONTINUE;
-        }
 
-        case codecs::NewLeaderEvent::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
-            const std::int64_t session_id = decoder.clusterSessionId();
-            if (session_id != cluster_session_id_)
-            {
-                return AERON_ACTION_CONTINUE;
-            }
-
-            set_egress_image(image);
-            const std::string endpoints = decoder.getIngressEndpointsAsString();
-            auto promoted = on_new_leader(session_id, decoder.leadershipTermId(), decoder.leaderMemberId(), endpoints);
-            if (!promoted)
-            {
-                pending_error_ = promoted.error();
-            }
-            return controlled ? AERON_ACTION_COMMIT : AERON_ACTION_CONTINUE;
-        }
-
-        case codecs::AdminResponse::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
-            const std::int64_t session_id = decoder.clusterSessionId();
-            if (session_id != cluster_session_id_)
-            {
-                return AERON_ACTION_CONTINUE;
-            }
-
-            // `AeronCluster.java:958-963`: the payload follows the message's
-            // var-data, i.e. the decoder's position after the message string.
-            const std::uint32_t message_length = decoder.messageLength();
-            const std::uint32_t payload_length = decoder.payloadLength();
-            const std::size_t offset = common::MESSAGE_HEADER_LENGTH + header->blockLength() + 4 + message_length + 4;
-            const std::span<const std::uint8_t> payload =
-                offset <= message.size()
-                    ? message.subspan(offset, std::min<std::size_t>(payload_length, message.size() - offset))
-                    : std::span<const std::uint8_t>{};
-
-            const std::string detail = decoder.getMessageAsString();
-            if (controlled)
-            {
-                if (nullptr != controlled_egress_listener_)
+                const codecs::EventCode::Value code = decoder.code();
+                auto detail_view = common::read_var_string(decoder, message);
+                if (!detail_view)
                 {
-                    controlled_egress_listener_->on_admin_response(session_id, decoder.correlationId(),
-                                                                   decoder.requestType(), decoder.responseCode(),
-                                                                   detail, payload);
+                    pending_error_ = detail_view.error();
+                    return AERON_ACTION_ABORT;
                 }
-            }
-            else if (nullptr != egress_listener_)
-            {
-                egress_listener_->on_admin_response(session_id, decoder.correlationId(), decoder.requestType(),
-                                                    decoder.responseCode(), detail, payload);
-            }
-            return AERON_ACTION_CONTINUE;
-        }
+                const std::string detail{*detail_view};
+                if (codecs::EventCode::CLOSED == code)
+                {
+                    state(State::pending_close, 0);
+                }
 
-        default:
-            return AERON_ACTION_CONTINUE;
+                if (controlled)
+                {
+                    if (nullptr != controlled_egress_listener_)
+                    {
+                        controlled_egress_listener_->on_session_event(decoder.correlationId(), session_id,
+                                                                      decoder.leadershipTermId(),
+                                                                      decoder.leaderMemberId(), code, detail);
+                    }
+                }
+                else if (nullptr != egress_listener_)
+                {
+                    egress_listener_->on_session_event(decoder.correlationId(), session_id, decoder.leadershipTermId(),
+                                                       decoder.leaderMemberId(), code, detail);
+                }
+                return AERON_ACTION_CONTINUE;
+            }
+
+            case codecs::NewLeaderEvent::sbeTemplateId():
+            {
+                auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
+                const std::int64_t session_id = decoder.clusterSessionId();
+                if (session_id != cluster_session_id_)
+                {
+                    return AERON_ACTION_CONTINUE;
+                }
+
+                set_egress_image(image);
+                auto endpoints_view = common::read_var_string(decoder, message);
+                if (!endpoints_view)
+                {
+                    pending_error_ = endpoints_view.error();
+                    return AERON_ACTION_ABORT;
+                }
+                const std::string endpoints{*endpoints_view};
+                auto promoted =
+                    on_new_leader(session_id, decoder.leadershipTermId(), decoder.leaderMemberId(), endpoints);
+                if (!promoted)
+                {
+                    pending_error_ = promoted.error();
+                }
+                return controlled ? AERON_ACTION_COMMIT : AERON_ACTION_CONTINUE;
+            }
+
+            case codecs::AdminResponse::sbeTemplateId():
+            {
+                auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
+                const std::int64_t session_id = decoder.clusterSessionId();
+                if (session_id != cluster_session_id_)
+                {
+                    return AERON_ACTION_CONTINUE;
+                }
+
+                // `AeronCluster.java:958-963`: the payload follows the message's
+                // var-data. `payload` is optional in the schema, so a message
+                // that stops after the string has an empty one.
+                auto detail_view = common::read_var_string(decoder, message);
+                if (!detail_view)
+                {
+                    pending_error_ = detail_view.error();
+                    return AERON_ACTION_ABORT;
+                }
+                std::span<const std::uint8_t> payload{};
+                if (message.size() >= decoder.sbePosition() + codecs::AdminResponse::payloadHeaderLength())
+                {
+                    auto payload_bytes = common::read_var_bytes(decoder, message);
+                    if (!payload_bytes)
+                    {
+                        pending_error_ = payload_bytes.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    payload = *payload_bytes;
+                }
+                const std::string detail{*detail_view};
+                if (controlled)
+                {
+                    if (nullptr != controlled_egress_listener_)
+                    {
+                        controlled_egress_listener_->on_admin_response(session_id, decoder.correlationId(),
+                                                                       decoder.requestType(), decoder.responseCode(),
+                                                                       detail, payload);
+                    }
+                }
+                else if (nullptr != egress_listener_)
+                {
+                    egress_listener_->on_admin_response(session_id, decoder.correlationId(), decoder.requestType(),
+                                                        decoder.responseCode(), detail, payload);
+                }
+                return AERON_ACTION_CONTINUE;
+            }
+
+            default:
+                return AERON_ACTION_CONTINUE;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        pending_error_ = make_error(ErrorCode::protocol_error, exception.what());
+        return AERON_ACTION_ABORT;
     }
 }
 
@@ -1095,63 +1141,98 @@ void EgressAdapter::dispatch(std::span<const std::uint8_t> message)
         return;
     }
 
-    switch (header->templateId())
+    if (auto body = common::check_body_length(message, *header); !body)
     {
-        case codecs::SessionMessageHeader::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
-            {
-                listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
-                                     message.subspan(SESSION_HEADER_LENGTH));
-            }
-            break;
-        }
+        pending_error_ = body.error();
+        return;
+    }
 
-        case codecs::SessionEvent::sbeTemplateId():
+    try
+    {
+        switch (header->templateId())
         {
-            auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
+            case codecs::SessionMessageHeader::sbeTemplateId():
             {
-                listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
-                                           decoder.leadershipTermId(), decoder.leaderMemberId(), decoder.code(),
-                                           decoder.getDetailAsString());
+                auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
+                                         message.subspan(SESSION_HEADER_LENGTH));
+                }
+                break;
             }
-            break;
-        }
 
-        case codecs::NewLeaderEvent::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
+            case codecs::SessionEvent::sbeTemplateId():
             {
-                listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
-                                        decoder.leaderMemberId(), decoder.getIngressEndpointsAsString());
+                auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    auto detail = common::read_var_string(decoder, message);
+                    if (!detail)
+                    {
+                        pending_error_ = detail.error();
+                        return;
+                    }
+                    listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
+                                               decoder.leadershipTermId(), decoder.leaderMemberId(), decoder.code(),
+                                               *detail);
+                }
+                break;
             }
-            break;
-        }
 
-        case codecs::AdminResponse::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
+            case codecs::NewLeaderEvent::sbeTemplateId():
             {
-                const std::string detail = decoder.getMessageAsString();
-                const std::uint32_t payload_length = decoder.payloadLength();
-                const std::size_t offset =
-                    common::MESSAGE_HEADER_LENGTH + header->blockLength() + 4 + detail.size() + 4;
-                const std::span<const std::uint8_t> payload =
-                    offset <= message.size()
-                        ? message.subspan(offset, std::min<std::size_t>(payload_length, message.size() - offset))
-                        : std::span<const std::uint8_t>{};
-                listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(), decoder.requestType(),
-                                            decoder.responseCode(), detail, payload);
+                auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    auto endpoints = common::read_var_string(decoder, message);
+                    if (!endpoints)
+                    {
+                        pending_error_ = endpoints.error();
+                        return;
+                    }
+                    listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
+                                            decoder.leaderMemberId(), *endpoints);
+                }
+                break;
             }
-            break;
-        }
 
-        default:
-            break;
+            case codecs::AdminResponse::sbeTemplateId():
+            {
+                auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    auto detail_view = common::read_var_string(decoder, message);
+                    if (!detail_view)
+                    {
+                        pending_error_ = detail_view.error();
+                        return;
+                    }
+                    const std::string detail{*detail_view};
+                    std::span<const std::uint8_t> payload{};
+                    if (message.size() >= decoder.sbePosition() + codecs::AdminResponse::payloadHeaderLength())
+                    {
+                        auto payload_bytes = common::read_var_bytes(decoder, message);
+                        if (!payload_bytes)
+                        {
+                            pending_error_ = payload_bytes.error();
+                            return;
+                        }
+                        payload = *payload_bytes;
+                    }
+                    listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(),
+                                                decoder.requestType(), decoder.responseCode(), detail, payload);
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        pending_error_ = make_error(ErrorCode::protocol_error, exception.what());
     }
 }
 
@@ -1244,64 +1325,100 @@ aeron_controlled_fragment_handler_action_t ControlledEgressAdapter::dispatch(std
         return AERON_ACTION_ABORT;
     }
 
-    switch (header->templateId())
+    if (auto body = common::check_body_length(message, *header); !body)
     {
-        case codecs::SessionMessageHeader::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
-            {
-                return listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
-                                            message.subspan(SESSION_HEADER_LENGTH));
-            }
-            break;
-        }
+        pending_error_ = body.error();
+        return AERON_ACTION_ABORT;
+    }
 
-        case codecs::SessionEvent::sbeTemplateId():
+    try
+    {
+        switch (header->templateId())
         {
-            auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
+            case codecs::SessionMessageHeader::sbeTemplateId():
             {
-                listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
-                                           decoder.leadershipTermId(), decoder.leaderMemberId(), decoder.code(),
-                                           decoder.getDetailAsString());
+                auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    return listener_.on_message(decoder.clusterSessionId(), decoder.timestamp(),
+                                                message.subspan(SESSION_HEADER_LENGTH));
+                }
+                break;
             }
-            break;
-        }
 
-        case codecs::NewLeaderEvent::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
+            case codecs::SessionEvent::sbeTemplateId():
             {
-                listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
-                                        decoder.leaderMemberId(), decoder.getIngressEndpointsAsString());
-                return AERON_ACTION_COMMIT;
+                auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    auto detail = common::read_var_string(decoder, message);
+                    if (!detail)
+                    {
+                        pending_error_ = detail.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    listener_.on_session_event(decoder.correlationId(), decoder.clusterSessionId(),
+                                               decoder.leadershipTermId(), decoder.leaderMemberId(), decoder.code(),
+                                               *detail);
+                }
+                break;
             }
-            break;
-        }
 
-        case codecs::AdminResponse::sbeTemplateId():
-        {
-            auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
-            if (decoder.clusterSessionId() == cluster_session_id_)
+            case codecs::NewLeaderEvent::sbeTemplateId():
             {
-                const std::string detail = decoder.getMessageAsString();
-                const std::uint32_t payload_length = decoder.payloadLength();
-                const std::size_t offset =
-                    common::MESSAGE_HEADER_LENGTH + header->blockLength() + 4 + detail.size() + 4;
-                const std::span<const std::uint8_t> payload =
-                    offset <= message.size()
-                        ? message.subspan(offset, std::min<std::size_t>(payload_length, message.size() - offset))
-                        : std::span<const std::uint8_t>{};
-                listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(), decoder.requestType(),
-                                            decoder.responseCode(), detail, payload);
+                auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    auto endpoints = common::read_var_string(decoder, message);
+                    if (!endpoints)
+                    {
+                        pending_error_ = endpoints.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    listener_.on_new_leader(decoder.clusterSessionId(), decoder.leadershipTermId(),
+                                            decoder.leaderMemberId(), *endpoints);
+                    return AERON_ACTION_COMMIT;
+                }
+                break;
             }
-            break;
-        }
 
-        default:
-            break;
+            case codecs::AdminResponse::sbeTemplateId():
+            {
+                auto decoder = common::wrap_body<codecs::AdminResponse>(message, *header);
+                if (decoder.clusterSessionId() == cluster_session_id_)
+                {
+                    auto detail_view = common::read_var_string(decoder, message);
+                    if (!detail_view)
+                    {
+                        pending_error_ = detail_view.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    const std::string detail{*detail_view};
+                    std::span<const std::uint8_t> payload{};
+                    if (message.size() >= decoder.sbePosition() + codecs::AdminResponse::payloadHeaderLength())
+                    {
+                        auto payload_bytes = common::read_var_bytes(decoder, message);
+                        if (!payload_bytes)
+                        {
+                            pending_error_ = payload_bytes.error();
+                            return AERON_ACTION_ABORT;
+                        }
+                        payload = *payload_bytes;
+                    }
+                    listener_.on_admin_response(decoder.clusterSessionId(), decoder.correlationId(),
+                                                decoder.requestType(), decoder.responseCode(), detail, payload);
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        pending_error_ = make_error(ErrorCode::protocol_error, exception.what());
+        return AERON_ACTION_ABORT;
     }
 
     return AERON_ACTION_CONTINUE;

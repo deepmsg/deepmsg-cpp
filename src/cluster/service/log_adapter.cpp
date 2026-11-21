@@ -1,5 +1,6 @@
 #include "cluster/service/log_adapter.h"
 
+#include <exception>
 #include <utility>
 
 #include "cluster/service/codecs.h"
@@ -78,9 +79,9 @@ void BoundedLogAdapter::set_image(aeron_subscription_t* subscription, aeron_imag
 
 void BoundedLogAdapter::clear_image() noexcept
 {
-    if (nullptr != image_ && nullptr != subscription_)
+    if (nullptr != image_)
     {
-        (void)aeron_subscription_image_release(subscription_, image_);
+        (void)aeron_image_release(image_);
     }
     image_ = nullptr;
     subscription_ = nullptr;
@@ -182,76 +183,88 @@ std::expected<LogMessage, Error> BoundedLogAdapter::decode(std::span<const std::
     }
 
     LogMessage decoded;
-    switch (header->templateId())
+    try
     {
-        case codecs::SessionMessageHeader::SBE_TEMPLATE_ID:
+        switch (header->templateId())
         {
-            auto decoder = wrap_body<codecs::SessionMessageHeader>(message, *header);
-            decoded.kind = LogMessage::Kind::session_message;
-            decoded.cluster_session_id = decoder.clusterSessionId();
-            decoded.timestamp = decoder.timestamp();
-            return decoded;
+            case codecs::SessionMessageHeader::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::SessionMessageHeader>(message, *header);
+                decoded.kind = LogMessage::Kind::session_message;
+                decoded.cluster_session_id = decoder.clusterSessionId();
+                decoded.timestamp = decoder.timestamp();
+                return decoded;
+            }
+            case codecs::TimerEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::TimerEvent>(message, *header);
+                decoded.kind = LogMessage::Kind::timer_event;
+                decoded.correlation_id = decoder.correlationId();
+                decoded.timestamp = decoder.timestamp();
+                return decoded;
+            }
+            case codecs::SessionOpenEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::SessionOpenEvent>(message, *header);
+                decoded.kind = LogMessage::Kind::session_open;
+                decoded.leadership_term_id = decoder.leadershipTermId();
+                decoded.cluster_session_id = decoder.clusterSessionId();
+                decoded.timestamp = decoder.timestamp();
+                decoded.response_stream_id = decoder.responseStreamId();
+                auto response_channel = common::read_var_string(decoder, message);
+                auto principal = common::read_var_bytes(decoder, message);
+                if (!response_channel || !principal)
+                {
+                    return std::unexpected(!response_channel ? response_channel.error() : principal.error());
+                }
+                decoded.response_channel = std::string{*response_channel};
+                decoded.encoded_principal.assign(principal->begin(), principal->end());
+                return decoded;
+            }
+            case codecs::SessionCloseEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::SessionCloseEvent>(message, *header);
+                decoded.kind = LogMessage::Kind::session_close;
+                decoded.leadership_term_id = decoder.leadershipTermId();
+                decoded.cluster_session_id = decoder.clusterSessionId();
+                decoded.timestamp = decoder.timestamp();
+                decoded.close_reason = decoder.closeReason();
+                return decoded;
+            }
+            case codecs::ClusterActionRequest::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::ClusterActionRequest>(message, *header);
+                decoded.kind = LogMessage::Kind::cluster_action;
+                decoded.leadership_term_id = decoder.leadershipTermId();
+                decoded.log_position = decoder.logPosition();
+                decoded.timestamp = decoder.timestamp();
+                decoded.action = static_cast<std::int32_t>(decoder.action());
+                decoded.flags = decoder.flags();
+                return decoded;
+            }
+            case codecs::NewLeadershipTermEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::NewLeadershipTermEvent>(message, *header);
+                decoded.kind = LogMessage::Kind::new_leadership_term;
+                decoded.leadership_term_id = decoder.leadershipTermId();
+                decoded.log_position = decoder.logPosition();
+                decoded.timestamp = decoder.timestamp();
+                decoded.term_base_log_position = decoder.termBaseLogPosition();
+                decoded.leader_member_id = decoder.leaderMemberId();
+                decoded.log_session_id = decoder.logSessionId();
+                decoded.time_unit_code = static_cast<std::int32_t>(decoder.timeUnit());
+                decoded.app_version = decoder.appVersion();
+                return decoded;
+            }
+            default:
+                // The reference's switch has no default arm.
+                return std::unexpected(
+                    axc::core::make_error(axc::core::ErrorCode::protocol_error, "unknown cluster log template"));
         }
-        case codecs::TimerEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::TimerEvent>(message, *header);
-            decoded.kind = LogMessage::Kind::timer_event;
-            decoded.correlation_id = decoder.correlationId();
-            decoded.timestamp = decoder.timestamp();
-            return decoded;
-        }
-        case codecs::SessionOpenEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::SessionOpenEvent>(message, *header);
-            decoded.kind = LogMessage::Kind::session_open;
-            decoded.leadership_term_id = decoder.leadershipTermId();
-            decoded.cluster_session_id = decoder.clusterSessionId();
-            decoded.timestamp = decoder.timestamp();
-            decoded.response_stream_id = decoder.responseStreamId();
-            decoded.response_channel = decoder.getResponseChannelAsString();
-            const std::string principal = decoder.getEncodedPrincipalAsString();
-            decoded.encoded_principal.assign(principal.begin(), principal.end());
-            return decoded;
-        }
-        case codecs::SessionCloseEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::SessionCloseEvent>(message, *header);
-            decoded.kind = LogMessage::Kind::session_close;
-            decoded.leadership_term_id = decoder.leadershipTermId();
-            decoded.cluster_session_id = decoder.clusterSessionId();
-            decoded.timestamp = decoder.timestamp();
-            decoded.close_reason = decoder.closeReason();
-            return decoded;
-        }
-        case codecs::ClusterActionRequest::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::ClusterActionRequest>(message, *header);
-            decoded.kind = LogMessage::Kind::cluster_action;
-            decoded.leadership_term_id = decoder.leadershipTermId();
-            decoded.log_position = decoder.logPosition();
-            decoded.timestamp = decoder.timestamp();
-            decoded.action = static_cast<std::int32_t>(decoder.action());
-            decoded.flags = decoder.flags();
-            return decoded;
-        }
-        case codecs::NewLeadershipTermEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::NewLeadershipTermEvent>(message, *header);
-            decoded.kind = LogMessage::Kind::new_leadership_term;
-            decoded.leadership_term_id = decoder.leadershipTermId();
-            decoded.log_position = decoder.logPosition();
-            decoded.timestamp = decoder.timestamp();
-            decoded.term_base_log_position = decoder.termBaseLogPosition();
-            decoded.leader_member_id = decoder.leaderMemberId();
-            decoded.log_session_id = decoder.logSessionId();
-            decoded.time_unit_code = static_cast<std::int32_t>(decoder.timeUnit());
-            decoded.app_version = decoder.appVersion();
-            return decoded;
-        }
-        default:
-            // The reference's switch has no default arm.
-            return std::unexpected(
-                axc::core::make_error(axc::core::ErrorCode::protocol_error, "unknown cluster log template"));
+    }
+    catch (const std::exception& exception)
+    {
+        return std::unexpected(axc::core::make_error(axc::core::ErrorCode::protocol_error, exception.what()));
     }
 }
 

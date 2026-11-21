@@ -4,10 +4,15 @@
  * echo and closes the session. The interop test runs it against the reference
  * `ClusteredMediaDriver` and this build's echo container.
  *
- * usage: c-client-smoke <aeron-dir> [payload]
+ * usage: c-client-smoke <aeron-dir> [payload] [idle-seconds] [offer-only]
+ * With `idle-seconds` the process sleeps between connecting and offering,
+ * without calling any ABI function: the conductor has to keep running on its
+ * own thread (the C ABI has no `do_work`). `offer-only` stops after the offer
+ * and judges the driver-level liveness (a reaped client cannot offer).
  * exit 0 on "RECEIVED <payload>", 1 otherwise; status lines on stderr.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -37,6 +42,8 @@ int main(int argc, char** argv)
     }
 
     const char* payload = argc > 2 ? argv[2] : "hello-from-c";
+    const double idle_seconds = argc > 3 ? atof(argv[3]) : 0.0;
+    const int offer_only = argc > 4 && 0 == strcmp(argv[4], "offer-only");
     deepmsg_cluster_client_t* client = NULL;
 
     if (0 != deepmsg_cluster_connect(&client, argv[1], "aeron:ipc", "aeron:ipc"))
@@ -46,7 +53,22 @@ int main(int argc, char** argv)
     }
     fprintf(stderr, "CONNECTED session=%lld\n", (long long)deepmsg_cluster_session_id(client));
 
+    if (idle_seconds > 0.0)
+    {
+        const time_t whole = (time_t)idle_seconds;
+        const struct timespec idle = {whole, (long)((idle_seconds - (double)whole) * 1e9)};
+        fprintf(stderr, "IDLE %.1f\n", idle_seconds);
+        (void)nanosleep(&idle, NULL);
+    }
+
     const int64_t position = deepmsg_cluster_offer(client, (const uint8_t*)payload, strlen(payload));
+    fprintf(stderr, "OFFER %lld\n", (long long)position);
+    if (offer_only)
+    {
+        fprintf(stderr, "OFFERED %lld\n", (long long)position);
+        (void)deepmsg_cluster_close(client);
+        return position > 0 ? 0 : 1;
+    }
     if (position < 0)
     {
         fprintf(stderr, "offer failed: %lld\n", (long long)position);

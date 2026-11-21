@@ -45,6 +45,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <csignal>
 
 namespace deepmsg::tools
 {
@@ -172,6 +173,60 @@ std::expected<ArchiveMarkFile, Error> open_mark_file(const std::filesystem::path
         std::printf("INFO: mark file exists: %s\n", mark_path.string().c_str());
     }
     return mark_file;
+}
+
+/// A live archive's mark file has a fresh activity timestamp and a live pid.
+/// `checksum` and `verify` rewrite segment files and the catalog in place, so
+/// they refuse an active directory (the reference tool has no such guard; this
+/// is deliberately more conservative for a binary whose name promises reads).
+bool is_archive_active(const std::filesystem::path& archive_dir)
+{
+    std::string error;
+    const std::filesystem::path mark_dir = resolve_mark_file_dir(archive_dir, error);
+    if (mark_dir.empty())
+    {
+        return false;
+    }
+    const std::filesystem::path mark_path = mark_dir / ArchiveMarkFile::FILENAME;
+    std::error_code exists_error;
+    if (!std::filesystem::exists(mark_path, exists_error))
+    {
+        return false;
+    }
+    auto mark_file = open_mark_file(archive_dir, error, false);
+    if (!mark_file)
+    {
+        return false;
+    }
+    const std::int64_t activity_ms = mark_file->activity_timestamp_volatile();
+    if (activity_ms <= 0)
+    {
+        return false;
+    }
+    const auto now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    constexpr std::int64_t ACTIVE_WINDOW_MS = 5'000;
+    const int owner_pid = static_cast<int>(mark_file->pid());
+    const bool process_alive = owner_pid > 0 && (0 == ::kill(owner_pid, 0) || EPERM == errno);
+    return process_alive && (now_ms - activity_ms) < ACTIVE_WINDOW_MS;
+}
+
+/// `Integer.parseInt` / `Long.parseLong`: the whole argument must be a number.
+[[nodiscard]] std::optional<std::int64_t> parse_int64_argument(const char* text)
+{
+    if (nullptr == text || '\0' == *text)
+    {
+        return std::nullopt;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(text, &end, 10);
+    if (0 != errno || nullptr == end || '\0' != *end)
+    {
+        return std::nullopt;
+    }
+    return static_cast<std::int64_t>(parsed);
 }
 
 std::expected<Catalog, Error> open_catalog_read_only(const std::filesystem::path& archive_dir)
@@ -483,6 +538,12 @@ void checksum_segment_file(const std::filesystem::path& archive_dir, const Check
 int command_checksum(const std::filesystem::path& archive_dir, bool all_files, const std::string& checksum_name,
                      std::optional<std::int64_t> recording_id)
 {
+    if (is_archive_active(archive_dir))
+    {
+        std::fprintf(stderr, "ERR: Archive mark file is active in %s\n", archive_dir.string().c_str());
+        return 1;
+    }
+
     auto checksum = deepmsg::archive::server::checksum_by_name(checksum_name);
     if (!checksum)
     {
@@ -715,6 +776,12 @@ bool is_invalid_segment_file(const std::filesystem::path& archive_dir, std::int6
 int command_verify(const std::filesystem::path& archive_dir, bool all_segment_files, const Checksum* checksum,
                    bool apply_checksum, std::optional<std::int64_t> recording_id)
 {
+    if (is_archive_active(archive_dir))
+    {
+        std::fprintf(stderr, "ERR: Archive mark file is active in %s\n", archive_dir.string().c_str());
+        return 1;
+    }
+
     CatalogOpenOptions options;
     options.archive_dir = archive_dir.string();
     options.catalog_capacity = Catalog::MIN_CAPACITY;
@@ -1178,7 +1245,8 @@ int command_errors(const std::filesystem::path& archive_dir)
     auto region = axc::core::cnc_error_log_region(bytes);
     if (!region)
     {
-        std::fprintf(stderr, "ERR: %s: %s\n", region.error().message.view().data(), cnc_path.string().c_str());
+        std::fprintf(stderr, "ERR: %.*s: %s\n", static_cast<int>(region.error().message.view().size()),
+                     region.error().message.view().data(), cnc_path.string().c_str());
         return 1;
     }
 
@@ -1234,7 +1302,14 @@ int run_archive_tool_ro(int argc, char* argv[])
     }
     if (command == "describe" && arguments == 2)
     {
-        return command_describe(archive_dir, false, true, std::strtol(argv[3], nullptr, 10));
+        auto id = parse_int64_argument(argv[3]);
+        if (!id)
+        {
+            std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
+            print_help();
+            return -1;
+        }
+        return command_describe(archive_dir, false, true, static_cast<long>(*id));
     }
 
     if (command == "checksum" && arguments >= 2)
@@ -1248,7 +1323,12 @@ int run_archive_tool_ro(int argc, char* argv[])
         {
             return command_checksum(archive_dir, true, checksum_name, std::nullopt);
         }
-        const std::int64_t id = std::strtoll(argv[4], nullptr, 10);
+        auto id = parse_int64_argument(argv[4]);
+        if (!id)
+        {
+            std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[4]);
+            return 1;
+        }
         const bool all_files = arguments >= 4 && std::string_view(argv[5]) == "-a";
         return command_checksum(archive_dir, all_files, checksum_name, id);
     }
@@ -1285,7 +1365,13 @@ int run_archive_tool_ro(int argc, char* argv[])
             }
             else
             {
-                recording_id = std::strtoll(argv[3], nullptr, 10);
+                auto parsed_id = parse_int64_argument(argv[3]);
+                if (!parsed_id)
+                {
+                    std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
+                    return 1;
+                }
+                recording_id = parsed_id;
             }
         }
         else if (option_count == 2)
@@ -1299,7 +1385,13 @@ int run_archive_tool_ro(int argc, char* argv[])
             }
             else
             {
-                recording_id = std::strtoll(argv[3], nullptr, 10);
+                auto parsed_id = parse_int64_argument(argv[3]);
+                if (!parsed_id)
+                {
+                    std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
+                    return 1;
+                }
+                recording_id = parsed_id;
                 all_segments = std::string_view(argv[4]) == "-a";
             }
         }
@@ -1315,7 +1407,13 @@ int run_archive_tool_ro(int argc, char* argv[])
             }
             else
             {
-                recording_id = std::strtoll(argv[3], nullptr, 10);
+                auto parsed_id = parse_int64_argument(argv[3]);
+                if (!parsed_id)
+                {
+                    std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
+                    return 1;
+                }
+                recording_id = parsed_id;
                 if (!checksum_option(argv[5]))
                 {
                     return 1;
@@ -1324,7 +1422,13 @@ int run_archive_tool_ro(int argc, char* argv[])
         }
         else if (option_count == 4)
         {
-            recording_id = std::strtoll(argv[3], nullptr, 10);
+            auto parsed_id = parse_int64_argument(argv[3]);
+            if (!parsed_id)
+            {
+                std::fprintf(stderr, "ERR: Invalid recording id: %s\n", argv[3]);
+                return 1;
+            }
+            recording_id = parsed_id;
             all_segments = true;
             if (!checksum_option(argv[6]))
             {
@@ -1343,8 +1447,17 @@ int run_archive_tool_ro(int argc, char* argv[])
 
     if (command == "dump" && arguments >= 1 && arguments <= 2)
     {
-        const std::int64_t limit =
-            arguments == 2 ? std::strtoll(argv[3], nullptr, 10) : std::numeric_limits<std::int64_t>::max();
+        std::int64_t limit = std::numeric_limits<std::int64_t>::max();
+        if (arguments == 2)
+        {
+            auto parsed_limit = parse_int64_argument(argv[3]);
+            if (!parsed_limit)
+            {
+                std::fprintf(stderr, "ERR: Invalid limit: %s\n", argv[3]);
+                return 1;
+            }
+            limit = *parsed_limit;
+        }
         return command_dump(archive_dir, limit);
     }
 

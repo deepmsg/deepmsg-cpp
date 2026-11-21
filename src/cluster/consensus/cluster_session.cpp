@@ -6,6 +6,7 @@
 #include <cstring>
 #include <utility>
 
+#include "cluster/common/channel_uri.h"
 #include "cluster/common/cluster_counters.h"
 
 namespace deepmsg::cluster::consensus
@@ -137,24 +138,9 @@ void ClusterSession::async_connect(axc::core::DeepmsgClient& client, std::int32_
     const std::string label = common::session_counter_label(session_info_, cluster_id);
     counter_add_ = client.add_counter(common::CLUSTER_SESSION_TYPE_ID, {key.data(), key.size()}, label);
     // `rejoin` is a subscription option: the Java client adds it to the
-    // response channel it sends (AeronCluster.java:1497-1501). The C driver
-    // keeps a publication carrying it permanently unconnected, so strip it.
-    std::string publication_channel{response_channel_};
-    const std::string rejoin = "rejoin=";
-    if (const std::size_t at = publication_channel.find(rejoin);
-        std::string::npos != at &&
-        (0 == at || '|' == publication_channel[at - 1] || '?' == publication_channel[at - 1]))
-    {
-        const std::size_t end = publication_channel.find('|', at);
-        if (std::string::npos == end)
-        {
-            publication_channel.erase(at - 1);
-        }
-        else
-        {
-            publication_channel.erase(at, end - at + 1);
-        }
-    }
+    // response channel it sends (`AeronCluster.java:1497-1501`), and the C
+    // driver keeps a publication carrying it permanently unconnected.
+    const std::string publication_channel = common::publication_channel_from_response_channel(response_channel_);
     publication_add_ = client.add_publication(publication_channel, response_stream_id_);
 }
 
@@ -175,12 +161,14 @@ bool ClusterSession::is_response_publication_connected(axc::core::DeepmsgClient&
         response_publication_ = std::move(**polled);
     }
 
+    bool counter_just_allocated = false;
     if (counter_add_.pending())
     {
         auto polled = counter_add_.poll();
         if (polled && polled->has_value())
         {
             session_counter_ = std::move(**polled);
+            counter_just_allocated = true;
         }
     }
 
@@ -189,17 +177,22 @@ bool ClusterSession::is_response_publication_connected(axc::core::DeepmsgClient&
         return false;
     }
 
+    // The publication and the counter are two asynchronous conductor commands;
+    // the counter can arrive after the state has left INIT (`connect` is one
+    // synchronous step in the reference, `SessionManager.java:487-496`), so the
+    // counter is linked on the pass it is allocated as well.
+    if (session_counter_ && (SessionState::init == state_ || counter_just_allocated))
+    {
+        aeron_publication_constants_t constants{};
+        if (0 == aeron_publication_constants(response_publication_.get(), &constants))
+        {
+            set_counter_reference_id(session_counter_.get(), constants.registration_id);
+        }
+        set_counter_value(id_);
+    }
+
     if (SessionState::init == state_)
     {
-        if (session_counter_)
-        {
-            aeron_publication_constants_t constants{};
-            if (0 == aeron_publication_constants(response_publication_.get(), &constants))
-            {
-                set_counter_reference_id(session_counter_.get(), constants.registration_id);
-            }
-            set_counter_value(id_);
-        }
         time_of_last_activity_ns_ = now_ns;
         state(SessionState::connecting, "connecting");
     }

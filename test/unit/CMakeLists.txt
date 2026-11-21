@@ -92,6 +92,7 @@ target_compile_definitions(axc_archive_unit_tests PRIVATE
 
 axc_add_executable(axc_cluster_unit_tests
     SOURCES
+        cluster/common/channel_uri_test.cpp
         cluster/common/recording_log_test.cpp
         cluster/common/recording_log_golden_test.cpp
         cluster/common/node_state_file_test.cpp
@@ -104,6 +105,7 @@ axc_add_executable(axc_cluster_unit_tests
         cluster/common/wheel_timer_service_test.cpp
         cluster/common/timer_golden_test.cpp
         cluster/service/container_components_test.cpp
+        cluster/service/snapshot_retry_test.cpp
         cluster/service/basic_auction_test.cpp
     DEPS
         axc_cluster_common
@@ -200,6 +202,7 @@ gtest_discover_tests(axc_stage_timer_timing_test DISCOVERY_MODE PRE_TEST PROPERT
 gtest_discover_tests(axc_archive_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_tool_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
+gtest_discover_tests(axc_cluster_backup_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_client_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_election_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)
 gtest_discover_tests(axc_cluster_consensus_unit_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS unit TIMEOUT 120)

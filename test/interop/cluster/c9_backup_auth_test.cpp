@@ -207,6 +207,7 @@ protected:
         for (const char* const name : {"ClusterServiceContainerProbe.java", "ClusterEchoTimerService.java",
                                        "ChallengeAuthenticatorSupplier.java", "SimpleAuthenticatorSupplier.java"})
         {
+            bool found = false;
             for (const std::string& relative :
                  {"/deepmsg-tests/java/" + std::string{name}, "/java/" + std::string{name}})
             {
@@ -214,18 +215,23 @@ protected:
                 if (std::filesystem::exists(candidate))
                 {
                     sources.push_back(candidate);
+                    found = true;
                     break;
                 }
             }
+            if (found)
+            {
+                continue;
+            }
             // `SimpleAuthenticatorSupplier` is a C9-2 probe: an older fork
             // checkout does not have it, and only the simple-credentials case
-            // needs it.
-            if (sources.empty() && 0 == std::string{name}.compare("SimpleAuthenticatorSupplier.java"))
+            // needs it. The other probes are required.
+            if (0 == std::string{name}.compare("SimpleAuthenticatorSupplier.java"))
             {
                 simple_probe_available_ = false;
                 continue;
             }
-            ASSERT_FALSE(sources.empty()) << "probe source not found: " << name;
+            FAIL() << "probe source not found: " << name;
         }
         axc::interop::ProcessOptions compile;
         compile.arguments = {"-proc:none", "-cp", jar_, "-d", classes_dir_};
@@ -555,11 +561,12 @@ protected:
 
 TEST_F(Xc9BackupAuthTest, theBackupAuthenticatesWithSimpleCredentials)
 {
-    start_java_cluster("SimpleAuthenticatorSupplier");
+    compile_java_probes();
     if (!simple_probe_available_)
     {
         GTEST_SKIP() << "the fork's SimpleAuthenticatorSupplier probe is missing";
     }
+    start_java_cluster("SimpleAuthenticatorSupplier");
     start_containers();
     ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
 
@@ -573,11 +580,12 @@ TEST_F(Xc9BackupAuthTest, theBackupAuthenticatesWithSimpleCredentials)
 
 TEST_F(Xc9BackupAuthTest, theBackupWithWrongSimpleCredentialsIsRejected)
 {
-    start_java_cluster("SimpleAuthenticatorSupplier");
+    compile_java_probes();
     if (!simple_probe_available_)
     {
         GTEST_SKIP() << "the fork's SimpleAuthenticatorSupplier probe is missing";
     }
+    start_java_cluster("SimpleAuthenticatorSupplier");
     start_containers();
     ASSERT_TRUE(wait_for_active(std::chrono::seconds(90))) << "the Java cluster never became active";
 

@@ -46,6 +46,7 @@ constexpr std::string_view SNAPSHOT_STREAM_ID_PROP_NAME = "aeron.cluster.snapsho
 constexpr std::string_view REPLAY_CHANNEL_PROP_NAME = "aeron.cluster.replay.channel";
 constexpr std::string_view REPLAY_STREAM_ID_PROP_NAME = "aeron.cluster.replay.stream.id";
 constexpr std::string_view CLUSTER_DIR_PROP_NAME = "aeron.cluster.dir";
+constexpr std::string_view DELETE_DIR_ON_START_PROP_NAME = "aeron.cluster.dir.delete.on.start";
 constexpr std::string_view SERVICES_DIR_PROP_NAME = "aeron.cluster.services.dir";
 constexpr std::string_view MARK_FILE_DIR_PROP_NAME = "aeron.cluster.mark.file.dir";
 constexpr std::string_view SERVICE_COUNT_PROP_NAME = "aeron.cluster.service.count";
@@ -358,6 +359,7 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
         get_string(properties, ARCHIVE_LOCAL_CONTROL_CHANNEL_PROP_NAME, config.archive_local_control_channel);
 
     config.ingress_ipc_allowed = parse_bool(properties, INGRESS_IPC_ALLOWED_PROP_NAME, config.ingress_ipc_allowed);
+    config.delete_dir_on_start = parse_bool(properties, DELETE_DIR_ON_START_PROP_NAME, config.delete_dir_on_start);
 
     // Names owned by later cards: `aeron.cluster.clock` and the supplier names
     // are C4b/C4f, `cpu.affinity` and the control toggles are C4e/C4f,
@@ -514,6 +516,19 @@ std::expected<void, Error> ConsensusModuleConfig::conclude()
         {
             return std::unexpected(
                 make_error(ErrorCode::io_error, "unable to resolve services directory: " + error.message()));
+        }
+    }
+
+    // `ConsensusModule.Context.conclude` (`ConsensusModule.java:1802`):
+    // `IoUtil.delete(clusterDir, false)` before the directories are ensured.
+    if (delete_dir_on_start)
+    {
+        std::error_code remove_error;
+        std::filesystem::remove_all(cluster_dir, remove_error);
+        if (remove_error)
+        {
+            return std::unexpected(
+                make_error(ErrorCode::io_error, "unable to delete cluster directory: " + remove_error.message()));
         }
     }
 

@@ -9,6 +9,7 @@
 #include <aeronc.h>
 #include <aeronmd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -27,6 +28,7 @@
 #include "io_aeron_cluster_codecs/Challenge.h"
 #include "io_aeron_cluster_codecs/EventCode.h"
 #include "io_aeron_cluster_codecs/MessageHeader.h"
+#include "io_aeron_cluster_codecs/NewLeaderEvent.h"
 #include "io_aeron_cluster_codecs/SessionEvent.h"
 
 namespace
@@ -404,6 +406,48 @@ TEST_F(SessionManagerTest, aSessionConnectsAuthenticatesOpensAndSendsTheOpenEven
     pump_events();
     ASSERT_FALSE(last_events_.empty());
     EXPECT_EQ(codecs::EventCode::OK, last_event_code());
+}
+
+TEST_F(SessionManagerTest, aPromotedLeaderDrivesTheOldSessionsPublicationAndSendsTheNewLeaderEvent)
+{
+    // A session recovered by replay (or by a snapshot load) is OPEN and has no
+    // response publication: `prepare_sessions_for_new_term` only starts the
+    // asynchronous add. When this member is promoted the poll has to happen in
+    // `check_sessions`, or the event is never encoded (the reference's
+    // `ClusterSession.connect` is synchronous, `SessionManager.java:487-496`).
+    make_manager();
+    manager_->on_replay_session_open(1'000, 55, 7, 1'000, RESPONSE_STREAM_ID, RESPONSE_CHANNEL);
+    manager_->prepare_sessions_for_new_term(false);
+
+    FragmentCollector collector{};
+    std::vector<std::int32_t> templates;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        (void)client_->do_work();
+        (void)manager_->check_sessions(now_ns_, LEADERSHIP_TERM_ID, MEMBER_ID, INGRESS_ENDPOINTS);
+
+        const std::size_t before = collector.messages.size();
+        (void)aeron_subscription_poll(response_subscription_.get(), on_fragment, &collector, 10);
+        for (std::size_t index = before; index < collector.messages.size(); ++index)
+        {
+            const auto header = deepmsg::cluster::common::message_header(collector.messages[index]);
+            templates.push_back(header ? header->templateId() : -1);
+        }
+
+        if (std::find(templates.begin(), templates.end(), codecs::NewLeaderEvent::SBE_TEMPLATE_ID) != templates.end())
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    ASSERT_FALSE(templates.empty()) << "the old session received nothing";
+    EXPECT_NE(std::find(templates.begin(), templates.end(), codecs::NewLeaderEvent::SBE_TEMPLATE_ID), templates.end())
+        << "the new leader never told the replayed session about itself";
+    // The reference's branch order sends the still-pending open event first
+    // (`SessionManager.java:916-924`); dropping it would be a wire change.
+    EXPECT_EQ(codecs::SessionEvent::SBE_TEMPLATE_ID, templates.front());
 }
 
 TEST_F(SessionManagerTest, aChallengeIsSentAndTheResponseAuthenticatesTheSession)

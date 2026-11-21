@@ -175,6 +175,16 @@ int main(int argc, char* argv[])
         }
     }
 
+    // Precedence: `-D` > properties file > environment (`PropertySource`'s
+    // insert-if-absent contract), so the environment is loaded after the files.
+    (void)properties->load_environment("AERON_");
+    if (auto loaded = properties->load_environment("DEEPMSG_", "deepmsg."); !loaded)
+    {
+        std::fprintf(stderr, "deepmsg-clustered-service-container: %s\n",
+                     std::string{loaded.error().message.view()}.c_str());
+        return 1;
+    }
+
     auto config = deepmsg::cluster::service::container_config_from_properties(*properties);
     if (!config)
     {

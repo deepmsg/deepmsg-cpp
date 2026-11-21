@@ -114,7 +114,14 @@ extern "C"
 
         if (!async->client)
         {
-            auto connected = axc::core::DeepmsgClient::connect(axc::core::ClientConfig{async->aeron_dir});
+            axc::core::ClientConfig config{async->aeron_dir};
+            // The C ABI has no `do_work` of its own, and the caller is not
+            // required to poll: the conductor runs on the client's agent
+            // thread, as the Java cluster client's does. An invoker-mode client
+            // that idles longer than `clientLivenessTimeout` (5 s) is reaped by
+            // the media driver.
+            config.use_conductor_agent_invoker = false;
+            auto connected = axc::core::DeepmsgClient::connect(config);
             if (!connected)
             {
                 set_error(std::string{connected.error().message.view()});
@@ -183,6 +190,10 @@ extern "C"
             set_error("offer on a closed client");
             return -1;
         }
+        if (client->client)
+        {
+            (void)client->client->do_work();
+        }
         return client->cluster->offer(std::span<const std::uint8_t>(buffer, length));
     }
 
@@ -193,6 +204,10 @@ extern "C"
         {
             set_error("poll on a closed client");
             return -1;
+        }
+        if (client->client)
+        {
+            (void)client->client->do_work();
         }
 
         client->bridge.handler = handler;

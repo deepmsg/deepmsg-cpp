@@ -309,6 +309,11 @@ public:
         cancelled_tokens.push_back(token);
     }
 
+    void release_image(aeron_image_t* value) override
+    {
+        released_images.push_back(value);
+    }
+
     [[nodiscard]] aeron_image_t* image_by_session_id(std::int64_t registration_id, std::int32_t session_id) override
     {
         image_registration_id = registration_id;
@@ -403,6 +408,7 @@ public:
     std::string extend_channel;
 
     aeron_image_t* image{reinterpret_cast<aeron_image_t*>(1)};
+    std::vector<aeron_image_t*> released_images{};
     std::int64_t position_value{0};
     bool image_closed{false};
     bool image_end_of_stream{false};
@@ -581,6 +587,10 @@ TEST(ReplicationSessionTest, extendStartsTheDestinationSubscriptionAndReplayFoll
     fixture.session->close();
     EXPECT_EQ(1u, fixture.control.stopped_subscriptions.size());
     EXPECT_EQ(55, fixture.control.stopped_subscriptions[0]);
+    // The image the destination subscription handed over is released exactly
+    // once, and the idempotent close does not release it again.
+    ASSERT_EQ(1u, fixture.control.released_images.size());
+    EXPECT_EQ(fixture.control.image, fixture.control.released_images[0]);
     EXPECT_EQ(0, *stop_replay_count);  // REPLICATE cleared the id before DONE
 
     const auto replicate_end_count = std::count_if(
@@ -590,6 +600,7 @@ TEST(ReplicationSessionTest, extendStartsTheDestinationSubscriptionAndReplayFoll
 
     fixture.session->close();  // idempotent
     EXPECT_EQ(1u, fixture.control.stopped_subscriptions.size());
+    EXPECT_EQ(1u, fixture.control.released_images.size());
 }
 
 TEST(ReplicationSessionTest, anEmptyDestinationRecordingIsReplacedWithoutAReplicateSignal)

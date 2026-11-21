@@ -384,6 +384,11 @@ private:
 
     std::vector<MemberIngress> members_{};
 
+    /// `on_new_leader` runs inside the assembler whose callback is executing;
+    /// deleting that assembler there frees the struct the C poll is still
+    /// using. The replacement is deferred to the next poll instead.
+    void reset_assemblers_if_pending();
+    bool assembler_reset_pending_{false};
     aeron_fragment_assembler_t* assembler_{nullptr};
     aeron_controlled_fragment_assembler_t* controlled_assembler_{nullptr};
     EgressListener* egress_listener_{nullptr};

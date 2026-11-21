@@ -1,6 +1,7 @@
 #include "cluster/service/snapshot.h"
 
 #include <cstring>
+#include <exception>
 #include <string>
 #include <utility>
 
@@ -156,14 +157,10 @@ std::expected<void, Error> ServiceSnapshotTaker::snapshot_session(const Containe
 
     if (length <= publication_->max_payload_length())
     {
-        auto claimed = publication_->try_claim(length);
+        auto claimed = retry_while_back_pressured([this, length]() { return publication_->try_claim(length); },
+                                                  [this]() { publication_->idle(); });
         if (!claimed.has_value())
         {
-            if (OFFER_BACK_PRESSURED == claimed.error() || OFFER_ADMIN_ACTION == claimed.error())
-            {
-                publication_->idle();
-                return snapshot_session(session);
-            }
             return std::unexpected(publication_error(claimed.error(), "snapshot session claim"));
         }
 
@@ -263,29 +260,69 @@ aeron_controlled_fragment_handler_action_t ServiceSnapshotLoader::dispatch(std::
         return AERON_ACTION_ABORT;
     }
 
-    switch (header->templateId())
+    try
     {
-        case codecs::SnapshotMarker::SBE_TEMPLATE_ID:
+        switch (header->templateId())
         {
-            auto marker = wrap_body<codecs::SnapshotMarker>(message, *header);
-            if (SNAPSHOT_TYPE_ID != marker.typeId())
+            case codecs::SnapshotMarker::SBE_TEMPLATE_ID:
             {
-                error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error,
-                                               "unexpected snapshot type: " + std::to_string(marker.typeId()));
-                return AERON_ACTION_ABORT;
-            }
-
-            if (codecs::SnapshotMark::BEGIN == marker.mark())
-            {
-                if (in_snapshot_)
+                auto marker = wrap_body<codecs::SnapshotMarker>(message, *header);
+                if (SNAPSHOT_TYPE_ID != marker.typeId())
                 {
-                    error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error, "already in snapshot");
+                    error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error,
+                                                   "unexpected snapshot type: " + std::to_string(marker.typeId()));
                     return AERON_ACTION_ABORT;
                 }
-                in_snapshot_ = true;
-                app_version_ = marker.appVersion();
-                time_unit_ = time_unit_from_code(static_cast<std::int32_t>(marker.timeUnit()));
-                auto handled = handler_->on_load_begin_snapshot(app_version_, time_unit_);
+
+                if (codecs::SnapshotMark::BEGIN == marker.mark())
+                {
+                    if (in_snapshot_)
+                    {
+                        error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error, "already in snapshot");
+                        return AERON_ACTION_ABORT;
+                    }
+                    in_snapshot_ = true;
+                    app_version_ = marker.appVersion();
+                    time_unit_ = time_unit_from_code(static_cast<std::int32_t>(marker.timeUnit()));
+                    auto handled = handler_->on_load_begin_snapshot(app_version_, time_unit_);
+                    if (!handled)
+                    {
+                        error_ = handled.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    return AERON_ACTION_CONTINUE;
+                }
+
+                if (codecs::SnapshotMark::END == marker.mark())
+                {
+                    if (!in_snapshot_)
+                    {
+                        error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error, "missing begin snapshot");
+                        return AERON_ACTION_ABORT;
+                    }
+                    done_ = true;
+                    auto handled = handler_->on_load_end_snapshot();
+                    if (!handled)
+                    {
+                        error_ = handled.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    return AERON_ACTION_BREAK;
+                }
+                return AERON_ACTION_CONTINUE;
+            }
+            case codecs::ClientSession::SBE_TEMPLATE_ID:
+            {
+                auto record = wrap_body<codecs::ClientSession>(message, *header);
+                auto channel = common::read_var_string(record, message);
+                auto principal = common::read_var_bytes(record, message);
+                if (!channel || !principal)
+                {
+                    error_ = !channel ? channel.error() : principal.error();
+                    return AERON_ACTION_ABORT;
+                }
+                auto handled = handler_->on_load_cluster_session(record.clusterSessionId(), record.responseStreamId(),
+                                                                 *channel, *principal);
                 if (!handled)
                 {
                     error_ = handled.error();
@@ -293,43 +330,14 @@ aeron_controlled_fragment_handler_action_t ServiceSnapshotLoader::dispatch(std::
                 }
                 return AERON_ACTION_CONTINUE;
             }
-
-            if (codecs::SnapshotMark::END == marker.mark())
-            {
-                if (!in_snapshot_)
-                {
-                    error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error, "missing begin snapshot");
-                    return AERON_ACTION_ABORT;
-                }
-                done_ = true;
-                auto handled = handler_->on_load_end_snapshot();
-                if (!handled)
-                {
-                    error_ = handled.error();
-                    return AERON_ACTION_ABORT;
-                }
-                return AERON_ACTION_BREAK;
-            }
-            return AERON_ACTION_CONTINUE;
+            default:
+                return AERON_ACTION_CONTINUE;
         }
-        case codecs::ClientSession::SBE_TEMPLATE_ID:
-        {
-            auto record = wrap_body<codecs::ClientSession>(message, *header);
-            const std::string channel = record.getResponseChannelAsString();
-            const std::string principal = record.getEncodedPrincipalAsString();
-            auto handled = handler_->on_load_cluster_session(
-                record.clusterSessionId(), record.responseStreamId(), channel,
-                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(principal.data()),
-                                              principal.size()));
-            if (!handled)
-            {
-                error_ = handled.error();
-                return AERON_ACTION_ABORT;
-            }
-            return AERON_ACTION_CONTINUE;
-        }
-        default:
-            return AERON_ACTION_CONTINUE;
+    }
+    catch (const std::exception& exception)
+    {
+        error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error, exception.what());
+        return AERON_ACTION_ABORT;
     }
 }
 

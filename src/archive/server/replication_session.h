@@ -122,6 +122,13 @@ public:
     /// subscription (`ReplicationSession.java:757`).
     [[nodiscard]] virtual aeron_image_t* image_by_session_id(std::int64_t registration_id, std::int32_t session_id) = 0;
 
+    /// Releases an image returned by `image_by_session_id`. The default no-op
+    /// keeps unit-test fakes that return synthetic `aeron_image_t*` tokens safe.
+    virtual void release_image(aeron_image_t* image)
+    {
+        (void)image;
+    }
+
     /// `Image.position()` / `isClosed()` / `isEndOfStream()`, kept behind the
     /// interface so a unit test can drive `REPLICATE` without a real image.
     [[nodiscard]] virtual std::int64_t image_position(aeron_image_t* image) = 0;

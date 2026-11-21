@@ -9,6 +9,7 @@
 
 #include <aeronc.h>
 
+#include "cluster/common/cluster_codecs.h"
 #include "cluster/common/cluster_member.h"
 #include "cluster/common/recording_log.h"
 #include "cluster/consensus/cluster_session.h"
@@ -108,6 +109,31 @@ public:
 private:
     [[nodiscard]] std::string member_channel(const common::ClusterMember& member) const;
     [[nodiscard]] bool offer(std::int32_t member_id, std::span<const std::uint8_t> message) const;
+
+    /// A fixed-length frame encoded straight into the publication's term buffer
+    /// (`tryClaim` in the reference, `ConsensusPublisher.java:53-308`).
+    /// The steady-state sends (`append_position`, `commit_position`, the votes)
+    /// must not allocate, and claiming is what the zero-allocation gate sees.
+    template <class Encoder, class Fill>
+    bool send(std::int32_t member_id, Fill&& fill) const
+    {
+        const auto it = publications_.find(member_id);
+        if (publications_.end() == it)
+        {
+            return false;
+        }
+        constexpr std::size_t LENGTH = common::MESSAGE_HEADER_LENGTH + Encoder::SBE_BLOCK_LENGTH;
+        aeron_buffer_claim_t claim{};
+        if (aeron_publication_try_claim(it->second.get(), LENGTH, &claim) <= 0)
+        {
+            return false;
+        }
+        Encoder encoder;
+        encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
+        fill(encoder);
+        aeron_buffer_claim_commit(&claim);
+        return true;
+    }
 
     axc::core::DeepmsgClient* client_;
     std::string consensus_channel_;

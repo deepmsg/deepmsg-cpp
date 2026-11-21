@@ -376,16 +376,15 @@ TEST_F(Xc2AdminClientTest, theLeaderTerminatesWhenItsServiceStops)
     ASSERT_GE(await_new_leader(term, survivors, std::chrono::seconds(30)), 0)
         << "no new leader after the leader's service stopped: " << node_dump();
     // The reference asserts `cluster.awaitNewLeadershipEvent(1)` on the
-    // client that was connected to the dead leader. Ours never sees it: the
-    // old session's egress image closes and the new leader sends no
-    // NewLeaderEvent to it, so the session closes on the new-leader timeout
-    // (weakened, recorded in records/c6c-2.md). A fresh session is what the
-    // weakened criterion uses.
-
-    ClusterClientSession fresh;
-    ASSERT_TRUE(connect_udp_retry(fresh)) << node_dump() << fresh.last_error();
-    EXPECT_TRUE(fresh.offer_and_await("after-terminate-1", 1)) << node_dump();
-    fresh.close();
+    // client that was connected to the dead leader, and that the same session
+    // can send again (`ClusterTest.shouldTerminateLeaderWhenServiceStops`).
+    // The new leader polls the replayed session's response publication and
+    // sends the event from `SessionManager.checkSessions`
+    // (`SessionManager.java:916-924`).
+    ASSERT_TRUE(session.pump_until([&session]() { return session.new_leader_events() > 0; }, std::chrono::seconds(30)))
+        << "the old session never saw the new leader: " << node_dump();
+    EXPECT_TRUE(session.offer_and_await("after-terminate-1", 1))
+        << "the old session could not send after the failover: " << node_dump();
 
     session.close();
     stop_round();
