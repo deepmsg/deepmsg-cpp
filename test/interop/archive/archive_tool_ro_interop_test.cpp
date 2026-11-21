@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -345,6 +346,52 @@ TEST_F(ArchiveToolRoInteropTest, checksumLeavesTheSameBytes)
     EXPECT_EQ(normalize(java->output, java_dir.string()), normalize(ours->output, ours_dir.string()));
     EXPECT_EQ(read_file(java_dir / "archive.catalog"), read_file(ours_dir / "archive.catalog"));
     EXPECT_EQ(read_file(java_dir / "0-0.rec"), read_file(ours_dir / "0-0.rec"));
+}
+
+TEST_F(ArchiveToolRoInteropTest, anActiveArchiveIsRefusedByTheWritingCommands)
+{
+    // A live archive's mark file has a fresh activity timestamp and a live pid.
+    // `checksum` and `verify` rewrite segment files and the catalog in place, so
+    // they refuse before opening anything writable.
+    const auto now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+
+    ArchiveMarkFile::Options mark_options;
+    mark_options.directory = archive_dir_.string();
+    mark_options.total_file_length = ArchiveMarkFile::HEADER_LENGTH + 4096;
+    mark_options.error_buffer_length = 4096;
+    ArchiveMarkFile::HeaderValues values;
+    values.start_timestamp = 1000;
+    values.control_stream_id = 10;
+    values.local_control_stream_id = 11;
+    values.events_stream_id = 12;
+    values.archive_id = 7;
+    values.control_channel = "aeron:udp?endpoint=localhost:8010";
+    values.local_control_channel = "aeron:ipc";
+    values.events_channel = "aeron:ipc";
+    values.aeron_directory = aeron_dir_.string();
+
+    auto mark_file = ArchiveMarkFile::create_or_open(mark_options, values);
+    ASSERT_TRUE(mark_file) << mark_file.error().message.view();
+    mark_file->signal_ready(now_ms);
+    ASSERT_TRUE(mark_file->force());
+    mark_file->close();
+
+    const std::string segment = read_file(archive_dir_ / "0-0.rec");
+    const std::string catalog = read_file(archive_dir_ / "archive.catalog");
+
+    for (const std::vector<std::string>& arguments :
+         {std::vector<std::string>{"checksum", "CRC-32"}, std::vector<std::string>{"verify", "-a"}})
+    {
+        auto ours = run(true, archive_dir_, arguments);
+        ASSERT_TRUE(ours) << ours.error().message.view();
+        EXPECT_NE(0, ours->exit_code) << ours->output;
+        EXPECT_NE(std::string::npos, ours->output.find("Archive mark file is active")) << ours->output;
+    }
+
+    EXPECT_EQ(segment, read_file(archive_dir_ / "0-0.rec"));
+    EXPECT_EQ(catalog, read_file(archive_dir_ / "archive.catalog"));
 }
 
 TEST_F(ArchiveToolRoInteropTest, verifyRejectsACorruptedFrame)
