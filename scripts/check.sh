@@ -28,8 +28,10 @@ fi
 # is insert-if-absent, so an app that loads the environment first has the
 # precedence backwards (`PropertySource`'s contract: -D > file > environment).
 while read -r app_main; do
-    file_line=$(grep -n "load_file(" "$app_main" | head -1 | cut -d: -f1)
-    env_line=$(grep -n "load_environment(" "$app_main" | head -1 | cut -d: -f1)
+    # `|| true`: an app with neither call is not a precedence problem (the
+    # skeleton services have no configuration yet).
+    file_line=$(grep -n "load_file(" "$app_main" | head -1 | cut -d: -f1 || true)
+    env_line=$(grep -n "load_environment(" "$app_main" | head -1 | cut -d: -f1 || true)
     if [ -n "$file_line" ] && [ -n "$env_line" ] && [ "$env_line" -lt "$file_line" ]; then
         echo "check: ${app_main} loads the environment before its properties file" >&2
         exit 1
