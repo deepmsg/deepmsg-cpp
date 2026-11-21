@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "cluster/common/channel_uri.h"
 #include "cluster/service/client_util.h"
 
 namespace deepmsg::cluster::service
@@ -30,7 +31,8 @@ std::expected<void, Error> ContainerClientSession::connect(axc::core::DeepmsgCli
         return {};
     }
 
-    auto add = client.add_publication(response_channel_, response_stream_id_);
+    const std::string publication_channel = common::publication_channel_from_response_channel(response_channel_);
+    auto add = client.add_publication(publication_channel, response_stream_id_);
     auto publication = await_async(client, add, EGRESS_COMMAND_TIMEOUT_NS);
     if (!publication)
     {

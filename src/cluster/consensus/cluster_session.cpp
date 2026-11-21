@@ -6,6 +6,7 @@
 #include <cstring>
 #include <utility>
 
+#include "cluster/common/channel_uri.h"
 #include "cluster/common/cluster_counters.h"
 
 namespace deepmsg::cluster::consensus
@@ -137,24 +138,9 @@ void ClusterSession::async_connect(axc::core::DeepmsgClient& client, std::int32_
     const std::string label = common::session_counter_label(session_info_, cluster_id);
     counter_add_ = client.add_counter(common::CLUSTER_SESSION_TYPE_ID, {key.data(), key.size()}, label);
     // `rejoin` is a subscription option: the Java client adds it to the
-    // response channel it sends (AeronCluster.java:1497-1501). The C driver
-    // keeps a publication carrying it permanently unconnected, so strip it.
-    std::string publication_channel{response_channel_};
-    const std::string rejoin = "rejoin=";
-    if (const std::size_t at = publication_channel.find(rejoin);
-        std::string::npos != at &&
-        (0 == at || '|' == publication_channel[at - 1] || '?' == publication_channel[at - 1]))
-    {
-        const std::size_t end = publication_channel.find('|', at);
-        if (std::string::npos == end)
-        {
-            publication_channel.erase(at - 1);
-        }
-        else
-        {
-            publication_channel.erase(at, end - at + 1);
-        }
-    }
+    // response channel it sends (`AeronCluster.java:1497-1501`), and the C
+    // driver keeps a publication carrying it permanently unconnected.
+    const std::string publication_channel = common::publication_channel_from_response_channel(response_channel_);
     publication_add_ = client.add_publication(publication_channel, response_stream_id_);
 }
 

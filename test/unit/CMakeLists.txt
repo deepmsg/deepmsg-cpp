@@ -92,6 +92,7 @@ target_compile_definitions(axc_archive_unit_tests PRIVATE
 
 axc_add_executable(axc_cluster_unit_tests
     SOURCES
+        cluster/common/channel_uri_test.cpp
         cluster/common/recording_log_test.cpp
         cluster/common/recording_log_golden_test.cpp
         cluster/common/node_state_file_test.cpp
