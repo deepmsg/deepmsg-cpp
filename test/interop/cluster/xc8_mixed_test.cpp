@@ -280,15 +280,28 @@ protected:
         for (int attempt = 0; attempt < 20; ++attempt)
         {
             start_container_once(index, stack);
-            // The retry window is long enough to starve the counter clients
-            // (ten seconds force-closes an aeron client), so drive them.
-            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
-            while (std::chrono::steady_clock::now() < until)
+            // The member leaves INIT only after its container's first ack. A
+            // container that dies at that ack (or whose ack is lost) is
+            // respawned; otherwise the CM's recovery waits for ever. The
+            // counter clients are driven because the window can outlast their
+            // ten-second service interval.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            bool acked = false;
+            while (std::chrono::steady_clock::now() < deadline)
             {
                 drive_counter_clients(static_cast<int>(stacks_.size()));
+                if (0 < counter(index, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID))
+                {
+                    acked = true;
+                    break;
+                }
+                if (!containers_[index] || !containers_[index]->running())
+                {
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            if (containers_[index] && containers_[index]->running())
+            if (acked)
             {
                 for (auto& client : clients_)
                 {
@@ -299,7 +312,7 @@ protected:
             containers_[index].reset();
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        FAIL() << "container " << index << " never stayed up: " << member_dump(4);
+        FAIL() << "container " << index << " never got its first ack: " << member_dump(4);
     }
 
     void start_container_once(int index, Stack stack)
@@ -801,9 +814,11 @@ TEST_F(MixedRig, ourAppointedLeaderServesAClientWithThreeMembers)
 TEST_F(MixedRig, aJavaDirectoryRestartsUnderOurNode)
 {
     // XC-5's core: the same member directory, first a Java member, then ours.
-    // It currently fails on the Java-written `recording.log`: our node exits
-    // with "unknown recording id: 0" (the archive it opens does not know the
-    // recording the log names), so the member never comes back.
+    // The archive it opens knows the Java-written recording (the 2026-11-18
+    // "unknown recording id: 0" note is stale); what made this case flaky was
+    // the container's first ack racing its publication, which left the CM in
+    // its recovery wait (`start_container` now waits for the member to leave
+    // INIT).
     start_cluster({Stack::java, Stack::cpp});
     ASSERT_GE(leader_of(2), 0) << member_dump(2);
     kill_member(0);
