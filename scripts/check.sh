@@ -90,7 +90,10 @@ fi
 
 clang_tidy=$(find_tool clang-tidy || true)
 if [ -n "$clang_tidy" ] && [ -f "build/${presets[0]}/compile_commands.json" ]; then
-    find src apps tools -name '*.cpp' -print0 | xargs -0 -r "$clang_tidy" -p "build/${presets[0]}"
+    # Parallel: each file is a full front-end run, and the tree is now 149
+    # translation units once `apps/` and `tools/` are included.
+    find src apps tools -name '*.cpp' -print0 |
+        xargs -0 -r -P "$(nproc)" "$clang_tidy" -p "build/${presets[0]}"
 else
     echo "clang-tidy-20/clang-tidy or compile_commands.json not found: skipping the tidy gate"
 fi

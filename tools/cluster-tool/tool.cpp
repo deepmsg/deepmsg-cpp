@@ -22,7 +22,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -495,7 +494,7 @@ std::vector<common::ClusterMarkFile> open_service_mark_files(const std::string& 
             {
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ::usleep(10'000);
         }
         if (!opened)
         {

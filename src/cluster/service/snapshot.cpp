@@ -157,8 +157,8 @@ std::expected<void, Error> ServiceSnapshotTaker::snapshot_session(const Containe
 
     if (length <= publication_->max_payload_length())
     {
-        auto claimed = retry_while_back_pressured(
-            [this, length]() { return publication_->try_claim(length); }, [this]() { publication_->idle(); });
+        auto claimed = retry_while_back_pressured([this, length]() { return publication_->try_claim(length); },
+                                                  [this]() { publication_->idle(); });
         if (!claimed.has_value())
         {
             return std::unexpected(publication_error(claimed.error(), "snapshot session claim"));

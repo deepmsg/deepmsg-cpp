@@ -26,8 +26,7 @@ TEST(ClusterConfigTest, everyReferenceNameHasADisposition)
     EXPECT_EQ(DispositionKind::accepted_ignored, table.lookup("aeron.cluster.service.cpu.affinity").kind);
     EXPECT_EQ(DispositionKind::accepted_ignored, table.lookup("aeron.cluster.clock").kind);
     EXPECT_EQ(DispositionKind::accepted_ignored, table.lookup("aeron.cluster.authenticator.supplier").kind);
-    EXPECT_EQ(DispositionKind::accepted_ignored,
-              table.lookup("aeron.cluster.service.delegating.error.handler").kind);
+    EXPECT_EQ(DispositionKind::accepted_ignored, table.lookup("aeron.cluster.service.delegating.error.handler").kind);
     EXPECT_EQ(DispositionKind::accepted_ignored, table.lookup("aeron.cluster.accept.standby.snapshots").kind);
     EXPECT_EQ(DispositionKind::unknown, table.lookup("aeron.cluster.not.a.real.name").kind);
 }

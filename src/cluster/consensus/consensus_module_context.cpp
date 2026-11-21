@@ -359,8 +359,7 @@ std::expected<ConsensusModuleConfig, Error> consensus_module_config_from_propert
         get_string(properties, ARCHIVE_LOCAL_CONTROL_CHANNEL_PROP_NAME, config.archive_local_control_channel);
 
     config.ingress_ipc_allowed = parse_bool(properties, INGRESS_IPC_ALLOWED_PROP_NAME, config.ingress_ipc_allowed);
-    config.delete_dir_on_start =
-        parse_bool(properties, DELETE_DIR_ON_START_PROP_NAME, config.delete_dir_on_start);
+    config.delete_dir_on_start = parse_bool(properties, DELETE_DIR_ON_START_PROP_NAME, config.delete_dir_on_start);
 
     // Names owned by later cards: `aeron.cluster.clock` and the supplier names
     // are C4b/C4f, `cpu.affinity` and the control toggles are C4e/C4f,

@@ -71,8 +71,7 @@ axc::core::NameTable cluster_name_table()
     table.add_honoured("aeron.cluster.replication.progress.timeout");
     table.add_honoured("aeron.cluster.service.class.name");
     table.add_honoured("aeron.cluster.service.count");
-    table.add_accepted_ignored("aeron.cluster.service.cpu.affinity",
-                               "thread affinity is not applied by the container");
+    table.add_accepted_ignored("aeron.cluster.service.cpu.affinity", "thread affinity is not applied by the container");
     table.add_honoured("aeron.cluster.service.cycle.threshold");
     table.add_accepted_ignored("aeron.cluster.service.delegating.error.handler",
                                "no delegating error handler; errors go to the error log");

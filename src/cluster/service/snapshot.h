@@ -41,8 +41,7 @@ template <class ClaimFunction, class IdleFunction>
         {
             return claimed;
         }
-        if (AERON_PUBLICATION_BACK_PRESSURED != claimed.error() &&
-            AERON_PUBLICATION_ADMIN_ACTION != claimed.error())
+        if (AERON_PUBLICATION_BACK_PRESSURED != claimed.error() && AERON_PUBLICATION_ADMIN_ACTION != claimed.error())
         {
             return claimed;
         }
