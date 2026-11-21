@@ -549,9 +549,15 @@ protected:
         ASSERT_TRUE(connected) << session_.last_error();
         for (int i = first; i < first + count; ++i)
         {
-            ASSERT_TRUE(session_.offer_and_await(int_payload(i), static_cast<std::size_t>(i - first + 1),
-                                                 std::chrono::seconds(20)))
+            // `close()`/`connect()` do not reset the session's egress listener,
+            // so a count that starts at one is already satisfied by the previous
+            // batch: wait for one *new* echo and check it is the one we offered.
+            // (2026-11-21: the C9 leader-change failure; the count-only wait let
+            // `stop_all()` catch a batch that had not been committed yet.)
+            const std::size_t before = session_.messages().size();
+            ASSERT_TRUE(session_.offer_and_await(int_payload(i), before + 1, std::chrono::seconds(20)))
                 << "echo failed at " << i;
+            ASSERT_EQ(session_.messages().back(), int_payload(i)) << "the echo at " << i << " is not ours";
         }
     }
 
@@ -1282,10 +1288,13 @@ TEST_F(Xc9JavaBackupAgainstOurClusterTest, theBackupFollowsTheClusterThroughALea
         << "the node started from the backup never became the active leader (state="
         << restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) << ")";
 
-    // Known flake, and pre-existing: on `main` (3c38481) the tracking check
-    // below fails 2 in 5 in the release preset with the recovered state
-    // stopping after the first batch (baseline in `/tmp/dp-main`, 2026-11-21).
-    // Debug passes. Left active so the gap stays visible.
+    // 2026-11-21: this used to fail 2 in 5 in the release preset, the recovered
+    // state stopping after a batch or skipping the middle one. `send_ints` was
+    // only counting egress messages across a reconnect, so the batches sent
+    // after BACKING_UP and after the election were never actually awaited and
+    // `stop_all()` could catch them before they committed (the scenes are in
+    // `analysis/cpp/records/c9-leader-change-2026-11-21/`). It now waits for a
+    // new echo and checks the payload.
     std::vector<std::int32_t> expected;
     for (int i = 0; i < 20; ++i)
     {
