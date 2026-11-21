@@ -305,4 +305,26 @@ TEST_F(ClientConnectInteropTest, aCProgramConnectsOffersAndReceivesTheEcho)
     EXPECT_NE(std::string::npos, result->output.find("RECEIVED hello-from-c")) << result->output;
 }
 
+// The C ABI has no `do_work`: a process that idles between connecting and
+// offering must not be reaped by the media driver's client liveness check
+// (`clientLivenessTimeout` defaults to 10 s), so the conductor runs on the
+// client's own agent thread. The reading is the offer itself: a reaped client's
+// publication is disconnected and `offer` returns `NOT_CONNECTED` (< 0).
+TEST_F(ClientConnectInteropTest, aCProgramKeepsItsRegistrationThroughAnIdle)
+{
+    start_java_node();
+    start_container();
+
+    axc::interop::ProcessOptions options;
+    options.arguments = {aeron_dir(), "hello-after-idle", "12", "offer-only"};
+    options.timeout = std::chrono::seconds(90);
+
+    auto result = axc::interop::run_process(AXC_CLUSTER_CLIENT_SMOKE, options);
+    ASSERT_TRUE(result) << result.error().message.view();
+    EXPECT_EQ(0, result->exit_code) << result->output;
+    EXPECT_NE(std::string::npos, result->output.find("IDLE 12.0")) << result->output;
+    EXPECT_NE(std::string::npos, result->output.find("OFFERED ")) << result->output;
+    EXPECT_EQ(std::string::npos, result->output.find("OFFERED -")) << result->output;
+}
+
 }  // namespace
