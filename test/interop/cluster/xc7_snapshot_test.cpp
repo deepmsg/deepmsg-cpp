@@ -44,6 +44,16 @@ protected:
         }
     }
 
+    void TearDown() override
+    {
+        for (aeron_archive_context_t* context : archive_contexts_)
+        {
+            (void)aeron_archive_context_close(context);
+        }
+        archive_contexts_.clear();
+        ThreeNodeRig::TearDown();
+    }
+
     void use_tracking_service()
     {
         service_library_ = AXC_TRACKING_SERVICE_LIBRARY;
@@ -195,8 +205,9 @@ protected:
             (void)aeron_archive_context_close(context);
             return nullptr;
         }
-        // The context must outlive the archive client; leaking one handle per
-        // call is fine for a test process.
+        // The context must outlive the archive client; it is closed in
+        // `TearDown` (LeakSanitizer counts a leaked context in the asan preset).
+        archive_contexts_.push_back(context);
         return archive;
     }
 
@@ -231,6 +242,8 @@ protected:
         (void)aeron_archive_close(archive);
         return ok;
     }
+
+    std::vector<aeron_archive_context_t*> archive_contexts_{};
 
     struct Tracking
     {

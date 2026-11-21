@@ -995,7 +995,9 @@ TEST(ClusterClientTest, shouldStayConnectedAfterSuccessfulFailover)
             if (with_ingress_disconnect)
             {
                 fake.close_ingress_subscription();
-                ASSERT_TRUE(wait_for_ingress_connection(*session, false));
+                // `is_connected` falls first; a claim keeps succeeding until the
+                // position limit comes down (see `wait_for_ingress_writes_to_stop`).
+                ASSERT_TRUE(wait_for_ingress_writes_to_stop(*session));
             }
 
             const std::uint8_t payload[] = {'a', 'p', 'p'};
