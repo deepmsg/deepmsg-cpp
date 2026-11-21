@@ -109,16 +109,9 @@ constexpr const char* MEMBERS = "0,localhost:0,localhost:0,localhost:0,localhost
                                                                          const std::vector<std::string>& arguments,
                                                                          const std::string& log)
 {
-    std::string command = "exec " + executable;
-    for (const std::string& argument : arguments)
-    {
-        command.push_back(' ');
-        command.append(argument);
-    }
-    command.append(" > ");
-    command.append(log);
-    command.append(" 2>&1");
-    return ChildProcess::spawn("/bin/sh", {"-c", command});
+    // The child is spawned directly: a shell would split on a `|` in an
+    // argument (a channel URI), and `spawn` already redirects to `log`.
+    return ChildProcess::spawn(executable, arguments, {}, log);
 }
 
 class Xc2SingleNodeTest : public ::testing::Test

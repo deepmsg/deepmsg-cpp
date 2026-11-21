@@ -348,6 +348,16 @@ TEST_F(ArchiveToolRoInteropTest, checksumLeavesTheSameBytes)
     EXPECT_EQ(read_file(java_dir / "0-0.rec"), read_file(ours_dir / "0-0.rec"));
 }
 
+TEST_F(ArchiveToolRoInteropTest, aNonNumericRecordingIdIsAnError)
+{
+    // `Integer.parseInt` throws in the reference; parsing a junk id as 0 would
+    // silently describe the wrong recording.
+    auto ours = run(true, archive_dir_, {"describe", "not-a-number"});
+    ASSERT_TRUE(ours) << ours.error().message.view();
+    EXPECT_NE(0, ours->exit_code) << ours->output;
+    EXPECT_NE(std::string::npos, ours->output.find("Invalid recording id")) << ours->output;
+}
+
 TEST_F(ArchiveToolRoInteropTest, anActiveArchiveIsRefusedByTheWritingCommands)
 {
     // A live archive's mark file has a fresh activity timestamp and a live pid.

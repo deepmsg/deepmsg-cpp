@@ -50,7 +50,9 @@
 
 namespace
 {
-std::size_t g_allocations = 0;
+// `thread_local`: the counting `operator new` below is process-wide, and other
+// threads in the same test binary allocate concurrently.
+thread_local std::size_t g_allocations = 0;
 }  // namespace
 
 #if PARKED_FRAME_COUNTS_ALLOCATIONS

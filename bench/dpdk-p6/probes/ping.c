@@ -36,12 +36,13 @@
 
 typedef struct
 {
-    int64_t* send_ns;      /* by sequence; 0 = not offered */
-    int64_t* round_trip;   /* by sequence; valid when seen */
+    int64_t* send_ns;    /* by sequence; 0 = not offered */
+    int64_t* round_trip; /* by sequence; valid when seen */
     uint8_t* seen;
     int64_t total;
     int64_t received;
     int64_t first_send_ns;
+    int64_t last_send_ns;
     int64_t last_receive_ns;
 } Pong;
 
@@ -182,8 +183,8 @@ int main(int argc, char** argv)
                 Message message = {0};
                 message.sequence = (uint64_t)next_sequence;
                 message.send_ns = now;
-                const int64_t position = aeron_publication_offer(publication, (const uint8_t*)&message,
-                                                                 sizeof(message), NULL, NULL);
+                const int64_t position =
+                    aeron_publication_offer(publication, (const uint8_t*)&message, sizeof(message), NULL, NULL);
                 if (position >= 0)
                 {
                     pong.send_ns[next_sequence] = now;
@@ -191,6 +192,7 @@ int main(int argc, char** argv)
                     {
                         pong.first_send_ns = now;
                     }
+                    pong.last_send_ns = now;
                     ++next_sequence;
                     if (rate > 0)
                     {
@@ -261,7 +263,9 @@ int main(int argc, char** argv)
         int64_t achieved = 0;
         if (rate > 0)
         {
-            const int64_t span = pong.last_receive_ns - pong.first_send_ns;
+            /* The send-side span: `last_receive_ns - first_send_ns` includes
+             * the last message's round trip and understates a small sample. */
+            const int64_t span = pong.last_send_ns - pong.first_send_ns;
             /* The first message was the handshake; the paced count is what
              * went out after it. */
             const int64_t paced = total > 1 ? total - 1 : total;

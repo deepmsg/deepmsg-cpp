@@ -114,16 +114,9 @@ inline constexpr std::int64_t ECHO_MESSAGES = 100;
 [[nodiscard]] inline std::expected<ChildProcess, axc::core::Error> spawn_logged(
     const std::string& executable, const std::vector<std::string>& arguments, const std::string& log)
 {
-    std::string command = "exec " + executable;
-    for (const std::string& argument : arguments)
-    {
-        command.push_back(' ');
-        command.append(argument);
-    }
-    command.append(" > ");
-    command.append(log);
-    command.append(" 2>&1");
-    return ChildProcess::spawn("/bin/sh", {"-c", command});
+    // The child is spawned directly: a shell would split on a `|` in an
+    // argument (a channel URI), and `spawn` already redirects to `log`.
+    return ChildProcess::spawn(executable, arguments, {}, log);
 }
 
 class ThreeNodeRig : public ::testing::Test
