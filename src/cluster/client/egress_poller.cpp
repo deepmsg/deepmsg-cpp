@@ -1,5 +1,7 @@
 #include "cluster/client/egress_poller.h"
 
+#include <exception>
+
 #include "io_aeron_cluster_codecs/Challenge.h"
 #include "io_aeron_cluster_codecs/NewLeaderEvent.h"
 #include "io_aeron_cluster_codecs/SessionEvent.h"
@@ -100,70 +102,90 @@ aeron_controlled_fragment_handler_action_t EgressPoller::on_message(std::span<co
     }
 
     template_id_ = header->templateId();
-    switch (template_id_)
+    try
     {
-        case SESSION_MESSAGE_HEADER_TEMPLATE_ID:
+        switch (template_id_)
         {
-            // `EP:255-265`.
-            auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
-            leadership_term_id_ = decoder.leadershipTermId();
-            cluster_session_id_ = decoder.clusterSessionId();
-            is_poll_complete_ = true;
-            return AERON_ACTION_BREAK;
-        }
-
-        case SESSION_EVENT_TEMPLATE_ID:
-        {
-            // `EP:267-284`.
-            auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
-            cluster_session_id_ = decoder.clusterSessionId();
-            correlation_id_ = decoder.correlationId();
-            leadership_term_id_ = decoder.leadershipTermId();
-            leader_member_id_ = decoder.leaderMemberId();
-            event_code_ = decoder.code();
-            version_ = decoder.version();
-            const std::int64_t heartbeat = decoder.leaderHeartbeatTimeoutNs();
-            leader_heartbeat_timeout_ns_ =
-                heartbeat == codecs::SessionEvent::leaderHeartbeatTimeoutNsNullValue() ? NULL_VALUE : heartbeat;
-            detail_ = decoder.getDetailAsString();
-            is_poll_complete_ = true;
-            egress_image_ = image;
-            return AERON_ACTION_BREAK;
-        }
-
-        case NEW_LEADER_EVENT_TEMPLATE_ID:
-        {
-            // `EP:286-299`.
-            auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
-            cluster_session_id_ = decoder.clusterSessionId();
-            leadership_term_id_ = decoder.leadershipTermId();
-            leader_member_id_ = decoder.leaderMemberId();
-            // `ingressEndpoints` is a length-prefixed var-data field, not a C
-            // string: build the detail from the encoded length.
-            detail_ = decoder.getIngressEndpointsAsString();
-            is_poll_complete_ = true;
-            egress_image_ = image;
-            return AERON_ACTION_BREAK;
-        }
-
-        case CHALLENGE_TEMPLATE_ID:
-        {
-            // `EP:301-316`.
-            auto decoder = common::wrap_body<codecs::Challenge>(message, *header);
-            const std::uint32_t length = decoder.encodedChallengeLength();
-            encoded_challenge_.resize(length);
-            if (0 != length)
+            case SESSION_MESSAGE_HEADER_TEMPLATE_ID:
             {
-                (void)decoder.getEncodedChallenge(reinterpret_cast<char*>(encoded_challenge_.data()), length);
+                // `EP:255-265`.
+                auto decoder = common::wrap_body<codecs::SessionMessageHeader>(message, *header);
+                leadership_term_id_ = decoder.leadershipTermId();
+                cluster_session_id_ = decoder.clusterSessionId();
+                is_poll_complete_ = true;
+                return AERON_ACTION_BREAK;
             }
-            cluster_session_id_ = decoder.clusterSessionId();
-            correlation_id_ = decoder.correlationId();
-            is_poll_complete_ = true;
-            return AERON_ACTION_BREAK;
-        }
 
-        default:
-            break;
+            case SESSION_EVENT_TEMPLATE_ID:
+            {
+                // `EP:267-284`.
+                auto decoder = common::wrap_body<codecs::SessionEvent>(message, *header);
+                cluster_session_id_ = decoder.clusterSessionId();
+                correlation_id_ = decoder.correlationId();
+                leadership_term_id_ = decoder.leadershipTermId();
+                leader_member_id_ = decoder.leaderMemberId();
+                event_code_ = decoder.code();
+                version_ = decoder.version();
+                const std::int64_t heartbeat = decoder.leaderHeartbeatTimeoutNs();
+                leader_heartbeat_timeout_ns_ =
+                    heartbeat == codecs::SessionEvent::leaderHeartbeatTimeoutNsNullValue() ? NULL_VALUE : heartbeat;
+                auto detail = common::read_var_string(decoder, message);
+                if (!detail)
+                {
+                    return AERON_ACTION_CONTINUE;
+                }
+                detail_.assign(detail->data(), detail->size());
+                is_poll_complete_ = true;
+                egress_image_ = image;
+                return AERON_ACTION_BREAK;
+            }
+
+            case NEW_LEADER_EVENT_TEMPLATE_ID:
+            {
+                // `EP:286-299`.
+                auto decoder = common::wrap_body<codecs::NewLeaderEvent>(message, *header);
+                cluster_session_id_ = decoder.clusterSessionId();
+                leadership_term_id_ = decoder.leadershipTermId();
+                leader_member_id_ = decoder.leaderMemberId();
+                // `ingressEndpoints` is a length-prefixed var-data field, not a C
+                // string: build the detail from the encoded length.
+                auto endpoints = common::read_var_string(decoder, message);
+                if (!endpoints)
+                {
+                    return AERON_ACTION_CONTINUE;
+                }
+                detail_.assign(endpoints->data(), endpoints->size());
+                is_poll_complete_ = true;
+                egress_image_ = image;
+                return AERON_ACTION_BREAK;
+            }
+
+            case CHALLENGE_TEMPLATE_ID:
+            {
+                // `EP:301-316`.
+                auto decoder = common::wrap_body<codecs::Challenge>(message, *header);
+                auto challenge = common::read_var_bytes(decoder, message);
+                if (!challenge)
+                {
+                    return AERON_ACTION_CONTINUE;
+                }
+                encoded_challenge_.assign(challenge->begin(), challenge->end());
+                cluster_session_id_ = decoder.clusterSessionId();
+                correlation_id_ = decoder.correlationId();
+                is_poll_complete_ = true;
+                return AERON_ACTION_BREAK;
+            }
+
+            default:
+                break;
+        }
+    }
+    catch (const std::exception&)
+    {
+        // A malformed variable-length field is the same as an unknown
+        // template here: the pass steps over it.
+        template_id_ = NULL_VALUE;
+        return AERON_ACTION_CONTINUE;
     }
 
     // `EP:319`: an unknown template is stepped over.

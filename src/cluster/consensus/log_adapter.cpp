@@ -1,6 +1,7 @@
 #include "cluster/consensus/log_adapter.h"
 
 #include <algorithm>
+#include <exception>
 #include <string>
 
 #include "io_aeron_cluster_codecs/ClusterActionRequest.h"
@@ -142,70 +143,83 @@ aeron_controlled_fragment_handler_action_t LogAdapter::dispatch(std::span<const 
         return AERON_ACTION_ABORT;
     }
 
-    switch (header->templateId())
+    try
     {
-        case codecs::SessionMessageHeader::SBE_TEMPLATE_ID:
+        switch (header->templateId())
         {
-            auto decoder = wrap_body<codecs::SessionMessageHeader>(message, *header);
-            handler_->on_replay_session_message(decoder.clusterSessionId(), decoder.timestamp());
-            return AERON_ACTION_CONTINUE;
-        }
-
-        case codecs::TimerEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::TimerEvent>(message, *header);
-            handler_->on_replay_timer_event(decoder.correlationId());
-            return AERON_ACTION_CONTINUE;
-        }
-
-        case codecs::SessionOpenEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::SessionOpenEvent>(message, *header);
-            handler_->on_replay_session_open(log_position, decoder.correlationId(), decoder.clusterSessionId(),
-                                             decoder.timestamp(), decoder.responseStreamId(),
-                                             decoder.getResponseChannelAsString());
-            return AERON_ACTION_CONTINUE;
-        }
-
-        case codecs::SessionCloseEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::SessionCloseEvent>(message, *header);
-            handler_->on_replay_session_close(decoder.clusterSessionId(), decoder.closeReason());
-            return AERON_ACTION_CONTINUE;
-        }
-
-        case codecs::ClusterActionRequest::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::ClusterActionRequest>(message, *header);
-            const std::int32_t flags =
-                codecs::ClusterActionRequest::flagsNullValue() != decoder.flags() ? decoder.flags() : 0;
-            auto handled = handler_->on_replay_cluster_action(decoder.leadershipTermId(), decoder.logPosition(),
-                                                              decoder.timestamp(),
-                                                              static_cast<std::int32_t>(decoder.action()), flags);
-            if (!handled)
+            case codecs::SessionMessageHeader::SBE_TEMPLATE_ID:
             {
-                error_ = handled.error();
-                return AERON_ACTION_ABORT;
+                auto decoder = wrap_body<codecs::SessionMessageHeader>(message, *header);
+                handler_->on_replay_session_message(decoder.clusterSessionId(), decoder.timestamp());
+                return AERON_ACTION_CONTINUE;
             }
-            return AERON_ACTION_BREAK;
-        }
 
-        case codecs::NewLeadershipTermEvent::SBE_TEMPLATE_ID:
-        {
-            auto decoder = wrap_body<codecs::NewLeadershipTermEvent>(message, *header);
-            auto handled = handler_->on_replay_new_leadership_term_event(
-                decoder.leadershipTermId(), decoder.logPosition(), decoder.timestamp(), decoder.termBaseLogPosition(),
-                static_cast<std::int32_t>(decoder.timeUnit()), decoder.appVersion());
-            if (!handled)
+            case codecs::TimerEvent::SBE_TEMPLATE_ID:
             {
-                error_ = handled.error();
-                return AERON_ACTION_ABORT;
+                auto decoder = wrap_body<codecs::TimerEvent>(message, *header);
+                handler_->on_replay_timer_event(decoder.correlationId());
+                return AERON_ACTION_CONTINUE;
             }
-            return AERON_ACTION_CONTINUE;
-        }
 
-        default:
-            return AERON_ACTION_CONTINUE;
+            case codecs::SessionOpenEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::SessionOpenEvent>(message, *header);
+                auto response_channel = common::read_var_string(decoder, message);
+                if (!response_channel)
+                {
+                    error_ = response_channel.error();
+                    return AERON_ACTION_ABORT;
+                }
+                handler_->on_replay_session_open(log_position, decoder.correlationId(), decoder.clusterSessionId(),
+                                                 decoder.timestamp(), decoder.responseStreamId(), *response_channel);
+                return AERON_ACTION_CONTINUE;
+            }
+
+            case codecs::SessionCloseEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::SessionCloseEvent>(message, *header);
+                handler_->on_replay_session_close(decoder.clusterSessionId(), decoder.closeReason());
+                return AERON_ACTION_CONTINUE;
+            }
+
+            case codecs::ClusterActionRequest::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::ClusterActionRequest>(message, *header);
+                const std::int32_t flags =
+                    codecs::ClusterActionRequest::flagsNullValue() != decoder.flags() ? decoder.flags() : 0;
+                auto handled = handler_->on_replay_cluster_action(decoder.leadershipTermId(), decoder.logPosition(),
+                                                                  decoder.timestamp(),
+                                                                  static_cast<std::int32_t>(decoder.action()), flags);
+                if (!handled)
+                {
+                    error_ = handled.error();
+                    return AERON_ACTION_ABORT;
+                }
+                return AERON_ACTION_BREAK;
+            }
+
+            case codecs::NewLeadershipTermEvent::SBE_TEMPLATE_ID:
+            {
+                auto decoder = wrap_body<codecs::NewLeadershipTermEvent>(message, *header);
+                auto handled = handler_->on_replay_new_leadership_term_event(
+                    decoder.leadershipTermId(), decoder.logPosition(), decoder.timestamp(),
+                    decoder.termBaseLogPosition(), static_cast<std::int32_t>(decoder.timeUnit()), decoder.appVersion());
+                if (!handled)
+                {
+                    error_ = handled.error();
+                    return AERON_ACTION_ABORT;
+                }
+                return AERON_ACTION_CONTINUE;
+            }
+
+            default:
+                return AERON_ACTION_CONTINUE;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        error_ = axc::core::make_error(axc::core::ErrorCode::protocol_error, exception.what());
+        return AERON_ACTION_ABORT;
     }
 }
 

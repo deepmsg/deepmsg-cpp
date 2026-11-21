@@ -400,4 +400,59 @@ TEST(EgressAdapterTest, onFragmentIsANoOpIfSessionIdDoesNotMatchOnAdminResponse)
     EXPECT_TRUE(listener.admin_responses.empty());
 }
 
+// A frame whose declared root block does not fit is a malformed message, not a
+// decoder throw: the generated `wrapForDecode` throws from `sbeCheckPosition`,
+// and `dispatch` is called from the C assembler's callback.
+TEST(EgressAdapterTest, aMessageShorterThanItsBlockLengthIsAProtocolError)
+{
+    std::vector<std::uint8_t> message(codecs::MessageHeader::encodedLength() + 2, 0);
+    codecs::MessageHeader header;
+    header.wrap(reinterpret_cast<char*>(message.data()), 0, codecs::MessageHeader::sbeSchemaVersion(), message.size());
+    header.blockLength(codecs::SessionMessageHeader::sbeBlockLength())
+        .templateId(codecs::SessionMessageHeader::sbeTemplateId())
+        .schemaId(deepmsg::cluster::common::SBE_SCHEMA_ID)
+        .version(codecs::SessionMessageHeader::sbeSchemaVersion());
+
+    RecordingEgressListener listener;
+    EgressAdapter adapter(listener, 1, 10);
+
+    adapter.dispatch(std::span<const std::uint8_t>(message));
+
+    auto error = adapter.take_error();
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(axc::core::ErrorCode::protocol_error, error->code);
+    EXPECT_TRUE(listener.messages.empty());
+}
+
+// A variable-length field that claims more bytes than the message holds is the
+// other generated-decoder throw; the firewall turns it into the same error.
+TEST(EgressAdapterTest, aVariableLengthFieldPastTheEndIsAProtocolError)
+{
+    Buffer buffer = zeroed();
+    codecs::SessionEvent encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(buffer.data()), 0, buffer.size());
+    encoder.clusterSessionId(1).correlationId(2).leadershipTermId(3).leaderMemberId(0);
+    encoder.code(codecs::EventCode::OK);
+    encoder.putDetail(std::string_view{"detail"});
+
+    const std::size_t length = codecs::MessageHeader::encodedLength() + encoder.encodedLength();
+    const std::size_t detail_length_offset =
+        codecs::MessageHeader::encodedLength() + codecs::SessionEvent::sbeBlockLength();
+    const std::uint32_t oversized = 0x7F7F7F7FU;
+    for (std::size_t index = 0; index < sizeof(oversized); ++index)
+    {
+        buffer[detail_length_offset + index] = static_cast<std::uint8_t>((oversized >> (8 * index)) & 0xFFU);
+    }
+
+    RecordingEgressListener listener;
+    EgressAdapter adapter(listener, 1, 10);
+
+    adapter.dispatch(at(buffer, 0, length));
+
+    auto error = adapter.take_error();
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(axc::core::ErrorCode::protocol_error, error->code);
+    EXPECT_TRUE(listener.session_events.empty());
+}
+
 }  // namespace

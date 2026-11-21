@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include <exception>
 #include <string_view>
 #include <utility>
 
@@ -171,96 +172,118 @@ aeron_controlled_fragment_handler_action_t IngressAdapter::dispatch(std::span<co
         return AERON_ACTION_CONTINUE;
     }
 
-    switch (decoded_header->templateId())
+    if (auto body = deepmsg::cluster::common::check_body_length(message, *decoded_header); !body)
     {
-        case header_codec::SessionMessageHeader::SBE_TEMPLATE_ID:
+        error_ = body.error();
+        return AERON_ACTION_ABORT;
+    }
+
+    try
+    {
+        switch (decoded_header->templateId())
         {
-            if (message.size() < SESSION_MESSAGE_HEADER_LENGTH)
+            case header_codec::SessionMessageHeader::SBE_TEMPLATE_ID:
             {
-                error_ = make_error(ErrorCode::protocol_error, "a session message is shorter than its header");
-                return AERON_ACTION_ABORT;
+                if (message.size() < SESSION_MESSAGE_HEADER_LENGTH)
+                {
+                    error_ = make_error(ErrorCode::protocol_error, "a session message is shorter than its header");
+                    return AERON_ACTION_ABORT;
+                }
+                auto decoder =
+                    deepmsg::cluster::common::wrap_body<header_codec::SessionMessageHeader>(message, *decoded_header);
+                const bool continuous = handler_.on_ingress_message(
+                    decoder.leadershipTermId(), decoder.clusterSessionId(),
+                    message.data() + SESSION_MESSAGE_HEADER_LENGTH, message.size() - SESSION_MESSAGE_HEADER_LENGTH);
+                return continuous ? AERON_ACTION_CONTINUE : AERON_ACTION_ABORT;
             }
-            auto decoder =
-                deepmsg::cluster::common::wrap_body<header_codec::SessionMessageHeader>(message, *decoded_header);
-            const bool continuous = handler_.on_ingress_message(decoder.leadershipTermId(), decoder.clusterSessionId(),
-                                                                message.data() + SESSION_MESSAGE_HEADER_LENGTH,
-                                                                message.size() - SESSION_MESSAGE_HEADER_LENGTH);
-            return continuous ? AERON_ACTION_CONTINUE : AERON_ACTION_ABORT;
-        }
 
-        case header_codec::SessionConnectRequest::SBE_TEMPLATE_ID:
-        {
-            auto decoder =
-                deepmsg::cluster::common::wrap_body<header_codec::SessionConnectRequest>(message, *decoded_header);
-            // The generated var-string accessor advances the decoder's position,
-            // so the length must be read (and kept) before the pointer.
-            const std::uint32_t response_channel_length = decoder.responseChannelLength();
-            const char* response_channel_ptr = decoder.responseChannel();
-            const std::string_view response_channel{response_channel_ptr, response_channel_length};
-            const std::string_view credentials = decoder.getEncodedCredentialsAsStringView();
-            const std::uint32_t client_info_length = decoder.clientInfoLength();
-            const char* client_info_ptr = decoder.clientInfo();
-            const std::string_view client_info{client_info_ptr, client_info_length};
-            const IngressImageInfo image_info = image_info_for(image_session_id);
-
-            handler_.on_session_connect(
-                decoder.correlationId(), decoder.responseStreamId(), decoder.version(), response_channel,
-                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(credentials.data()),
-                                              credentials.size()),
-                client_info, image_info);
-            break;
-        }
-
-        case header_codec::SessionCloseRequest::SBE_TEMPLATE_ID:
-        {
-            auto decoder =
-                deepmsg::cluster::common::wrap_body<header_codec::SessionCloseRequest>(message, *decoded_header);
-            handler_.on_session_close(decoder.leadershipTermId(), decoder.clusterSessionId());
-            break;
-        }
-
-        case header_codec::SessionKeepAlive::SBE_TEMPLATE_ID:
-        {
-            auto decoder =
-                deepmsg::cluster::common::wrap_body<header_codec::SessionKeepAlive>(message, *decoded_header);
-            handler_.on_session_keep_alive(decoder.leadershipTermId(), decoder.clusterSessionId(),
-                                           image_info_for(image_session_id).correlation_id);
-            break;
-        }
-
-        case header_codec::ChallengeResponse::SBE_TEMPLATE_ID:
-        {
-            auto decoder =
-                deepmsg::cluster::common::wrap_body<header_codec::ChallengeResponse>(message, *decoded_header);
-            const std::string_view credentials = decoder.getEncodedCredentialsAsStringView();
-            handler_.on_challenge_response(
-                decoder.correlationId(), decoder.clusterSessionId(),
-                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(credentials.data()),
-                                              credentials.size()));
-            break;
-        }
-
-        case header_codec::AdminRequest::SBE_TEMPLATE_ID:
-        {
-            auto decoder = deepmsg::cluster::common::wrap_body<header_codec::AdminRequest>(message, *decoded_header);
-            // `payload` is optional (`AdminRequest` schema, id 5). The Java
-            // decoder reads its length header past the fragment end into the
-            // larger client buffer; an exact-size span must not. A message
-            // that stops after the block means an empty payload.
-            std::span<const std::uint8_t> payload{};
-            if (message.size() >= decoder.sbePosition() + header_codec::AdminRequest::payloadHeaderLength())
+            case header_codec::SessionConnectRequest::SBE_TEMPLATE_ID:
             {
-                const std::string_view view = decoder.getPayloadAsStringView();
-                payload =
-                    std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(view.data()), view.size());
-            }
-            handler_.on_admin_request(decoder.leadershipTermId(), decoder.clusterSessionId(), decoder.correlationId(),
-                                      static_cast<std::int32_t>(decoder.requestType()), payload);
-            break;
-        }
+                auto decoder =
+                    deepmsg::cluster::common::wrap_body<header_codec::SessionConnectRequest>(message, *decoded_header);
+                auto response_channel = deepmsg::cluster::common::read_var_string(decoder, message);
+                auto credentials = deepmsg::cluster::common::read_var_bytes(decoder, message);
+                auto client_info = deepmsg::cluster::common::read_var_string(decoder, message);
+                if (!response_channel || !credentials || !client_info)
+                {
+                    error_ = !response_channel ? response_channel.error()
+                                               : (!credentials ? credentials.error() : client_info.error());
+                    return AERON_ACTION_ABORT;
+                }
+                const IngressImageInfo image_info = image_info_for(image_session_id);
 
-        default:
-            break;
+                handler_.on_session_connect(decoder.correlationId(), decoder.responseStreamId(), decoder.version(),
+                                            *response_channel, *credentials, *client_info, image_info);
+                break;
+            }
+
+            case header_codec::SessionCloseRequest::SBE_TEMPLATE_ID:
+            {
+                auto decoder =
+                    deepmsg::cluster::common::wrap_body<header_codec::SessionCloseRequest>(message, *decoded_header);
+                handler_.on_session_close(decoder.leadershipTermId(), decoder.clusterSessionId());
+                break;
+            }
+
+            case header_codec::SessionKeepAlive::SBE_TEMPLATE_ID:
+            {
+                auto decoder =
+                    deepmsg::cluster::common::wrap_body<header_codec::SessionKeepAlive>(message, *decoded_header);
+                handler_.on_session_keep_alive(decoder.leadershipTermId(), decoder.clusterSessionId(),
+                                               image_info_for(image_session_id).correlation_id);
+                break;
+            }
+
+            case header_codec::ChallengeResponse::SBE_TEMPLATE_ID:
+            {
+                auto decoder =
+                    deepmsg::cluster::common::wrap_body<header_codec::ChallengeResponse>(message, *decoded_header);
+                auto credentials = deepmsg::cluster::common::read_var_bytes(decoder, message);
+                if (!credentials)
+                {
+                    error_ = credentials.error();
+                    return AERON_ACTION_ABORT;
+                }
+                handler_.on_challenge_response(decoder.correlationId(), decoder.clusterSessionId(), *credentials);
+                break;
+            }
+
+            case header_codec::AdminRequest::SBE_TEMPLATE_ID:
+            {
+                auto decoder =
+                    deepmsg::cluster::common::wrap_body<header_codec::AdminRequest>(message, *decoded_header);
+                // `payload` is optional (`AdminRequest` schema, id 5). The Java
+                // decoder reads its length header past the fragment end into the
+                // larger client buffer; an exact-size span must not. A message
+                // that stops after the block means an empty payload.
+                std::span<const std::uint8_t> payload{};
+                if (message.size() >= decoder.sbePosition() + header_codec::AdminRequest::payloadHeaderLength())
+                {
+                    auto read = deepmsg::cluster::common::read_var_bytes(decoder, message);
+                    if (!read)
+                    {
+                        error_ = read.error();
+                        return AERON_ACTION_ABORT;
+                    }
+                    payload = *read;
+                }
+                handler_.on_admin_request(decoder.leadershipTermId(), decoder.clusterSessionId(),
+                                          decoder.correlationId(), static_cast<std::int32_t>(decoder.requestType()),
+                                          payload);
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        // The generated decoders throw on a malformed variable-length field;
+        // the poll call below this frame is C, so the exception is turned into
+        // the pass-ending error here instead.
+        error_ = make_error(ErrorCode::protocol_error, exception.what());
+        return AERON_ACTION_ABORT;
     }
 
     return AERON_ACTION_CONTINUE;

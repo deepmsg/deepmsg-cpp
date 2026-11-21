@@ -499,4 +499,78 @@ TEST_F(IngressAdapterTest, backPressureAbortsThePoll)
     EXPECT_EQ(1, handler_.messages);
 }
 
+TEST_F(IngressAdapterTest, aTruncatedBodyIsRejected)
+{
+    // The ingress subscription is the network-facing surface: a client can send
+    // a header that declares a SessionConnectRequest block but stops short of
+    // it. The generated decoder throws from `sbeCheckPosition`; the adapter has
+    // to answer an error and never let the throw leave the C callback.
+    std::vector<std::uint8_t> truncated(codecs::MessageHeader::encodedLength() + 2, 0);
+    codecs::MessageHeader header;
+    header.wrap(reinterpret_cast<char*>(truncated.data()), 0, codecs::MessageHeader::sbeSchemaVersion(),
+                truncated.size());
+    header.blockLength(codecs::SessionConnectRequest::sbeBlockLength())
+        .templateId(codecs::SessionConnectRequest::sbeTemplateId())
+        .schemaId(deepmsg::cluster::common::SBE_SCHEMA_ID)
+        .version(codecs::SessionConnectRequest::sbeSchemaVersion());
+
+    publish(truncated);
+
+    std::optional<axc::core::Error> rejected;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!rejected.has_value() && std::chrono::steady_clock::now() < deadline)
+    {
+        (void)client_->do_work();
+        auto polled = adapter_->poll();
+        if (!polled)
+        {
+            rejected = polled.error();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(rejected.has_value()) << "the truncated frame was not rejected";
+    EXPECT_EQ(axc::core::ErrorCode::protocol_error, rejected->code);
+    EXPECT_EQ(0, handler_.connects);
+}
+
+TEST_F(IngressAdapterTest, aVariableLengthFieldPastTheEndIsRejected)
+{
+    constexpr std::uint32_t OVERSIZED = 0x7F7F7F7FU;
+    const std::size_t block = codecs::SessionConnectRequest::sbeBlockLength();
+    std::vector<std::uint8_t> message(codecs::MessageHeader::encodedLength() + block + sizeof(OVERSIZED), 0);
+
+    codecs::MessageHeader header;
+    header.wrap(reinterpret_cast<char*>(message.data()), 0, codecs::MessageHeader::sbeSchemaVersion(), message.size());
+    header.blockLength(block)
+        .templateId(codecs::SessionConnectRequest::sbeTemplateId())
+        .schemaId(deepmsg::cluster::common::SBE_SCHEMA_ID)
+        .version(codecs::SessionConnectRequest::sbeSchemaVersion());
+
+    const std::size_t length_offset = codecs::MessageHeader::encodedLength() + block;
+    for (std::size_t index = 0; index < sizeof(OVERSIZED); ++index)
+    {
+        message[length_offset + index] = static_cast<std::uint8_t>((OVERSIZED >> (8 * index)) & 0xFFU);
+    }
+
+    publish(message);
+
+    std::optional<axc::core::Error> rejected;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!rejected.has_value() && std::chrono::steady_clock::now() < deadline)
+    {
+        (void)client_->do_work();
+        auto polled = adapter_->poll();
+        if (!polled)
+        {
+            rejected = polled.error();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(rejected.has_value()) << "the oversized variable-length field was not rejected";
+    EXPECT_EQ(axc::core::ErrorCode::protocol_error, rejected->code);
+    EXPECT_EQ(0, handler_.connects);
+}
+
 }  // namespace
