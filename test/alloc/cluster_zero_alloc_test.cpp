@@ -30,8 +30,10 @@
 #include "archive/server/archive_launch.h"
 #include "cluster/client/async_connect.h"
 #include "cluster/client/cluster_client.h"
+#include "cluster/common/cluster_member.h"
 #include "cluster/consensus/consensus_module_agent.h"
 #include "cluster/consensus/consensus_module_context.h"
+#include "cluster/consensus/consensus_publisher.h"
 #include "cluster/service/clustered_service_agent.h"
 #include "cluster/service/container_config.h"
 #include "core/deepmsg/deepmsg_client.h"
@@ -417,6 +419,84 @@ TEST_F(ClusterZeroAllocTest, steadyStateEchoDoesNotAllocate)
     EXPECT_EQ(WARMUP_MESSAGES + MEASURED_MESSAGES, listener_.received.load(std::memory_order_acquire));
     EXPECT_EQ(0, count(Label::cm)) << "the consensus module allocated in steady state";
     EXPECT_EQ(0, count(Label::container)) << "the container allocated in steady state";
+}
+
+// The single-member gate above never calls `ConsensusPublisher` (a single
+// member commits from its own archive), so a per-message `std::vector` hid
+// there. This case drives the publisher's steady-state sends directly: the
+// fixed frames must be claimed, not allocated.
+TEST(ConsensusPublisherAllocationTest, theFixedSendsDoNotAllocate)
+{
+    EmbeddedDriver driver;
+    ASSERT_TRUE(driver.started());
+
+    auto connected = DeepmsgClient::connect({driver.dir(), true});
+    ASSERT_TRUE(connected) << connected.error().message.view();
+    DeepmsgClient& client = *connected;
+
+    constexpr std::int32_t CONSENSUS_STREAM_ID = 4321;
+    auto add = client.add_subscription("aeron:ipc?term-length=64k", CONSENSUS_STREAM_ID);
+    std::optional<axc::core::SubPtr> subscription;
+    const auto subscribe_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!subscription && std::chrono::steady_clock::now() < subscribe_deadline)
+    {
+        (void)client.do_work();
+        auto polled = add.poll();
+        if (polled && polled->has_value())
+        {
+            subscription = std::move(**polled);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(subscription) << "the consensus subscription never appeared";
+
+    deepmsg::cluster::consensus::ConsensusPublisher publisher(client, "aeron:ipc?term-length=64k", CONSENSUS_STREAM_ID,
+                                                              "", false);
+    deepmsg::cluster::common::ClusterMember member;
+    member.id = 0;
+    ASSERT_TRUE(publisher.add_publication(member)) << publisher.add_publication(member).error().message.view();
+
+    const auto drain_fragments = [&subscription, &client]()
+    {
+        (void)aeron_subscription_poll(
+            subscription->get(), [](void*, const std::uint8_t*, std::size_t, aeron_header_t*) {}, nullptr, 100);
+        (void)client.do_work();
+    };
+
+    // Warm up until the publication is connected and the claim path is hot.
+    std::int64_t sent = 0;
+    const auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!publisher.commit_position(0, 1, sent, 0) && std::chrono::steady_clock::now() < connect_deadline)
+    {
+        drain_fragments();
+    }
+    ASSERT_TRUE(publisher.commit_position(0, 1, sent, 0)) << "the consensus publication never connected";
+
+    axc::alloc_test::label_thread("cm");
+    for (int warm = 0; warm < 5'000; ++warm)
+    {
+        while (!publisher.commit_position(0, 1, sent, 0))
+        {
+            drain_fragments();
+        }
+        ++sent;
+        drain_fragments();
+    }
+
+    axc::alloc_test::reset();
+    constexpr std::int64_t MEASURED = 100'000;
+    std::int64_t measured = 0;
+    while (measured < MEASURED)
+    {
+        if (publisher.commit_position(0, 1, sent, 0))
+        {
+            ++measured;
+            ++sent;
+        }
+        drain_fragments();
+    }
+
+    EXPECT_EQ(0, count(Label::cm)) << "ConsensusPublisher allocated in steady state";
 }
 
 }  // namespace

@@ -146,49 +146,46 @@ void ConsensusPublisher::canvass_position(std::int32_t member_id, std::int64_t l
                                           std::int64_t log_position, std::int64_t leadership_term_id,
                                           std::int32_t follower_member_id)
 {
-    const auto buffer = encode<codecs::CanvassPosition>(
-        [&](codecs::CanvassPosition& encoder)
-        {
-            encoder.logLeadershipTermId(log_leadership_term_id)
-                .logPosition(log_position)
-                .leadershipTermId(leadership_term_id)
-                .followerMemberId(follower_member_id)
-                .protocolVersion(CLUSTER_PROTOCOL_SEMANTIC_VERSION);
-        });
-    (void)offer(member_id, buffer);
+    (void)send<codecs::CanvassPosition>(member_id,
+                                        [&](codecs::CanvassPosition& encoder)
+                                        {
+                                            encoder.logLeadershipTermId(log_leadership_term_id)
+                                                .logPosition(log_position)
+                                                .leadershipTermId(leadership_term_id)
+                                                .followerMemberId(follower_member_id)
+                                                .protocolVersion(CLUSTER_PROTOCOL_SEMANTIC_VERSION);
+                                        });
 }
 
 bool ConsensusPublisher::request_vote(std::int32_t member_id, std::int64_t log_leadership_term_id,
                                       std::int64_t log_position, std::int64_t candidate_term_id,
                                       std::int32_t candidate_member_id)
 {
-    const auto buffer = encode<codecs::RequestVote>(
-        [&](codecs::RequestVote& encoder)
-        {
-            encoder.logLeadershipTermId(log_leadership_term_id)
-                .logPosition(log_position)
-                .candidateTermId(candidate_term_id)
-                .candidateMemberId(candidate_member_id)
-                .protocolVersion(CLUSTER_PROTOCOL_SEMANTIC_VERSION);
-        });
-    return offer(member_id, buffer);
+    return send<codecs::RequestVote>(member_id,
+                                     [&](codecs::RequestVote& encoder)
+                                     {
+                                         encoder.logLeadershipTermId(log_leadership_term_id)
+                                             .logPosition(log_position)
+                                             .candidateTermId(candidate_term_id)
+                                             .candidateMemberId(candidate_member_id)
+                                             .protocolVersion(CLUSTER_PROTOCOL_SEMANTIC_VERSION);
+                                     });
 }
 
 void ConsensusPublisher::place_vote(std::int32_t member_id, std::int64_t candidate_term_id,
                                     std::int64_t log_leadership_term_id, std::int64_t log_position,
                                     std::int32_t candidate_member_id, std::int32_t follower_member_id, bool vote)
 {
-    const auto buffer = encode<codecs::Vote>(
-        [&](codecs::Vote& encoder)
-        {
-            encoder.candidateTermId(candidate_term_id)
-                .logLeadershipTermId(log_leadership_term_id)
-                .logPosition(log_position)
-                .candidateMemberId(candidate_member_id)
-                .followerMemberId(follower_member_id)
-                .vote(vote ? codecs::BooleanType::TRUE : codecs::BooleanType::FALSE);
-        });
-    (void)offer(member_id, buffer);
+    (void)send<codecs::Vote>(member_id,
+                             [&](codecs::Vote& encoder)
+                             {
+                                 encoder.candidateTermId(candidate_term_id)
+                                     .logLeadershipTermId(log_leadership_term_id)
+                                     .logPosition(log_position)
+                                     .candidateMemberId(candidate_member_id)
+                                     .followerMemberId(follower_member_id)
+                                     .vote(vote ? codecs::BooleanType::TRUE : codecs::BooleanType::FALSE);
+                             });
 }
 
 void ConsensusPublisher::new_leadership_term(std::int32_t member_id, std::int64_t log_leadership_term_id,
@@ -224,15 +221,14 @@ void ConsensusPublisher::new_leadership_term(std::int32_t member_id, std::int64_
 bool ConsensusPublisher::append_position(std::int32_t member_id, std::int64_t leadership_term_id,
                                          std::int64_t log_position, std::int32_t follower_member_id, std::int16_t flags)
 {
-    const auto buffer = encode<codecs::AppendPosition>(
-        [&](codecs::AppendPosition& encoder)
-        {
-            encoder.leadershipTermId(leadership_term_id)
-                .logPosition(log_position)
-                .followerMemberId(follower_member_id)
-                .flags(static_cast<std::uint8_t>(flags));
-        });
-    return offer(member_id, buffer);
+    return send<codecs::AppendPosition>(member_id,
+                                        [&](codecs::AppendPosition& encoder)
+                                        {
+                                            encoder.leadershipTermId(leadership_term_id)
+                                                .logPosition(log_position)
+                                                .followerMemberId(follower_member_id)
+                                                .flags(static_cast<std::uint8_t>(flags));
+                                        });
 }
 
 bool ConsensusPublisher::catchup_position(std::int32_t member_id, std::int64_t leadership_term_id,
@@ -307,37 +303,33 @@ bool ConsensusPublisher::challenge_response(std::int32_t member_id, std::int64_t
 bool ConsensusPublisher::stop_catchup(std::int32_t member_id, std::int64_t leadership_term_id,
                                       std::int32_t follower_member_id)
 {
-    const auto buffer = encode<codecs::StopCatchup>(
-        [&](codecs::StopCatchup& encoder)
+    return send<codecs::StopCatchup>(
+        member_id, [&](codecs::StopCatchup& encoder)
         { encoder.leadershipTermId(leadership_term_id).followerMemberId(follower_member_id); });
-    return offer(member_id, buffer);
 }
 
 bool ConsensusPublisher::commit_position(std::int32_t member_id, std::int64_t leadership_term_id,
                                          std::int64_t log_position, std::int32_t leader_member_id)
 {
-    const auto buffer = encode<codecs::CommitPosition>(
-        [&](codecs::CommitPosition& encoder)
+    return send<codecs::CommitPosition>(
+        member_id, [&](codecs::CommitPosition& encoder)
         { encoder.leadershipTermId(leadership_term_id).logPosition(log_position).leaderMemberId(leader_member_id); });
-    return offer(member_id, buffer);
 }
 
 bool ConsensusPublisher::termination_position(std::int32_t member_id, std::int64_t leadership_term_id,
                                               std::int64_t log_position)
 {
-    const auto buffer = encode<codecs::TerminationPosition>(
-        [&](codecs::TerminationPosition& encoder)
+    return send<codecs::TerminationPosition>(
+        member_id, [&](codecs::TerminationPosition& encoder)
         { encoder.leadershipTermId(leadership_term_id).logPosition(log_position); });
-    return offer(member_id, buffer);
 }
 
 bool ConsensusPublisher::termination_ack(std::int32_t member_id, std::int64_t leadership_term_id,
                                          std::int64_t log_position, std::int32_t member_id_ack)
 {
-    const auto buffer = encode<codecs::TerminationAck>(
-        [&](codecs::TerminationAck& encoder)
+    return send<codecs::TerminationAck>(
+        member_id, [&](codecs::TerminationAck& encoder)
         { encoder.leadershipTermId(leadership_term_id).logPosition(log_position).memberId(member_id_ack); });
-    return offer(member_id, buffer);
 }
 
 }  // namespace deepmsg::cluster::consensus
