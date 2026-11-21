@@ -135,6 +135,11 @@ void ReplicationSession::close()
     // `:196-213`: stop the destination subscription and the source replay,
     // release the source client, then signal `REPLICATE_END` exactly once.
     const bool had_recording_session = NULL_VALUE != recording_subscription_id_;
+    if (nullptr != image_)
+    {
+        control_->release_image(image_);
+        image_ = nullptr;
+    }
     stop_recording();
     stop_replay_session();
 
@@ -577,6 +582,11 @@ int ReplicationSession::await_image()
 {
     // `:750-790`: the destination subscription must expose the replay
     // publication's image under the source replay session id (low 32 bits).
+    if (nullptr != image_)
+    {
+        control_->release_image(image_);
+        image_ = nullptr;
+    }
     image_ =
         control_->image_by_session_id(recording_subscription_id_, static_cast<std::int32_t>(src_replay_session_id_));
     if (nullptr != image_)

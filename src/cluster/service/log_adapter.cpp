@@ -78,9 +78,9 @@ void BoundedLogAdapter::set_image(aeron_subscription_t* subscription, aeron_imag
 
 void BoundedLogAdapter::clear_image() noexcept
 {
-    if (nullptr != image_ && nullptr != subscription_)
+    if (nullptr != image_)
     {
-        (void)aeron_subscription_image_release(subscription_, image_);
+        (void)aeron_image_release(image_);
     }
     image_ = nullptr;
     subscription_ = nullptr;

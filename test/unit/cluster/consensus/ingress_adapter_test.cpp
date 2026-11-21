@@ -42,6 +42,10 @@ using deepmsg::cluster::consensus::IngressAdapter;
 using deepmsg::cluster::consensus::IngressHandler;
 using deepmsg::cluster::consensus::IngressImageInfo;
 
+// Exported by libaeron but not in its public header; the reference count is
+// how a test can see an image that the adapter failed to release.
+extern "C" std::int64_t aeron_image_refcnt_acquire(aeron_image_t* image);
+
 constexpr std::int32_t STREAM_ID = 9101;
 constexpr std::int64_t LEADERSHIP_TERM_ID = 5;
 constexpr std::int64_t CLUSTER_SESSION_ID = 31;
@@ -254,6 +258,7 @@ protected:
         ASSERT_TRUE(subscription.has_value());
 
         adapter_ = std::make_unique<IngressAdapter>(handler_, 50);
+        subscription_raw_ = subscription->get();
         adapter_->connect(std::move(*subscription), {});
     }
 
@@ -298,6 +303,7 @@ protected:
     EmbeddedDriver driver_{};
     std::optional<DeepmsgClient> client_{};
     PubPtr publication_{};
+    aeron_subscription_t* subscription_raw_{nullptr};
     RecordingHandler handler_{};
     std::unique_ptr<IngressAdapter> adapter_{};
 };
@@ -328,6 +334,51 @@ TEST_F(IngressAdapterTest, aSessionConnectRequestIsDecoded)
     aeron_publication_constants_t constants{};
     ASSERT_EQ(0, aeron_publication_constants(publication_.get(), &constants));
     EXPECT_EQ(constants.session_id, handler_.connect_image_session);
+}
+
+TEST_F(IngressAdapterTest, readingTheImageInfoDoesNotKeepTheImageReference)
+{
+    // `aeron_subscription_image_by_session_id` retains; the adapter has to give
+    // the reference back or the term buffer stays mapped after the client goes
+    // (the C client deletes an image only when its refcount reaches zero).
+    const std::size_t length = codecs::MessageHeader::encodedLength() +
+                               codecs::SessionConnectRequest::computeLength(std::string_view{"aeron:ipc"}.size(), 3, 5);
+    std::vector<std::uint8_t> message(length);
+    codecs::SessionConnectRequest encoder;
+    encoder.wrapAndApplyHeader(reinterpret_cast<char*>(message.data()), 0, message.size());
+    encoder.correlationId(11).responseStreamId(8001).version(768);
+    encoder.putResponseChannel(std::string_view{"aeron:ipc"});
+    encoder.putEncodedCredentials(std::string_view{"abc"});
+    encoder.putClientInfo(std::string_view{"probe"});
+    publish(message);
+    pump(1);
+
+    aeron_publication_constants_t constants{};
+    ASSERT_EQ(0, aeron_publication_constants(publication_.get(), &constants));
+    const std::int32_t session_id = constants.session_id;
+
+    aeron_image_t* image = nullptr;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (nullptr == image && std::chrono::steady_clock::now() < deadline)
+    {
+        (void)client_->do_work();
+        if (0 < aeron_subscription_image_count(subscription_raw_))
+        {
+            image = aeron_subscription_image_by_session_id(subscription_raw_, session_id);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_NE(nullptr, image) << "the IPC image never appeared";
+
+    const std::int64_t before = aeron_image_refcnt_acquire(image);
+
+    // One more decoded SessionConnectRequest calls `image_info_for` once.
+    publish(message);
+    pump(2);
+
+    const std::int64_t after = aeron_image_refcnt_acquire(image);
+    EXPECT_EQ(before, after) << "the connect path kept " << (after - before) << " reference(s) alive";
+    (void)aeron_image_release(image);
 }
 
 TEST_F(IngressAdapterTest, aSessionMessageIsDecodedWithItsPayload)

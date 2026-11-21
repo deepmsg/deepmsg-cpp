@@ -43,9 +43,9 @@ LogAdapter::~LogAdapter()
 std::int64_t LogAdapter::disconnect()
 {
     log_position_ = position();
-    if (nullptr != subscription_ && nullptr != image_)
+    if (nullptr != image_)
     {
-        (void)aeron_subscription_image_release(subscription_, image_);
+        (void)aeron_image_release(image_);
     }
     image_ = nullptr;
     subscription_ = nullptr;
@@ -67,9 +67,9 @@ std::int64_t LogAdapter::position() const
 
 void LogAdapter::image(aeron_image_t* image)
 {
-    if (nullptr != image_ && image_ != image && nullptr != subscription_)
+    if (nullptr != image_ && image_ != image)
     {
-        (void)aeron_subscription_image_release(subscription_, image_);
+        (void)aeron_image_release(image_);
     }
     image_ = image;
 }

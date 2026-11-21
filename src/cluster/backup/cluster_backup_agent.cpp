@@ -24,6 +24,7 @@
 // (`ConsensusModuleAgent` includes it the same way).
 extern "C"
 {
+#include <client/aeron_archive_async_connect.h>
 #include <client/aeron_archive_client.h>
 }
 
@@ -1028,13 +1029,18 @@ void ClusterBackupAgent::reset()
     consensus_publications_->shuffle();
     if (nullptr != cluster_archive_async_connect_)
     {
-        (void)aeron_archive_async_connect_poll(&cluster_archive_, cluster_archive_async_connect_);
+        aeron_archive_async_connect_delete(cluster_archive_async_connect_);
         cluster_archive_async_connect_ = nullptr;
     }
     if (nullptr != cluster_archive_)
     {
         (void)aeron_archive_close(cluster_archive_);
         cluster_archive_ = nullptr;
+    }
+    if (nullptr != cluster_archive_context_)
+    {
+        (void)aeron_archive_context_close(cluster_archive_context_);
+        cluster_archive_context_ = nullptr;
     }
     recording_subscription_.reset();
 }
@@ -1420,7 +1426,7 @@ void ClusterBackupAgent::on_close() noexcept
     }
     if (nullptr != cluster_archive_async_connect_)
     {
-        (void)aeron_archive_async_connect_poll(&cluster_archive_, cluster_archive_async_connect_);
+        aeron_archive_async_connect_delete(cluster_archive_async_connect_);
         cluster_archive_async_connect_ = nullptr;
     }
     if (nullptr != cluster_archive_)

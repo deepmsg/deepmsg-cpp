@@ -2350,16 +2350,19 @@ std::expected<void, Error> ConsensusModuleAgent::load_snapshot(const common::Rec
         auto polled = adapter.poll(image, *this);
         if (!polled)
         {
+            (void)aeron_image_release(image);
             (void)aeron_archive_stop_replay(archive_, replay_session_id);
             return std::unexpected(polled.error());
         }
         (void)client_.do_work();
         if (aeron_image_is_closed(image) && !adapter.is_done())
         {
+            (void)aeron_image_release(image);
             (void)aeron_archive_stop_replay(archive_, replay_session_id);
             return std::unexpected(make_error(ErrorCode::protocol_error, "snapshot ended unexpectedly"));
         }
     }
+    (void)aeron_image_release(image);
     (void)aeron_archive_stop_replay(archive_, replay_session_id);
 
     for (PendingServiceMessageTracker& tracker : pending_service_message_trackers_)

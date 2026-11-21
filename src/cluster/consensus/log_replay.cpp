@@ -105,6 +105,7 @@ int LogReplay::do_work()
         (void)aeron_image_constants(image, &image_constants);
         if (image_constants.join_position != start_position_)
         {
+            (void)aeron_image_release(image);
             host_->on_log_replay_error(
                 axc::core::make_error(axc::core::ErrorCode::protocol_error,
                                       "joinPosition=" + std::to_string(image_constants.join_position) +

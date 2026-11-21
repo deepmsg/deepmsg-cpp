@@ -133,12 +133,14 @@ IngressImageInfo IngressAdapter::image_info_for(std::int32_t image_session_id) c
     aeron_image_constants_t constants{};
     if (0 != aeron_image_constants(image, &constants))
     {
+        (void)aeron_image_release(image);
         return info;
     }
 
     info.correlation_id = constants.correlation_id;
     info.source_identity = nullptr == constants.source_identity ? std::string{} : constants.source_identity;
     info.session_id = image_session_id;
+    (void)aeron_image_release(image);
     return info;
 }
 

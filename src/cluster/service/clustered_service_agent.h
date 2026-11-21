@@ -657,7 +657,7 @@ std::expected<typename ClusteredServiceAgent<S>::LoadedSnapshot, Error> Clustere
         auto work = loader.poll(image, handler);
         if (!work)
         {
-            (void)aeron_subscription_image_release(subscription.get(), image);
+            (void)aeron_image_release(image);
             return std::unexpected(work.error());
         }
 
@@ -666,12 +666,12 @@ std::expected<typename ClusteredServiceAgent<S>::LoadedSnapshot, Error> Clustere
             auto checked = archive->check_error();
             if (!checked)
             {
-                (void)aeron_subscription_image_release(subscription.get(), image);
+                (void)aeron_image_release(image);
                 return std::unexpected(checked.error());
             }
             if (aeron_image_is_closed(image))
             {
-                (void)aeron_subscription_image_release(subscription.get(), image);
+                (void)aeron_image_release(image);
                 return std::unexpected(axc::core::make_error(
                     axc::core::ErrorCode::protocol_error,
                     "snapshot recordingId=" + std::to_string(recording_id) + " ended unexpectedly"));
@@ -681,7 +681,7 @@ std::expected<typename ClusteredServiceAgent<S>::LoadedSnapshot, Error> Clustere
         auto idled = context_->idle(*client_, *work);
         if (!idled)
         {
-            (void)aeron_subscription_image_release(subscription.get(), image);
+            (void)aeron_image_release(image);
             return std::unexpected(idled.error());
         }
     }
@@ -689,7 +689,7 @@ std::expected<typename ClusteredServiceAgent<S>::LoadedSnapshot, Error> Clustere
     constexpr auto MAJOR = [](std::int32_t version) { return (version >> 16) & 0xFF; };
     if (MAJOR(loader.app_version()) != MAJOR(config_.app_version))
     {
-        (void)aeron_subscription_image_release(subscription.get(), image);
+        (void)aeron_image_release(image);
         return std::unexpected(
             axc::core::make_error(axc::core::ErrorCode::protocol_error,
                                   "incompatible app version: container=" + std::to_string(config_.app_version) +
@@ -923,7 +923,7 @@ std::expected<void, Error> ClusteredServiceAgent<S>::recover_state()
 
     if (loaded.has_value())
     {
-        (void)aeron_subscription_image_release(loaded->subscription.get(), loaded->image);
+        (void)aeron_image_release(loaded->image);
         loaded->subscription.reset();
     }
 
@@ -1333,14 +1333,14 @@ std::expected<void, Error> ClusteredServiceAgent<S>::join_active_log(const JoinL
     aeron_image_constants_t constants{};
     if (0 != aeron_image_constants(image, &constants))
     {
-        (void)aeron_subscription_image_release(log_subscription_.get(), image);
+        (void)aeron_image_release(image);
         return std::unexpected(
             axc::core::make_error(axc::core::ErrorCode::internal_error, "log image constants are unavailable"));
     }
 
     if (constants.join_position != log_position_)
     {
-        (void)aeron_subscription_image_release(log_subscription_.get(), image);
+        (void)aeron_image_release(image);
         return std::unexpected(axc::core::make_error(
             axc::core::ErrorCode::protocol_error,
             "Cluster log must be contiguous for joining image: expectedPosition=" + std::to_string(log_position_) +
@@ -1348,7 +1348,7 @@ std::expected<void, Error> ClusteredServiceAgent<S>::join_active_log(const JoinL
     }
     if (event.log_position != log_position_)
     {
-        (void)aeron_subscription_image_release(log_subscription_.get(), image);
+        (void)aeron_image_release(image);
         return std::unexpected(axc::core::make_error(
             axc::core::ErrorCode::protocol_error,
             "Cluster log must be contiguous for active log event: expectedPosition=" + std::to_string(log_position_) +
