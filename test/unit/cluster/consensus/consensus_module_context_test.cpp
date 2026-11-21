@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "cluster/consensus/consensus_module_context.h"
@@ -305,6 +306,49 @@ TEST_F(ConsensusModuleContextTest, configFromPropertiesReadsTheAuthorisationSupp
     auto config = consensus_module_config_from_properties(properties);
     ASSERT_TRUE(config) << config.error().message.view();
     EXPECT_EQ(AuthorisationServiceKind::deny_all, config->authorisation_service_kind);
+}
+
+TEST_F(ConsensusModuleContextTest, theDeleteOnStartPropertyIsParsedAndDeletesTheClusterDirectory)
+{
+    const std::string cluster_dir = directory_ + "/cluster";
+    const std::string marker = cluster_dir + "/keep.txt";
+    ASSERT_TRUE(std::filesystem::create_directories(cluster_dir));
+    {
+        std::ofstream out{marker};
+        ASSERT_TRUE(out.good());
+        out << "x";
+    }
+
+    PropertySource properties;
+    properties.set("aeron.cluster.dir", cluster_dir);
+    properties.set("aeron.cluster.dir.delete.on.start", "true");
+    properties.set("aeron.cluster.members", MEMBERS);
+    properties.set("aeron.cluster.ingress.channel", "aeron:ipc");
+    properties.set("aeron.cluster.replication.channel", "aeron:udp");
+
+    auto config = consensus_module_config_from_properties(properties);
+    ASSERT_TRUE(config) << config.error().message.view();
+    EXPECT_TRUE(config->delete_dir_on_start);
+    // The directory itself is re-created by `conclude`, the old content is not.
+    EXPECT_FALSE(std::filesystem::exists(marker));
+    EXPECT_TRUE(std::filesystem::exists(cluster_dir));
+}
+
+TEST_F(ConsensusModuleContextTest, theClusterDirectoryIsKeptWithoutDeleteOnStart)
+{
+    const std::string cluster_dir = directory_ + "/cluster";
+    const std::string marker = cluster_dir + "/keep.txt";
+    ASSERT_TRUE(std::filesystem::create_directories(cluster_dir));
+    {
+        std::ofstream out{marker};
+        ASSERT_TRUE(out.good());
+        out << "x";
+    }
+
+    auto config = valid_config();
+    auto concluded = config.conclude();
+    ASSERT_TRUE(concluded) << concluded.error().message.view();
+    EXPECT_TRUE(std::filesystem::exists(marker));
 }
 
 }  // namespace
