@@ -11,7 +11,8 @@ axc::core::NameTable cluster_name_table()
         "aeron.cluster.accept.standby.snapshots",
         "premium standby produces them; this implementation keeps the shell and does not replicate");
     table.add_honoured("aeron.cluster.appointed.leader.id");
-    table.add_honoured("aeron.cluster.authenticator.supplier");
+    table.add_accepted_ignored("aeron.cluster.authenticator.supplier",
+                               "a custom class cannot be loaded; the default authenticator is used");
     table.add_honoured("aeron.cluster.authorisation.service.supplier");
     table.add_honoured("aeron.cluster.backup.catchup.channel");
     table.add_honoured("aeron.cluster.backup.catchup.endpoint");
@@ -21,7 +22,8 @@ axc::core::NameTable cluster_name_table()
     table.add_honoured("aeron.cluster.backup.response.timeout");
     table.add_honoured("aeron.cluster.backup.source.type");
     table.add_honoured("aeron.cluster.client.name");
-    table.add_honoured("aeron.cluster.clock");
+    table.add_accepted_ignored("aeron.cluster.clock",
+                               "the cluster time unit is milliseconds; a nanos cluster is refused at snapshot load");
     table.add_honoured("aeron.cluster.consensus.channel");
     table.add_honoured("aeron.cluster.consensus.control.enable");
     table.add_honoured("aeron.cluster.consensus.endpoints");
@@ -32,7 +34,7 @@ axc::core::NameTable cluster_name_table()
     table.add_honoured("aeron.cluster.consensus.module.stream.id");
     table.add_honoured("aeron.cluster.consensus.stream.id");
     table.add_honoured("aeron.cluster.control.channel");
-    table.add_honoured("aeron.cluster.cpu.affinity");
+    table.add_accepted_ignored("aeron.cluster.cpu.affinity", "thread affinity is not applied by the module");
     table.add_honoured("aeron.cluster.cycle.threshold");
     table.add_honoured("aeron.cluster.dir");
     table.add_honoured("aeron.cluster.egress.channel");
@@ -69,9 +71,11 @@ axc::core::NameTable cluster_name_table()
     table.add_honoured("aeron.cluster.replication.progress.timeout");
     table.add_honoured("aeron.cluster.service.class.name");
     table.add_honoured("aeron.cluster.service.count");
-    table.add_honoured("aeron.cluster.service.cpu.affinity");
+    table.add_accepted_ignored("aeron.cluster.service.cpu.affinity",
+                               "thread affinity is not applied by the container");
     table.add_honoured("aeron.cluster.service.cycle.threshold");
-    table.add_honoured("aeron.cluster.service.delegating.error.handler");
+    table.add_accepted_ignored("aeron.cluster.service.delegating.error.handler",
+                               "no delegating error handler; errors go to the error log");
     table.add_honoured("aeron.cluster.service.error.buffer.length");
     table.add_honoured("aeron.cluster.service.id");
     table.add_honoured("aeron.cluster.service.name");

@@ -36,6 +36,16 @@ while read -r app_main; do
     fi
 done < <(find apps -name 'main.cpp')
 
+# A name declared `honoured` must have a reader: the disposition is the promise
+# that the property changes behaviour. `cluster_config_test` only asserts the
+# enumeration, so this is the check that keeps the table honest.
+while read -r honoured_name; do
+    if ! grep -rqF "\"${honoured_name}\"" src apps tools --include='*.cpp' --include='*.h' --exclude='cluster_config.cpp'; then
+        echo "check: honoured config ${honoured_name} is not read anywhere" >&2
+        exit 1
+    fi
+done < <(sed -n 's/^[[:space:]]*table\.add_honoured("\([^"]*\)").*/\1/p' src/cluster/common/cluster_config.cpp)
+
 presets=("$@")
 if [ ${#presets[@]} -eq 0 ]; then
     presets=(debug)
