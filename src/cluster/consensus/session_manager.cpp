@@ -442,7 +442,12 @@ int SessionManager::check_sessions(std::int64_t now_ns_value, std::int64_t leade
         }
         else if (session->has_open_event_pending())
         {
-            if (egress_publisher_.send_event(*session, leadership_term_id, leader_member_id, codecs::EventCode::OK, {}))
+            // `ClusterSession.connect` is synchronous in the reference
+            // (`SessionManager.prepareSessionsForNewTerm` calls it directly);
+            // ours starts an asynchronous add, so the pending registration is
+            // polled here before the event is encoded.
+            if (session->is_response_publication_connected(client_, now_ns_value) &&
+                egress_publisher_.send_event(*session, leadership_term_id, leader_member_id, codecs::EventCode::OK, {}))
             {
                 session->clear_open_event_pending();
                 work_count += 1;
@@ -450,7 +455,8 @@ int SessionManager::check_sessions(std::int64_t now_ns_value, std::int64_t leade
         }
         else if (session->has_new_leader_event_pending())
         {
-            if (egress_publisher_.new_leader(*session, leadership_term_id, leader_member_id, ingress_endpoints))
+            if (session->is_response_publication_connected(client_, now_ns_value) &&
+                egress_publisher_.new_leader(*session, leadership_term_id, leader_member_id, ingress_endpoints))
             {
                 session->has_new_leader_event_pending(false);
                 work_count += 1;

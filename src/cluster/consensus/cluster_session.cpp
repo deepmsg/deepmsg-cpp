@@ -175,12 +175,14 @@ bool ClusterSession::is_response_publication_connected(axc::core::DeepmsgClient&
         response_publication_ = std::move(**polled);
     }
 
+    bool counter_just_allocated = false;
     if (counter_add_.pending())
     {
         auto polled = counter_add_.poll();
         if (polled && polled->has_value())
         {
             session_counter_ = std::move(**polled);
+            counter_just_allocated = true;
         }
     }
 
@@ -189,17 +191,22 @@ bool ClusterSession::is_response_publication_connected(axc::core::DeepmsgClient&
         return false;
     }
 
+    // The publication and the counter are two asynchronous conductor commands;
+    // the counter can arrive after the state has left INIT (`connect` is one
+    // synchronous step in the reference, `SessionManager.java:487-496`), so the
+    // counter is linked on the pass it is allocated as well.
+    if (session_counter_ && (SessionState::init == state_ || counter_just_allocated))
+    {
+        aeron_publication_constants_t constants{};
+        if (0 == aeron_publication_constants(response_publication_.get(), &constants))
+        {
+            set_counter_reference_id(session_counter_.get(), constants.registration_id);
+        }
+        set_counter_value(id_);
+    }
+
     if (SessionState::init == state_)
     {
-        if (session_counter_)
-        {
-            aeron_publication_constants_t constants{};
-            if (0 == aeron_publication_constants(response_publication_.get(), &constants))
-            {
-                set_counter_reference_id(session_counter_.get(), constants.registration_id);
-            }
-            set_counter_value(id_);
-        }
         time_of_last_activity_ns_ = now_ns;
         state(SessionState::connecting, "connecting");
     }

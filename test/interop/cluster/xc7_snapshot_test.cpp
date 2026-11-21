@@ -366,15 +366,15 @@ TEST_F(Xc7SnapshotTest, shouldRecoverWhenLastSnapshotIsMarkedInvalid)
     restart_node(round_, leader, false);
     ASSERT_TRUE(wait_for_node_active(leader, std::chrono::seconds(30))) << node_dump();
 
-    // The leadership moved: a new session is the one that survives the change
-    // (the old one never gets a NewLeaderEvent, records/c6c-2.md S3).
-    session.close();
-    ClusterClientSession second;
-    ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
-    ASSERT_TRUE(send_ints(second, 3, 7, 0)) << node_dump();
+    // The leadership moved: the reference keeps the same session across the
+    // change — it receives the NewLeaderEvent and sends again
+    // (`SessionManager.checkSessions`, `SessionManager.java:916-924`).
+    ASSERT_TRUE(session.pump_until([&session]() { return session.new_leader_events() > 0; }, std::chrono::seconds(30)))
+        << "the old session never saw the new leader: " << node_dump();
+    ASSERT_TRUE(send_ints(session, 3, 7, 0)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(9, trace)) << "the third batch never settled:\n" << trace << node_dump();
-    second.close();
+    session.close();
 
     for (int i = 0; i < NODES; ++i)
     {
