@@ -52,6 +52,7 @@ using axc::core::DeepmsgClient;
 using axc::interop::ChildProcess;
 using axc::interop::ProcessOptions;
 using axc::interop::run_process;
+using deepmsg::cluster::common::ClusterMarkFile;
 using deepmsg::cluster::common::RecordingLog;
 
 constexpr std::int32_t CLUSTER_ID = 7;
@@ -545,6 +546,27 @@ TEST_F(T2ClusterToolTest, t2TheToolReadsAJavaWrittenDirectory)
     }
     ASSERT_TRUE(std::filesystem::exists(java_cluster_dir + "/recording.log"))
         << "the Java cluster never wrote its directory";
+
+    // The container sets its mark file's `memberId` when it joins the log;
+    // before that the file still holds the initial -1, and the two tools would
+    // read different snapshots of the same file.
+    const std::string service_mark = java_cluster_dir + "/cluster-mark-service-0.dat";
+    const auto service_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < service_deadline)
+    {
+        if (std::filesystem::exists(service_mark))
+        {
+            auto mark =
+                ClusterMarkFile::open_existing(service_mark, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                 std::chrono::system_clock::now().time_since_epoch())
+                                                                 .count());
+            if (mark && mark->member_id() >= 0)
+            {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
 
     for (const char* command : {"describe", "pid", "recording-log"})
     {
