@@ -604,12 +604,32 @@ protected:
         return -1;
     }
 
+    /// Every member moves to `snapshot` (3) while the leader takes one, and a
+    /// member in any other state does not serve backup sessions
+    /// (`processPendingBackupSessions` runs in `ACTIVE`). `take_snapshot`
+    /// returns on the leader's counter, so a follower can still be snapshotting:
+    /// wait for one to be active before asking it.
+    [[nodiscard]] int wait_for_follower(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const int member = follower_index();
+            if (member >= 0)
+            {
+                return member;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return -1;
+    }
+
     /// `backupQueryContainsSnapshot` (`TestCluster.java:2517-2524`): query a
     /// follower at `log_position` and return the snapshots' log positions. The
     /// query is re-sent while no response arrives, as the reference does.
     [[nodiscard]] QueryResult query_snapshots(std::int64_t log_position, int query_index)
     {
-        const int member = follower_index();
+        const int member = wait_for_follower(std::chrono::seconds(30));
         if (member < 0)
         {
             // A failure here used to fall through to `node_dir(-1)` and then
