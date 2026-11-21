@@ -36,8 +36,8 @@
 
 typedef struct
 {
-    int64_t* send_ns;    /* by sequence; 0 = not offered */
-    int64_t* round_trip; /* by sequence; valid when seen */
+    int64_t* send_ns;      /* by sequence; 0 = not offered */
+    int64_t* round_trip;   /* by sequence; valid when seen */
     uint8_t* seen;
     int64_t total;
     int64_t received;
@@ -183,8 +183,8 @@ int main(int argc, char** argv)
                 Message message = {0};
                 message.sequence = (uint64_t)next_sequence;
                 message.send_ns = now;
-                const int64_t position =
-                    aeron_publication_offer(publication, (const uint8_t*)&message, sizeof(message), NULL, NULL);
+                const int64_t position = aeron_publication_offer(publication, (const uint8_t*)&message,
+                                                                 sizeof(message), NULL, NULL);
                 if (position >= 0)
                 {
                     pong.send_ns[next_sequence] = now;
