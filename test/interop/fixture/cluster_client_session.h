@@ -398,6 +398,12 @@ private:
             }
             if (polled->has_value())
             {
+                // A new client is a new egress stream: the listener outlives the
+                // connection and `offer_and_await` counts from one, so an echo
+                // counted here must belong to this connection. (2026-11-21: the
+                // C9 leader-change case counted the previous batch's echoes and
+                // never awaited the ones it had just sent.)
+                listener_.messages.clear();
                 cluster_.emplace(std::move(**polled));
                 cluster_->set_egress_listener(&listener_);
                 return true;
