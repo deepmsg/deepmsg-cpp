@@ -450,39 +450,71 @@ std::int32_t ArchiveMarkFile::error_buffer_length() const
     return header_.errorBufferLength();
 }
 
-std::string ArchiveMarkFile::control_channel() const
+namespace
+{
+
+/// One SBE var-ascii field, read with the bounds check the generated
+/// `getXxxAsString` does not have: it copies `length` bytes from a length the
+/// file controls, which a corrupt mark file turns into a read past the mapping.
+[[nodiscard]] bool read_var_ascii_field(const char* buffer, std::uint64_t buffer_length, std::uint64_t& position,
+                                        std::string& out)
+{
+    if (position + sizeof(std::uint32_t) > buffer_length)
+    {
+        return false;
+    }
+    std::uint32_t field_length = 0;
+    std::memcpy(&field_length, buffer + position, sizeof(field_length));
+    if (position + sizeof(field_length) + field_length > buffer_length)
+    {
+        return false;
+    }
+    out.assign(buffer + position + sizeof(field_length), field_length);
+    position += sizeof(field_length) + field_length;
+    return true;
+}
+
+}  // namespace
+
+std::string ArchiveMarkFile::var_ascii_field(std::size_t index) const
 {
     auto header = header_;
     header.sbeRewind();
-    return header.getControlChannelAsString();
+
+    const char* buffer = header.buffer();
+    const std::uint64_t buffer_length = static_cast<std::uint64_t>(mark_file_.mapped().size());
+    std::uint64_t position = header.sbePosition();
+
+    std::string value;
+    for (std::size_t i = 0; i <= index; ++i)
+    {
+        if (!read_var_ascii_field(buffer, buffer_length, position, value))
+        {
+            return {};
+        }
+    }
+    return value;
+}
+
+std::string ArchiveMarkFile::control_channel() const
+{
+    return var_ascii_field(0);
 }
 
 std::string ArchiveMarkFile::local_control_channel() const
 {
-    auto header = header_;
-    header.sbeRewind();
-    header.skipControlChannel();
-    return header.getLocalControlChannelAsString();
+    return var_ascii_field(1);
 }
 
 std::string ArchiveMarkFile::events_channel() const
 {
-    auto header = header_;
-    header.sbeRewind();
-    header.skipControlChannel();
-    header.skipLocalControlChannel();
-    return header.getEventsChannelAsString();
+    return var_ascii_field(2);
 }
 
 std::string ArchiveMarkFile::aeron_directory() const
 {
     // `ArchiveMarkFile.aeronDirectory` (`ArchiveMarkFile.java:488-495`).
-    auto header = header_;
-    header.sbeRewind();
-    header.skipControlChannel();
-    header.skipLocalControlChannel();
-    header.skipEventsChannel();
-    return header.getAeronDirectoryAsString();
+    return var_ascii_field(3);
 }
 
 }  // namespace deepmsg::archive::server

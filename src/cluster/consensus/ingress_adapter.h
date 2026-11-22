@@ -77,11 +77,16 @@ public:
 
     void free_session_buffer(std::int32_t image_session_id, bool is_ipc);
 
+    /// Decode and dispatch one whole message -- the body of `onFragment`, and
+    /// what the fuzz harness and the dispatch tests drive directly. A null
+    /// header is the "no image" case: `aeron_header_values` answers -1 and the
+    /// image session id becomes 0.
+    [[nodiscard]] aeron_controlled_fragment_handler_action_t dispatch(std::span<const std::uint8_t> message,
+                                                                      aeron_header_t* header = nullptr);
+
 private:
     static aeron_controlled_fragment_handler_action_t on_fragment(void* clientd, const std::uint8_t* buffer,
                                                                   std::size_t length, aeron_header_t* header);
-    [[nodiscard]] aeron_controlled_fragment_handler_action_t dispatch(std::span<const std::uint8_t> message,
-                                                                      aeron_header_t* header);
     [[nodiscard]] IngressImageInfo image_info_for(std::int32_t image_session_id) const;
 
     IngressHandler& handler_;

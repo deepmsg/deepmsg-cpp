@@ -96,19 +96,98 @@ public:
 private:
     [[nodiscard]] bool read_length(std::int32_t& field_length)
     {
-        if (offset_ < 0 || offset_ + 4 > length_)
+        // The subtraction forms keep a hostile INT32_MAX length from overflowing
+        // the addition (UBSan caught `offset_ + field_length` wrapping negative
+        // and letting a 2 GiB string through).
+        if (offset_ < 0 || offset_ > length_ || length_ - offset_ < static_cast<std::int32_t>(sizeof(field_length)))
         {
             return false;
         }
         std::memcpy(&field_length, buffer_ + offset_, sizeof(field_length));
-        offset_ += 4;
-        return field_length >= 0 && offset_ + field_length <= length_;
+        offset_ += static_cast<std::int32_t>(sizeof(field_length));
+        return field_length >= 0 && field_length <= length_ - offset_;
     }
 
     const std::uint8_t* buffer_;
     std::int32_t length_;
     std::int32_t offset_;
 };
+
+}  // namespace
+
+namespace
+{
+
+/// The block length this build's schema generates for each template.
+///
+/// The generated fixed-field accessors read at their encoding offsets without a
+/// bounds check (`sbeCheckPosition` guards only the variable-length tail), so a
+/// request that declares a smaller block than its template's would make them
+/// read past the fragment. The check is conservative: a frame from an older
+/// schema version with a smaller block is refused rather than decoded in a way
+/// the generated getters cannot make safe.
+struct TemplateBlockLength
+{
+    std::int32_t template_id;
+    std::int32_t block_length;
+};
+
+constexpr TemplateBlockLength TEMPLATE_BLOCK_LENGTHS[] = {
+    {ControlSessionAdapter::TEMPLATE_CLOSE_SESSION, archive_codecs::CloseSessionRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_START_RECORDING, archive_codecs::StartRecordingRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_START_RECORDING_2, archive_codecs::StartRecordingRequest2::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_RECORDING, archive_codecs::StopRecordingRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_RECORDING_SUBSCRIPTION,
+     archive_codecs::StopRecordingSubscriptionRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_RECORDING_BY_IDENTITY,
+     archive_codecs::StopRecordingByIdentityRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_RECORDING_POSITION, archive_codecs::RecordingPositionRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_POSITION, archive_codecs::StopPositionRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_START_POSITION, archive_codecs::StartPositionRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_MAX_RECORDED_POSITION,
+     archive_codecs::MaxRecordedPositionRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_LIST_RECORDINGS, archive_codecs::ListRecordingsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_LIST_RECORDINGS_FOR_URI,
+     archive_codecs::ListRecordingsForUriRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_LIST_RECORDING, archive_codecs::ListRecordingRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_LIST_RECORDING_SUBSCRIPTIONS,
+     archive_codecs::ListRecordingSubscriptionsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_FIND_LAST_MATCHING_RECORDING,
+     archive_codecs::FindLastMatchingRecordingRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_EXTEND_RECORDING_2, archive_codecs::ExtendRecordingRequest2::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_REPLAY, archive_codecs::ReplayRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_REPLAY, archive_codecs::StopReplayRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_BOUNDED_REPLAY, archive_codecs::BoundedReplayRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_ALL_REPLAYS, archive_codecs::StopAllReplaysRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_REPLAY_TOKEN, archive_codecs::ReplayTokenRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_ARCHIVE_ID, archive_codecs::ArchiveIdRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_TRUNCATE_RECORDING, archive_codecs::TruncateRecordingRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_PURGE_RECORDING, archive_codecs::PurgeRecordingRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_DETACH_SEGMENTS, archive_codecs::DetachSegmentsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_DELETE_DETACHED_SEGMENTS,
+     archive_codecs::DeleteDetachedSegmentsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_PURGE_SEGMENTS, archive_codecs::PurgeSegmentsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_ATTACH_SEGMENTS, archive_codecs::AttachSegmentsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_MIGRATE_SEGMENTS, archive_codecs::MigrateSegmentsRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_UPDATE_CHANNEL, archive_codecs::UpdateChannelRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_STOP_REPLICATION, archive_codecs::StopReplicationRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_REPLICATE_2, archive_codecs::ReplicateRequest2::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_AUTH_CONNECT, archive_codecs::AuthConnectRequest::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_CHALLENGE_RESPONSE, archive_codecs::ChallengeResponse::SBE_BLOCK_LENGTH},
+    {ControlSessionAdapter::TEMPLATE_KEEP_ALIVE, archive_codecs::KeepAliveRequest::SBE_BLOCK_LENGTH},
+};
+
+[[nodiscard]] std::int32_t template_block_length(std::int32_t template_id) noexcept
+{
+    for (const auto& entry : TEMPLATE_BLOCK_LENGTHS)
+    {
+        if (entry.template_id == template_id)
+        {
+            return entry.block_length;
+        }
+    }
+    return -1;
+}
 
 }  // namespace
 
@@ -141,6 +220,14 @@ int ControlSessionAdapter::on_fragment(const std::uint8_t* buffer, std::int32_t 
 
     const auto template_id = static_cast<std::int32_t>(header.templateId());
     const auto* body = buffer + MESSAGE_HEADER_LENGTH;
+
+    const std::int32_t minimum_block_length = template_block_length(template_id);
+    if (minimum_block_length >= 0 && block_length < minimum_block_length)
+    {
+        handler_.log_warning("control request blockLength=" + std::to_string(block_length) +
+                             " is shorter than templateId=" + std::to_string(template_id));
+        return 0;
+    }
 
     switch (template_id)
     {

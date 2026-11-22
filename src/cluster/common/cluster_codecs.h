@@ -5,6 +5,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <stdexcept>
 #include <string>
 
 #include "core/error/error.h"
@@ -121,9 +122,21 @@ template <class Decoder>
 }
 
 /// Wrap a generated decoder at the message body (offset 8), after the header.
+///
+/// The generated fixed-field accessors read at their encoding offsets without a
+/// bounds check (only the variable-length tail goes through `sbeCheckPosition`),
+/// so a sender that declares a block length smaller than its template's would
+/// make them read past the fragment. Such a frame is refused here; every caller
+/// is inside the adapter's `catch (std::exception&)`, which turns it into the
+/// pass-ending protocol error.
 template <class Decoder>
 [[nodiscard]] Decoder wrap_body(std::span<const std::uint8_t> message, const codecs::MessageHeader& header)
 {
+    if (static_cast<std::size_t>(header.blockLength()) < Decoder::SBE_BLOCK_LENGTH)
+    {
+        throw std::runtime_error("a cluster message's blockLength is shorter than its template's");
+    }
+
     Decoder decoder;
     decoder.wrapForDecode(const_cast<char*>(reinterpret_cast<const char*>(message.data())), MESSAGE_HEADER_LENGTH,
                           header.blockLength(), header.version(), message.size());

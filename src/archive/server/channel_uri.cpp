@@ -53,8 +53,12 @@ using UriPtr = std::unique_ptr<aeron_uri_t, UriDeleter>;
 [[nodiscard]] std::expected<UriPtr, axc::core::Error> parse_channel(std::string_view channel)
 {
     const std::string_view parsed_channel = without_spy_prefix(channel);
+    // `aeron_uri_parse` takes a length but its parameter scanner and its
+    // "invalid URI" error formatting both read to a NUL, so the view must be
+    // terminated even though the caller's bytes need not be.
+    const std::string terminated{parsed_channel};
     UriPtr uri{new aeron_uri_t{}};
-    if (0 != aeron_uri_parse(parsed_channel.size(), parsed_channel.data(), uri.get()))
+    if (0 != aeron_uri_parse(terminated.size(), terminated.c_str(), uri.get()))
     {
         return std::unexpected(axc::core::make_error(axc::core::ErrorCode::invalid_argument, aeron_errmsg()));
     }
