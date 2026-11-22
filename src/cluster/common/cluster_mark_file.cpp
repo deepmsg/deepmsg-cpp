@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -269,67 +270,91 @@ namespace
 
 }  // namespace
 
+namespace
+{
+
+/// One SBE var-ascii field, read with the bounds check the generated
+/// `getXxxAsString` does not have: it copies `length` bytes from a length the
+/// file controls (a corrupt length is an out-of-bounds read, not a throw).
+[[nodiscard]] bool read_var_ascii(const char* buffer, std::uint64_t buffer_length, std::uint64_t& position,
+                                  std::string& out)
+{
+    if (position + sizeof(std::uint32_t) > buffer_length)
+    {
+        return false;
+    }
+    std::uint32_t field_length = 0;
+    std::memcpy(&field_length, buffer + position, sizeof(field_length));
+    if (position + sizeof(field_length) + field_length > buffer_length)
+    {
+        return false;
+    }
+    out.assign(buffer + position + sizeof(field_length), field_length);
+    position += sizeof(field_length) + field_length;
+    return true;
+}
+
+}  // namespace
+
+// The six var-ascii fields are read by tools and by `load_control_properties`
+// at startup. Both the generated copy and the generated skips trust the length
+// in the file, so the fields are read here instead; a field that cannot be
+// decoded is reported as empty -- the same rule `component_type` uses for an
+// unknown enum value.
+std::string ClusterMarkFile::var_ascii_field(std::size_t index) const
+{
+    try
+    {
+        auto data = const_cast<ClusterMarkFile*>(this)->mapped();
+        auto* buffer = reinterpret_cast<char*>(data.data());
+        const std::uint64_t length = static_cast<std::uint64_t>(data.size());
+        auto header = decode_mark_header(buffer, header_offset_, length);
+
+        std::uint64_t position = header.sbePosition();
+        std::string value;
+        for (std::size_t i = 0; i <= index; ++i)
+        {
+            if (!read_var_ascii(buffer, length, position, value))
+            {
+                return {};
+            }
+        }
+        return value;
+    }
+    catch (const std::exception&)
+    {
+        return {};
+    }
+}
+
 std::string ClusterMarkFile::aeron_directory() const
 {
-    auto data = const_cast<ClusterMarkFile*>(this)->mapped();
-    auto* buffer = reinterpret_cast<char*>(data.data());
-    auto header = decode_mark_header(buffer, header_offset_, static_cast<std::uint64_t>(data.size()));
-    return header.getAeronDirectoryAsString();
+    return var_ascii_field(0);
 }
 
 std::string ClusterMarkFile::control_channel() const
 {
-    auto data = const_cast<ClusterMarkFile*>(this)->mapped();
-    auto* buffer = reinterpret_cast<char*>(data.data());
-    auto header = decode_mark_header(buffer, header_offset_, static_cast<std::uint64_t>(data.size()));
-    header.skipAeronDirectory();
-    return header.getControlChannelAsString();
+    return var_ascii_field(1);
 }
 
 std::string ClusterMarkFile::ingress_channel() const
 {
-    auto data = const_cast<ClusterMarkFile*>(this)->mapped();
-    auto* buffer = reinterpret_cast<char*>(data.data());
-    auto header = decode_mark_header(buffer, header_offset_, static_cast<std::uint64_t>(data.size()));
-    header.skipAeronDirectory();
-    header.skipControlChannel();
-    return header.getIngressChannelAsString();
+    return var_ascii_field(2);
 }
 
 std::string ClusterMarkFile::service_name() const
 {
-    auto data = const_cast<ClusterMarkFile*>(this)->mapped();
-    auto* buffer = reinterpret_cast<char*>(data.data());
-    auto header = decode_mark_header(buffer, header_offset_, static_cast<std::uint64_t>(data.size()));
-    header.skipAeronDirectory();
-    header.skipControlChannel();
-    header.skipIngressChannel();
-    return header.getServiceNameAsString();
+    return var_ascii_field(3);
 }
 
 std::string ClusterMarkFile::authenticator() const
 {
-    auto data = const_cast<ClusterMarkFile*>(this)->mapped();
-    auto* buffer = reinterpret_cast<char*>(data.data());
-    auto header = decode_mark_header(buffer, header_offset_, static_cast<std::uint64_t>(data.size()));
-    header.skipAeronDirectory();
-    header.skipControlChannel();
-    header.skipIngressChannel();
-    header.skipServiceName();
-    return header.getAuthenticatorAsString();
+    return var_ascii_field(4);
 }
 
 std::string ClusterMarkFile::services_cluster_dir() const
 {
-    auto data = const_cast<ClusterMarkFile*>(this)->mapped();
-    auto* buffer = reinterpret_cast<char*>(data.data());
-    auto header = decode_mark_header(buffer, header_offset_, static_cast<std::uint64_t>(data.size()));
-    header.skipAeronDirectory();
-    header.skipControlChannel();
-    header.skipIngressChannel();
-    header.skipServiceName();
-    header.skipAuthenticator();
-    return header.getServicesClusterDirAsString();
+    return var_ascii_field(5);
 }
 
 namespace
@@ -459,20 +484,28 @@ std::expected<void, Error> ClusterMarkFile::force() noexcept
     return file_.flush();
 }
 
+// `errorBufferLength` comes from the file. A sum larger than the mapping is a
+// corrupt header: answer an empty buffer rather than a span past the mapping.
 std::span<std::uint8_t> ClusterMarkFile::error_buffer() noexcept
 {
     auto data = mapped();
     const auto offset = static_cast<std::size_t>(HEADER_LENGTH);
-    const auto length = static_cast<std::size_t>(error_buffer_length_);
-    return data.subspan(offset, length);
+    if (error_buffer_length_ <= 0 || offset + static_cast<std::size_t>(error_buffer_length_) > data.size())
+    {
+        return {};
+    }
+    return data.subspan(offset, static_cast<std::size_t>(error_buffer_length_));
 }
 
 std::span<const std::uint8_t> ClusterMarkFile::error_buffer() const noexcept
 {
     auto data = const_cast<ClusterMarkFile*>(this)->mapped();
     const auto offset = static_cast<std::size_t>(HEADER_LENGTH);
-    const auto length = static_cast<std::size_t>(error_buffer_length_);
-    return data.subspan(offset, length);
+    if (error_buffer_length_ <= 0 || offset + static_cast<std::size_t>(error_buffer_length_) > data.size())
+    {
+        return {};
+    }
+    return data.subspan(offset, static_cast<std::size_t>(error_buffer_length_));
 }
 
 ClusterNodeControlProperties ClusterMarkFile::load_control_properties() const

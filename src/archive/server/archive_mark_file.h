@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -138,6 +139,10 @@ public:
 private:
     void refresh_header() noexcept;
     void apply(const HeaderValues& values);
+
+    /// The `index`-th var-ascii field of the header, read with a bounds check.
+    /// Empty when a preceding field's length is corrupt.
+    [[nodiscard]] std::string var_ascii_field(std::size_t index) const;
 
     /// `ArchiveMarkFile.java:146-160` + `CommonContext.saveExistingErrors`
     /// (`CommonContext.java:1316-1355`): render the previous process's error

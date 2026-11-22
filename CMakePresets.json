@@ -141,6 +141,17 @@
         "AXC_PGO": "generate",
         "AXC_PGO_DIR": "${sourceDir}/build/pgo"
       }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "fuzz (clang-20, libFuzzer + ASan/UBSan)",
+      "inherits": "clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "AXC_FUZZ": "ON",
+        "CMAKE_C_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer"
+      }
     }
   ],
   "buildPresets": [
@@ -171,6 +182,10 @@
     {
       "name": "release-clang",
       "configurePreset": "release-clang"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
     }
   ],
   "testPresets": [

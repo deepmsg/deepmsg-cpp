@@ -1,5 +1,6 @@
 option(AXC_BUILD_TESTS "Build unit and interop tests" ON)
 option(AXC_BUILD_BENCHMARKS "Build micro benchmarks" OFF)
+option(AXC_FUZZ "Build libFuzzer targets instead of standalone corpus runners" OFF)
 
 option(AXC_TRACING "Compile in binary tracing events (AXC_TRACING)" OFF)
 option(AXC_STAGE_TIMING "Compile in rdtsc stage timing (AXC_STAGE_TIMING)" OFF)

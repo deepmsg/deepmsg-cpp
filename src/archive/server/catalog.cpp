@@ -9,8 +9,10 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <limits>
+#include <string>
 #include <system_error>
 #include <utility>
 
@@ -718,7 +720,19 @@ std::expected<void, axc::core::Error> Catalog::build_index(bool writable)
             read_value<std::int32_t>(frame.data() + RecordingDescriptorHeader::stateEncodingOffset());
         if (RecordingState::VALID == state)
         {
-            index_.add(recording_id, offset);
+            // `CatalogIndex.add` answers a non-increasing recording id with an
+            // exception (the reference's IllegalArgumentException). A corrupt
+            // catalog must come back from `open` as an error, not as a throw
+            // out of a function whose contract is std::expected.
+            try
+            {
+                index_.add(recording_id, offset);
+            }
+            catch (const std::exception& exception)
+            {
+                return std::unexpected(message_error(axc::core::ErrorCode::protocol_error,
+                                                     std::string{"invalid catalog index: "} + exception.what()));
+            }
         }
 
         offset += frame_length;
@@ -966,17 +980,39 @@ std::span<std::uint8_t> Catalog::wrap_descriptor(std::int64_t recording_id) cons
 std::int32_t Catalog::wrap_descriptor_at_offset(std::span<std::uint8_t>& out,
                                                 std::int32_t recording_descriptor_offset) const noexcept
 {
+    // Both the length and the aligned frame come from the file. Before trusting
+    // either, check that the header and the frame it describes lie inside the
+    // mapping, and that the fixed descriptor block fits: otherwise
+    // `invoke_entry_processor` wraps its decoders over a short frame and they
+    // throw. A corrupt descriptor ends the walk, the same answer a non-positive
+    // length gives.
+    if (recording_descriptor_offset < 0 ||
+        static_cast<std::int64_t>(recording_descriptor_offset) + DESCRIPTOR_HEADER_LENGTH > capacity_)
+    {
+        return -1;
+    }
+
     const std::int32_t recording_length = read_value<std::int32_t>(base() + recording_descriptor_offset +
                                                                    RecordingDescriptorHeader::lengthEncodingOffset());
 
-    if (recording_length > 0)
+    if (recording_length < static_cast<std::int32_t>(RecordingDescriptor::SBE_BLOCK_LENGTH))
     {
-        const std::int32_t frame_length = align_up(recording_length + DESCRIPTOR_HEADER_LENGTH, alignment_);
-        out = std::span<std::uint8_t>(base() + recording_descriptor_offset, static_cast<std::size_t>(frame_length));
-        return frame_length;
+        return -1;
     }
 
-    return -1;
+    // 64-bit arithmetic: adding the header to a hostile INT32_MAX length would
+    // wrap in int32.
+    const std::int64_t unaligned = static_cast<std::int64_t>(recording_length) + DESCRIPTOR_HEADER_LENGTH;
+    const std::int64_t remainder = alignment_ > 0 ? unaligned % alignment_ : 0;
+    const std::int64_t frame_length = unaligned + (alignment_ > 0 ? (alignment_ - remainder) % alignment_ : 0);
+
+    if (static_cast<std::int64_t>(recording_descriptor_offset) + frame_length > capacity_)
+    {
+        return -1;
+    }
+
+    out = std::span<std::uint8_t>(base() + recording_descriptor_offset, static_cast<std::size_t>(frame_length));
+    return static_cast<std::int32_t>(frame_length);
 }
 
 bool Catalog::has_recording(std::int64_t recording_id) const

@@ -250,10 +250,19 @@ public:
         return time_unit_;
     }
 
+    /// Bind the handler for `dispatch` (unit tests and the fuzz harness feed
+    /// fragments directly, as the reference's mocked image does).
+    void handler(SnapshotLoadHandler& handler) noexcept
+    {
+        handler_ = &handler;
+    }
+
+    /// One complete fragment (the assembler's output).
+    [[nodiscard]] aeron_controlled_fragment_handler_action_t dispatch(std::span<const std::uint8_t> message);
+
 private:
     static aeron_controlled_fragment_handler_action_t on_fragment(void* clientd, const std::uint8_t* buffer,
                                                                   std::size_t length, aeron_header_t* header);
-    [[nodiscard]] aeron_controlled_fragment_handler_action_t dispatch(std::span<const std::uint8_t> message);
 
     aeron_controlled_fragment_assembler_t* assembler_{nullptr};
     SnapshotLoadHandler* handler_{nullptr};

@@ -173,6 +173,10 @@ private:
 
     [[nodiscard]] std::int32_t header_body_offset() const noexcept;
     [[nodiscard]] std::int32_t body_field_offset(std::size_t encoding_offset) const noexcept;
+
+    /// The `index`-th of the six var-ascii fields, read with a bounds check.
+    /// Empty when a preceding field's length is corrupt.
+    [[nodiscard]] std::string var_ascii_field(std::size_t index) const;
     [[nodiscard]] std::span<std::uint8_t> mapped() noexcept;
     [[nodiscard]] std::span<const std::uint8_t> mapped() const noexcept;
 
