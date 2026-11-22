@@ -112,7 +112,7 @@ protected:
         for (int i = 0; i < count; ++i)
         {
             const std::int32_t value = first + i;
-            if (!session.offer_and_await(int_payload(value), static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
+            if (!session.offer_and_await_echo(int_payload(value), std::chrono::seconds(20)))
             {
                 return false;
             }
@@ -258,9 +258,9 @@ TEST_F(Xc2BoundsTest, theClusterAssemblesFragmentedSessionMessages)
     const std::string fragmented(5979, '\xBC');
     const std::string eight_k(8192, '\xBD');
 
-    ASSERT_TRUE(session.offer_and_await(unfragmented, 1, std::chrono::seconds(20))) << node_dump();
-    ASSERT_TRUE(session.offer_and_await(fragmented, 2, std::chrono::seconds(20))) << node_dump();
-    ASSERT_TRUE(session.offer_and_await(eight_k, 3, std::chrono::seconds(30))) << node_dump();
+    ASSERT_TRUE(session.offer_and_await_echo(unfragmented, std::chrono::seconds(20))) << node_dump();
+    ASSERT_TRUE(session.offer_and_await_echo(fragmented, std::chrono::seconds(20))) << node_dump();
+    ASSERT_TRUE(session.offer_and_await_echo(eight_k, std::chrono::seconds(30))) << node_dump();
 
     ASSERT_EQ(3U, session.messages().size()) << node_dump();
     EXPECT_EQ(unfragmented, session.messages()[0]);
@@ -352,7 +352,7 @@ TEST_F(Xc2BoundsTest, theClusterRemainsStableWhenALiveFollowersServiceIsSlow)
 
     // `PAUSE + "|" + index + "|" + durationNs`.
     const std::string pause = "Please pause when processing message|" + std::to_string(slow) + "|1500000000";
-    ASSERT_TRUE(session.offer_and_await(pause, session.messages().size(), std::chrono::seconds(20)))
+    ASSERT_TRUE(session.offer_only(pause, std::chrono::seconds(20)))
         << "the pause command was not accepted: " << node_dump();
     ASSERT_TRUE(send_ints(session, 10, 1)) << node_dump();
 

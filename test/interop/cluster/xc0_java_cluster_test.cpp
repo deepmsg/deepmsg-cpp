@@ -374,7 +374,7 @@ protected:
         for (int i = 0; i < count; ++i)
         {
             std::string payload = "xc0-" + std::to_string(i);
-            if (!session_.offer_and_await(payload, static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
+            if (!session_.offer_and_await_echo(payload, std::chrono::seconds(20)))
             {
                 std::fprintf(
                     stderr, "XC0 echo failed at %d: state=%lld\n", i,

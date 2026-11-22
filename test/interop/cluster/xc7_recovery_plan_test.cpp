@@ -104,13 +104,12 @@ protected:
         return false;
     }
 
-    [[nodiscard]] bool send_ints(ClusterClientSession& session, int count, int first, int echo_base)
+    [[nodiscard]] bool send_ints(ClusterClientSession& session, int count, int first)
     {
         for (int i = 0; i < count; ++i)
         {
             const std::int32_t value = first + i;
-            if (!session.offer_and_await(int_payload(value), static_cast<std::size_t>(echo_base + i),
-                                         std::chrono::seconds(20)))
+            if (!session.offer_and_await_echo(int_payload(value), std::chrono::seconds(20)))
             {
                 return false;
             }
@@ -234,7 +233,7 @@ TEST_F(Xc7RecoveryPlanTest,
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
-    ASSERT_TRUE(send_ints(session, 10, 1, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 10, 1)) << node_dump();
     std::string trace;
     ASSERT_TRUE(await_tracking(10, trace)) << "the committed batch never settled:\n" << trace << node_dump();
 
@@ -288,7 +287,7 @@ TEST_F(Xc7RecoveryPlanTest,
 
     ClusterClientSession second;
     ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
-    ASSERT_TRUE(send_ints(second, 5, 11, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(second, 5, 11)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(15, trace)) << "the cluster stopped after the rollback:\n" << trace << node_dump();
 
@@ -322,7 +321,7 @@ TEST_F(Xc7RecoveryPlanTest, shouldReplaySnapshotTakenWhileDown)
     }
     ASSERT_GE(node_counter(leader, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID), 1) << node_dump();
 
-    ASSERT_TRUE(send_ints(session, 10, 1, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 10, 1)) << node_dump();
     std::string trace;
     ASSERT_TRUE(await_tracking(10, trace)) << "the batch never settled:\n" << trace << node_dump();
 

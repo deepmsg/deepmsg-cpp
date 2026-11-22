@@ -114,7 +114,7 @@ protected:
         for (int i = 0; i < count; ++i)
         {
             const std::int32_t value = first + i;
-            if (!session.offer_and_await(int_payload(value), static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
+            if (!session.offer_and_await_echo(int_payload(value), std::chrono::seconds(20)))
             {
                 return false;
             }

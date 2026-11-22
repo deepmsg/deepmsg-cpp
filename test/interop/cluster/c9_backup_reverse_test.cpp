@@ -520,8 +520,7 @@ protected:
         for (int i = 0; i < count; ++i)
         {
             std::string payload = "rev-" + std::to_string(i);
-            ASSERT_TRUE(session_.offer_and_await(payload, static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
-                << "echo failed at " << i;
+            ASSERT_TRUE(session_.offer_and_await_echo(payload, std::chrono::seconds(20))) << "echo failed at " << i;
         }
     }
 
@@ -549,15 +548,8 @@ protected:
         ASSERT_TRUE(connected) << session_.last_error();
         for (int i = first; i < first + count; ++i)
         {
-            // `close()`/`connect()` do not reset the session's egress listener,
-            // so a count that starts at one is already satisfied by the previous
-            // batch: wait for one *new* echo and check it is the one we offered.
-            // (2026-11-21: the C9 leader-change failure; the count-only wait let
-            // `stop_all()` catch a batch that had not been committed yet.)
-            const std::size_t before = session_.messages().size();
-            ASSERT_TRUE(session_.offer_and_await(int_payload(i), before + 1, std::chrono::seconds(20)))
+            ASSERT_TRUE(session_.offer_and_await_echo(int_payload(i), std::chrono::seconds(20)))
                 << "echo failed at " << i;
-            ASSERT_EQ(session_.messages().back(), int_payload(i)) << "the echo at " << i << " is not ours";
         }
     }
 
@@ -1276,7 +1268,7 @@ TEST_F(Xc9JavaBackupAgainstOurClusterTest, theNodeStartsFromTheBackupDirectory)
                                              "0=localhost:" + std::to_string(restart_port(0)), egress,
                                              std::chrono::seconds(30)))
         << restart_session_.last_error();
-    ASSERT_TRUE(restart_session_.offer_and_await(int_payload(message_count), 1, std::chrono::seconds(20)))
+    ASSERT_TRUE(restart_session_.offer_and_await_echo(int_payload(message_count), std::chrono::seconds(20)))
         << "the recovered cluster did not echo";
     expected.push_back(message_count);
     EXPECT_TRUE(wait_for_tracking(restart_tracking_file(), expected, std::chrono::seconds(30)))
