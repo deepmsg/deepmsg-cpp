@@ -116,13 +116,12 @@ protected:
         return false;
     }
 
-    [[nodiscard]] bool send_ints(ClusterClientSession& session, int count, int first, int echo_base)
+    [[nodiscard]] bool send_ints(ClusterClientSession& session, int count, int first)
     {
         for (int i = 0; i < count; ++i)
         {
             const std::int32_t value = first + i;
-            if (!session.offer_and_await(int_payload(value), static_cast<std::size_t>(echo_base + i),
-                                         std::chrono::seconds(20)))
+            if (!session.offer_and_await_echo(int_payload(value), std::chrono::seconds(20)))
             {
                 return false;
             }
@@ -354,12 +353,12 @@ TEST_F(Xc7SnapshotTest, shouldRecoverWhenLastSnapshotIsMarkedInvalid)
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
-    ASSERT_TRUE(send_ints(session, 3, 1, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 3, 1)) << node_dump();
     std::string trace;
     ASSERT_TRUE(await_tracking(3, trace)) << "the first batch never settled:\n" << trace << node_dump();
 
     ASSERT_TRUE(take_snapshot(leader, 1)) << "the first snapshot never completed: " << node_dump();
-    ASSERT_TRUE(send_ints(session, 3, 4, 3)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 3, 4)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(6, trace)) << "the second batch never settled:\n" << trace << node_dump();
     ASSERT_TRUE(take_snapshot(leader, 2)) << "the second snapshot never completed: " << node_dump();
@@ -384,7 +383,7 @@ TEST_F(Xc7SnapshotTest, shouldRecoverWhenLastSnapshotIsMarkedInvalid)
     // (`SessionManager.checkSessions`, `SessionManager.java:916-924`).
     ASSERT_TRUE(session.pump_until([&session]() { return session.new_leader_events() > 0; }, std::chrono::seconds(30)))
         << "the old session never saw the new leader: " << node_dump();
-    ASSERT_TRUE(send_ints(session, 3, 7, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 3, 7)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(9, trace)) << "the third batch never settled:\n" << trace << node_dump();
     session.close();
@@ -422,7 +421,7 @@ TEST_F(Xc7SnapshotTest, shouldRecoverWhenLastSnapshotIsInvalidBetweenTwoElection
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
-    ASSERT_TRUE(send_ints(session, 3, 1, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 3, 1)) << node_dump();
     std::string trace;
     ASSERT_TRUE(await_tracking(3, trace)) << "the first batch never settled:\n" << trace << node_dump();
     ASSERT_TRUE(take_snapshot(leader, 1)) << node_dump();
@@ -445,7 +444,7 @@ TEST_F(Xc7SnapshotTest, shouldRecoverWhenLastSnapshotIsInvalidBetweenTwoElection
     session.close();
     ClusterClientSession second;
     ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
-    ASSERT_TRUE(send_ints(second, 3, 4, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(second, 3, 4)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(6, trace)) << "the second batch never settled:\n" << trace << node_dump();
     ASSERT_TRUE(take_snapshot(leader, 2)) << node_dump();
@@ -486,7 +485,7 @@ TEST_F(Xc7SnapshotTest, shouldRecoverWhenLastTwosSnapshotsAreInvalidAfterElectio
     std::string trace;
     for (int round = 0; round < 3; ++round)
     {
-        ASSERT_TRUE(send_ints(session, 3, 1 + (round * 3), round * 3)) << node_dump();
+        ASSERT_TRUE(send_ints(session, 3, 1 + (round * 3))) << node_dump();
         trace.clear();
         ASSERT_TRUE(await_tracking(3 * (round + 1), trace)) << "batch " << round << " never settled:\n"
                                                             << trace << node_dump();
@@ -545,7 +544,7 @@ TEST_F(Xc7SnapshotTest, shouldTerminateNodeWithInvalidSnapshotAndRecoveryAfterIn
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
-    ASSERT_TRUE(send_ints(session, 10, 1, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 10, 1)) << node_dump();
     std::string trace;
     ASSERT_TRUE(await_tracking(10, trace)) << "the batch never settled:\n" << trace << node_dump();
     ASSERT_TRUE(take_snapshot(leader, 1)) << "the snapshot never completed: " << node_dump();
@@ -639,7 +638,7 @@ TEST_F(Xc7SnapshotTest, shouldCatchupFromEmptyLogThenSnapshotAfterShutdownAndFol
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
-    ASSERT_TRUE(send_ints(session, 10, 1, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 10, 1)) << node_dump();
     std::string trace;
     ASSERT_TRUE(await_tracking(10, trace)) << "the first batch never settled:\n" << trace << node_dump();
 
@@ -649,7 +648,7 @@ TEST_F(Xc7SnapshotTest, shouldCatchupFromEmptyLogThenSnapshotAfterShutdownAndFol
     trace.clear();
     ASSERT_TRUE(await_tracking(10, trace)) << "the clean-started follower never caught up:\n" << trace << node_dump();
 
-    ASSERT_TRUE(send_ints(session, 5, 11, 10)) << node_dump();
+    ASSERT_TRUE(send_ints(session, 5, 11)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(15, trace)) << "the second batch never settled:\n" << trace << node_dump();
     session.close();
@@ -776,7 +775,7 @@ TEST_F(Xc7SnapshotTest, shouldInvalidateSnapshotsThatHaveBeenRemoved)
     std::string trace;
     for (int round = 0; round < 3; ++round)
     {
-        ASSERT_TRUE(send_ints(session, 10, 1 + (round * 10), round * 10)) << node_dump();
+        ASSERT_TRUE(send_ints(session, 10, 1 + (round * 10))) << node_dump();
         trace.clear();
         ASSERT_TRUE(await_tracking(10 * (round + 1), trace)) << "batch " << round << ":\n" << trace << node_dump();
         ASSERT_TRUE(take_snapshot(leader, round + 1)) << "snapshot " << round + 1 << ": " << node_dump();
@@ -803,7 +802,7 @@ TEST_F(Xc7SnapshotTest, shouldInvalidateSnapshotsThatHaveBeenRemoved)
     // The cluster still serves after the entries were invalidated.
     ClusterClientSession second;
     ASSERT_TRUE(connect_udp_retry(second)) << node_dump() << second.last_error();
-    ASSERT_TRUE(send_ints(second, 10, 31, 0)) << node_dump();
+    ASSERT_TRUE(send_ints(second, 10, 31)) << node_dump();
     trace.clear();
     ASSERT_TRUE(await_tracking(40, trace)) << "the cluster stopped after the purge:\n" << trace << node_dump();
     second.close();

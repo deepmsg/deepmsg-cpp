@@ -29,7 +29,7 @@ using namespace axc::interop;
     for (int i = 0; i < count; ++i)
     {
         const std::string payload = "f1-" + std::to_string(base + i);
-        if (!session.offer_and_await(payload, static_cast<std::size_t>(base + i + 1)))
+        if (!session.offer_and_await_echo(payload))
         {
             return false;
         }

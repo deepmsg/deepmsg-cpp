@@ -704,8 +704,7 @@ protected:
         for (int i = 0; i < count; ++i)
         {
             std::string payload = "c9-" + std::to_string(i);
-            ASSERT_TRUE(session_.offer_and_await(payload, static_cast<std::size_t>(i + 1), std::chrono::seconds(20)))
-                << "echo failed at " << i;
+            ASSERT_TRUE(session_.offer_and_await_echo(payload, std::chrono::seconds(20))) << "echo failed at " << i;
         }
     }
 

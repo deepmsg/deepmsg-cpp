@@ -23,6 +23,7 @@
 #include "cluster/client/client_config.h"
 #include "cluster/common/cluster_counters.h"
 #include "core/deepmsg/deepmsg_client.h"
+#include "fixture/cluster_client_session.h"
 #include "fixture/process.h"
 
 #ifndef AXC_AERON_JAR
@@ -303,6 +304,72 @@ TEST_F(ClientConnectInteropTest, aCProgramConnectsOffersAndReceivesTheEcho)
     ASSERT_TRUE(result) << result.error().message.view();
     EXPECT_EQ(0, result->exit_code) << result->output;
     EXPECT_NE(std::string::npos, result->output.find("RECEIVED hello-from-c")) << result->output;
+}
+
+// C3b: the same C program, but it idles between connecting and offering. The
+// offer is still connected and committed, so the echo has to come back: a
+// client that goes quiet must not lose its session's response path.
+TEST_F(ClientConnectInteropTest, aCProgramHearsItsEchoAfterAnIdle)
+{
+    start_java_node();
+    start_container();
+
+    axc::interop::ProcessOptions options;
+    options.arguments = {aeron_dir(), "hello-from-c", "1"};
+    options.timeout = std::chrono::seconds(90);
+
+    auto result = axc::interop::run_process(AXC_CLUSTER_CLIENT_SMOKE, options);
+    ASSERT_TRUE(result) << result.error().message.view();
+    EXPECT_EQ(0, result->exit_code) << result->output;
+    EXPECT_NE(std::string::npos, result->output.find("RECEIVED hello-from-c")) << result->output;
+}
+
+// C3b: an idle that crosses the session's message timeout only survives if the
+// application sends keep-alives, as the reference client's application does
+// (`AeronCluster.sendKeepAlive`). The cluster closes the session otherwise and
+// an offer on it is accepted by the publication but dropped by the consensus
+// module, so the reading is the echo after a twelve-second idle (longer than
+// the five-second default) with one keep-alive a second.
+TEST_F(ClientConnectInteropTest, aCProgramKeepsItsSessionAliveThroughAnIdle)
+{
+    start_java_node();
+    start_container();
+
+    axc::interop::ProcessOptions options;
+    options.arguments = {aeron_dir(), "hello-from-c", "12", "keep-alive"};
+    options.timeout = std::chrono::seconds(90);
+
+    auto result = axc::interop::run_process(AXC_CLUSTER_CLIENT_SMOKE, options);
+    ASSERT_TRUE(result) << result.error().message.view();
+    EXPECT_EQ(0, result->exit_code) << result->output;
+    EXPECT_NE(std::string::npos, result->output.find("KEEP-ALIVE 1")) << result->output;
+    EXPECT_NE(std::string::npos, result->output.find("RECEIVED hello-from-c")) << result->output;
+}
+
+// The fixture's counted wait must not pass on an echo that belongs to an
+// earlier offer. Sixteen zero bytes are a timer command with no command number,
+// so the echo service answers nothing; the count is already satisfied by the
+// first echo, and only the "one new message" half of the wait can fail.
+// (2026-11-21/22: the same shape hid the C9 leader-change batches; the audit
+// found it in every count that starts over on one connection.)
+TEST_F(ClientConnectInteropTest, anOfferThatProducesNoEchoDoesNotSatisfyItsOwnCount)
+{
+    start_java_node();
+    start_container();
+
+    axc::interop::ClusterClientSession session;
+    ASSERT_TRUE(session.connect_ipc(aeron_dir_, std::chrono::seconds(30))) << session.last_error();
+    ASSERT_TRUE(session.offer_and_await_echo("hello-from-c", std::chrono::seconds(20))) << session.last_error();
+
+    const std::size_t before = session.messages().size();
+    ASSERT_EQ(1U, before);
+
+    const std::string timer_command(16, '\0');
+    EXPECT_FALSE(session.offer_and_await(timer_command, before, std::chrono::milliseconds(500)))
+        << "the wait passed on the earlier echo";
+    EXPECT_EQ(before, session.messages().size());
+
+    session.close();
 }
 
 // The C ABI has no `do_work`: a process that idles between connecting and

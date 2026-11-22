@@ -1059,7 +1059,7 @@ TEST_F(Xc2SingleNodeReplayTest, shouldReplayLogWithPaddingAtEndOfRecording)
         std::string payload(sizeof(id), '\0');
         std::memcpy(payload.data(), &id, sizeof(id));
         payload.append(large_tail);
-        ASSERT_TRUE(session.offer_and_await(payload, expected_ids.size() + 1, std::chrono::seconds(20)))
+        ASSERT_TRUE(session.offer_and_await_echo(payload, std::chrono::seconds(20)))
             << "message " << i << log_text("node") << log_text("container");
         expected_ids.push_back(id);
     }
@@ -1097,7 +1097,7 @@ TEST_F(Xc2SingleNodeReplayTest, shouldReplayLogWithPaddingAtEndOfRecording)
         filler.assign(sizeof(filler_id), 'p');
     }
     std::memcpy(filler.data(), &filler_id, sizeof(filler_id));
-    ASSERT_TRUE(session.offer_and_await(filler, expected_ids.size() + 1, std::chrono::seconds(20)))
+    ASSERT_TRUE(session.offer_and_await_echo(filler, std::chrono::seconds(20)))
         << "filler " << filler_id << " remaining=" << remaining << log_text("node") << log_text("container");
     // The filler itself is in the next term: the truncation cuts it away, so it
     // is not part of the expected replay.
@@ -1221,7 +1221,7 @@ TEST_F(Xc7SingleNodeSnapshotTest, shouldRecoverWhenLastSnapshotForShutdownIsMark
     ASSERT_TRUE(session.connect_ipc(aeron_dir_, std::chrono::seconds(30))) << log_text("node") << log_text("container");
     for (int i = 1; i <= 3; ++i)
     {
-        ASSERT_TRUE(session.offer_and_await(payload_of(i), static_cast<std::size_t>(i), std::chrono::seconds(20)))
+        ASSERT_TRUE(session.offer_and_await_echo(payload_of(i), std::chrono::seconds(20)))
             << "message " << i << log_text("node") << log_text("container");
     }
     session.close();
@@ -1256,7 +1256,7 @@ TEST_F(Xc7SingleNodeSnapshotTest, shouldRecoverWhenLastSnapshotForShutdownIsMark
     ASSERT_TRUE(second.connect_ipc(aeron_dir_, std::chrono::seconds(30))) << log_text("node") << log_text("container");
     for (int i = 4; i <= 6; ++i)
     {
-        ASSERT_TRUE(second.offer_and_await(payload_of(i), static_cast<std::size_t>(i - 3), std::chrono::seconds(20)))
+        ASSERT_TRUE(second.offer_and_await_echo(payload_of(i), std::chrono::seconds(20)))
             << "message " << i << log_text("node") << log_text("container");
     }
     second.close();

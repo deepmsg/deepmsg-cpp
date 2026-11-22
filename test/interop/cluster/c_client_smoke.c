@@ -4,11 +4,14 @@
  * echo and closes the session. The interop test runs it against the reference
  * `ClusteredMediaDriver` and this build's echo container.
  *
- * usage: c-client-smoke <aeron-dir> [payload] [idle-seconds] [offer-only]
- * With `idle-seconds` the process sleeps between connecting and offering,
- * without calling any ABI function: the conductor has to keep running on its
- * own thread (the C ABI has no `do_work`). `offer-only` stops after the offer
- * and judges the driver-level liveness (a reaped client cannot offer).
+ * usage: c-client-smoke <aeron-dir> [payload] [idle-seconds] [offer-only|keep-alive]
+ * With `idle-seconds` the process sleeps between connecting and offering. With
+ * no fourth argument it calls no ABI function at all: the conductor has to keep
+ * running on its own thread (the C ABI has no `do_work`). `offer-only` stops
+ * after the offer and judges the driver-level liveness (a reaped client cannot
+ * offer). `keep-alive` calls `deepmsg_cluster_send_keep_alive` once a second
+ * while it idles, the way the reference client's application does; an idle past
+ * the session's message timeout without one is dropped by the cluster.
  * exit 0 on "RECEIVED <payload>", 1 otherwise; status lines on stderr.
  */
 #include <stdio.h>
@@ -44,6 +47,7 @@ int main(int argc, char** argv)
     const char* payload = argc > 2 ? argv[2] : "hello-from-c";
     const double idle_seconds = argc > 3 ? atof(argv[3]) : 0.0;
     const int offer_only = argc > 4 && 0 == strcmp(argv[4], "offer-only");
+    const int keep_alive = argc > 4 && 0 == strcmp(argv[4], "keep-alive");
     deepmsg_cluster_client_t* client = NULL;
 
     if (0 != deepmsg_cluster_connect(&client, argv[1], "aeron:ipc", "aeron:ipc"))
@@ -55,10 +59,28 @@ int main(int argc, char** argv)
 
     if (idle_seconds > 0.0)
     {
-        const time_t whole = (time_t)idle_seconds;
-        const struct timespec idle = {whole, (long)((idle_seconds - (double)whole) * 1e9)};
         fprintf(stderr, "IDLE %.1f\n", idle_seconds);
-        (void)nanosleep(&idle, NULL);
+        if (!keep_alive)
+        {
+            const time_t whole = (time_t)idle_seconds;
+            const struct timespec idle = {whole, (long)((idle_seconds - (double)whole) * 1e9)};
+            (void)nanosleep(&idle, NULL);
+        }
+        else
+        {
+            /* `AeronCluster.sendKeepAlive` while idle: the cluster closes a
+             * session that sends nothing for its message timeout (5 s by
+             * default), and a later offer on the closed session is dropped. */
+            for (double remaining = idle_seconds; remaining > 0.0;)
+            {
+                const double slice = remaining > 1.0 ? 1.0 : remaining;
+                const time_t whole = (time_t)slice;
+                const struct timespec pause = {whole, (long)((slice - (double)whole) * 1e9)};
+                (void)nanosleep(&pause, NULL);
+                remaining -= slice;
+                fprintf(stderr, "KEEP-ALIVE %d\n", deepmsg_cluster_send_keep_alive(client));
+            }
+        }
     }
 
     const int64_t position = deepmsg_cluster_offer(client, (const uint8_t*)payload, strlen(payload));

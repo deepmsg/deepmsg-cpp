@@ -7,12 +7,16 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "cluster/common/cluster_mark_file.h"
@@ -146,6 +150,40 @@ TEST_F(ClusterToolTest, shouldFailIfMarkFileUnavailable)
     const auto result = run({cluster_dir_, "snapshot"});
     EXPECT_EQ(TOOL_FAILURE, result.status);
     EXPECT_NE(std::string::npos, result.out.find("cluster-mark.dat does not exist.")) << result.out;
+}
+
+TEST_F(ClusterToolTest, aTimeoutWaitsForTheMarkFileToAppear)
+{
+    // `aeron.cluster.tool.timeout` makes the mark-file open wait for a version,
+    // as the reference's `ClusterMarkFile` constructor does. A mark file that
+    // appears while the tool is waiting must be picked up; returning on the
+    // first miss would print a failure here.
+    std::atomic<std::int64_t> expected_pid{-1};
+    std::thread creator{[this, &expected_pid]()
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                            auto mark_file = create_mark_file();
+                            if (mark_file)
+                            {
+                                expected_pid.store(mark_file->pid());
+                            }
+                        }};
+
+    const auto result = run({cluster_dir_, "pid", "-Daeron.cluster.tool.timeout=5s"});
+    creator.join();
+
+    EXPECT_EQ(TOOL_SUCCESS, result.status) << result.out << result.err;
+    EXPECT_EQ(std::to_string(expected_pid.load()) + "\n", result.out);
+}
+
+TEST_F(ClusterToolTest, aTimeoutGivesUpWhenTheMarkFileNeverAppears)
+{
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = run({cluster_dir_, "pid", "-Daeron.cluster.tool.timeout=300ms"});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    EXPECT_EQ(TOOL_FAILURE, result.status);
+    EXPECT_GE(elapsed, std::chrono::milliseconds(100)) << "the wait returned before its deadline";
 }
 
 TEST_F(ClusterToolTest, pidPrintsTheMarkFilesPid)

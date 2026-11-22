@@ -65,6 +65,22 @@ extern "C"
     int64_t deepmsg_cluster_offer(deepmsg_cluster_client_t* client, const uint8_t* buffer, size_t length);
 
     /**
+     * Send a session keep-alive (`AeronCluster.sendKeepAlive`).
+     *
+     * The cluster closes a session that sends nothing for the session's message
+     * timeout (5 s by default, `message_timeout_ns` on the client config), and a
+     * later offer on the closed session is dropped by the consensus module even
+     * though the ingress publication still takes it. The reference client does
+     * not send keep-alives from any loop of its own: the application calls
+     * `sendKeepAlive` while it is idle. This ABI does the same, so a process
+     * that stops offering must call this at least once per timeout window.
+     *
+     * Returns 1 when sent, 0 when the publication refused the claim, and -1 on
+     * error (`deepmsg_cluster_error()` has the reason).
+     */
+    int deepmsg_cluster_send_keep_alive(deepmsg_cluster_client_t* client);
+
+    /**
      * Poll the egress subscription and dispatch session messages to `handler`.
      * Returns the number of fragments consumed, or -1 on error.
      */

@@ -197,6 +197,27 @@ extern "C"
         return client->cluster->offer(std::span<const std::uint8_t>(buffer, length));
     }
 
+    int deepmsg_cluster_send_keep_alive(deepmsg_cluster_client_t* client)
+    {
+        if (nullptr == client || !client->cluster.has_value())
+        {
+            set_error("keep-alive on a closed client");
+            return -1;
+        }
+        if (client->client)
+        {
+            (void)client->client->do_work();
+        }
+
+        auto sent = client->cluster->send_keep_alive();
+        if (!sent)
+        {
+            set_error(std::string{sent.error().message.view()});
+            return -1;
+        }
+        return *sent ? 1 : 0;
+    }
+
     int deepmsg_cluster_poll_egress(deepmsg_cluster_client_t* client, deepmsg_cluster_message_handler_t handler,
                                     void* clientd, size_t fragment_limit)
     {

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <new>
 #include <span>
+#include <thread>
 #include <vector>
 
 #include "core/media/dpdk/stack/frame.h"
@@ -325,6 +327,42 @@ TEST(ParkedFrame, ASteadyPassAllocatesNothing)
     const std::size_t allocations = g_allocations - before;
     EXPECT_EQ(0u, allocations) << "a pass of parked frames copied nothing and allocated nothing";
     (void)port;
+}
+
+// The counter is `thread_local`: the counting `operator new` is process-wide,
+// and other threads in this test binary allocate while a pass is measured. A
+// process-wide counter would make the zero-allocation case depend on whoever
+// else was running, which is exactly the false reading the `thread_local` fix
+// (794582d) removed.
+TEST(ParkedFrame, AnotherThreadsAllocationsAreNotCountedHere)
+{
+#if !PARKED_FRAME_COUNTS_ALLOCATIONS
+    GTEST_SKIP() << "the counting allocator is not installed under a sanitizer";
+#endif
+    std::atomic<int> stage{0};
+    std::thread worker{[&stage]()
+                       {
+                           while (1 != stage.load(std::memory_order_acquire))
+                           {
+                               std::this_thread::yield();
+                           }
+                           for (int i = 0; i < 1000; ++i)
+                           {
+                               void* const memory = ::operator new(64);
+                               ::operator delete(memory);
+                           }
+                           stage.store(2, std::memory_order_release);
+                       }};
+
+    const std::size_t before = g_allocations;
+    stage.store(1, std::memory_order_release);
+    while (2 != stage.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    worker.join();
+    const std::size_t allocations = g_allocations - before;
+    EXPECT_EQ(0u, allocations) << "another thread's allocation was counted on this one";
 }
 
 TEST(ParkedFrame, ARingThePoolCannotCoverIsRefused)

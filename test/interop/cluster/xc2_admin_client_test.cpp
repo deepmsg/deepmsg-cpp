@@ -365,7 +365,7 @@ TEST_F(Xc2AdminClientTest, theLeaderTerminatesWhenItsServiceStops)
 
     ClusterClientSession session;
     ASSERT_TRUE(connect_udp_retry(session)) << node_dump() << session.last_error();
-    ASSERT_TRUE(session.offer_and_await("before-terminate-1", 1)) << node_dump();
+    ASSERT_TRUE(session.offer_and_await_echo("before-terminate-1")) << node_dump();
 
     // `leader.container().close()`: the container terminates through its
     // shutdown path, which tells the CM where the service stopped.
@@ -383,7 +383,7 @@ TEST_F(Xc2AdminClientTest, theLeaderTerminatesWhenItsServiceStops)
     // (`SessionManager.java:916-924`).
     ASSERT_TRUE(session.pump_until([&session]() { return session.new_leader_events() > 0; }, std::chrono::seconds(30)))
         << "the old session never saw the new leader: " << node_dump();
-    EXPECT_TRUE(session.offer_and_await("after-terminate-1", 1))
+    EXPECT_TRUE(session.offer_and_await_echo("after-terminate-1"))
         << "the old session could not send after the failover: " << node_dump();
 
     session.close();
@@ -438,7 +438,7 @@ TEST_F(Xc2AdminClientTest, theClientRedirectsToTheLeaderDuringConnect)
     EXPECT_NE(std::string::npos, session.ingress_channel().find(expected))
         << "the redirected publication is not on the leader's endpoint: " << session.ingress_channel();
 
-    EXPECT_TRUE(session.offer_and_await("redirect-echo", 1)) << node_dump();
+    EXPECT_TRUE(session.offer_and_await_echo("redirect-echo")) << node_dump();
 
     session.close();
     stop_round();

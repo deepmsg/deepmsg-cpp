@@ -266,7 +266,13 @@ public:
         return listener_.admin_responses;
     }
 
-    /// Offer `payload` once, then pump until `expected` egress messages exist.
+    /// Offer `payload` once, then pump until `expected` egress messages exist
+    /// *and* at least one of them is new. The new-message half is what makes a
+    /// count safe: a count that is already satisfied by an earlier batch (a
+    /// caller that starts over at one after a reconnect, or a test that offers
+    /// twice on one connection) must still wait for this offer. (2026-11-21/22:
+    /// the C9 leader-change case counted echoes that belonged to the previous
+    /// batch; the same shape was latent in the other call sites.)
     [[nodiscard]] bool offer_and_await(std::string_view payload, std::size_t expected,
                                        std::chrono::milliseconds timeout = std::chrono::seconds(10))
     {
@@ -274,6 +280,7 @@ public:
         {
             return false;
         }
+        const std::size_t before = listener_.messages.size();
         const auto bytes =
             std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
         bool offered = false;
@@ -292,13 +299,28 @@ public:
             {
                 return false;
             }
-            if (offered && listener_.messages.size() >= expected)
+            if (offered && listener_.messages.size() >= expected && listener_.messages.size() > before)
             {
                 return true;
             }
             std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
         return false;
+    }
+
+    /// Offer `payload` and wait for *its* echo: the first message recorded after
+    /// the offer must be the payload itself. The echo business returns the
+    /// client's bytes unchanged, so a count that an older message satisfies and
+    /// a duplicate or reordered response both fail here.
+    [[nodiscard]] bool offer_and_await_echo(std::string_view payload,
+                                            std::chrono::milliseconds timeout = std::chrono::seconds(10))
+    {
+        const std::size_t before = listener_.messages.size();
+        if (!offer_and_await(payload, before + 1, timeout))
+        {
+            return false;
+        }
+        return listener_.messages.size() > before && listener_.messages[before] == payload;
     }
 
     /// Offer `payload` and pump until the publication takes it. No echo is
