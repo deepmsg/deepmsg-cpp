@@ -549,9 +549,15 @@ protected:
         ASSERT_TRUE(connected) << session_.last_error();
         for (int i = first; i < first + count; ++i)
         {
-            ASSERT_TRUE(session_.offer_and_await(int_payload(i), static_cast<std::size_t>(i - first + 1),
-                                                 std::chrono::seconds(20)))
+            // `close()`/`connect()` do not reset the session's egress listener,
+            // so a count that starts at one is already satisfied by the previous
+            // batch: wait for one *new* echo and check it is the one we offered.
+            // (2026-11-21: the C9 leader-change failure; the count-only wait let
+            // `stop_all()` catch a batch that had not been committed yet.)
+            const std::size_t before = session_.messages().size();
+            ASSERT_TRUE(session_.offer_and_await(int_payload(i), before + 1, std::chrono::seconds(20)))
                 << "echo failed at " << i;
+            ASSERT_EQ(session_.messages().back(), int_payload(i)) << "the echo at " << i << " is not ours";
         }
     }
 
@@ -598,20 +604,63 @@ protected:
         return -1;
     }
 
+    /// Every member moves to `snapshot` (3) while the leader takes one, and a
+    /// member in any other state does not serve backup sessions
+    /// (`processPendingBackupSessions` runs in `ACTIVE`). `take_snapshot`
+    /// returns on the leader's counter, so a follower can still be snapshotting:
+    /// wait for one to be active before asking it.
+    [[nodiscard]] int wait_for_follower(std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const int member = follower_index();
+            if (member >= 0)
+            {
+                return member;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return -1;
+    }
+
     /// `backupQueryContainsSnapshot` (`TestCluster.java:2517-2524`): query a
     /// follower at `log_position` and return the snapshots' log positions. The
     /// query is re-sent while no response arrives, as the reference does.
     [[nodiscard]] QueryResult query_snapshots(std::int64_t log_position, int query_index)
     {
-        const int member = follower_index();
-        EXPECT_GE(member, 0) << "no follower to answer a backup query";
+        const int member = wait_for_follower(std::chrono::seconds(30));
+        if (member < 0)
+        {
+            // A failure here used to fall through to `node_dir(-1)` and then
+            // dereference the failed connect: the process dumped core instead of
+            // reporting which member was missing (2026-11-21, iteration 6 of the
+            // repeated suite). Report role/state per member and stop.
+            std::string members;
+            for (int i = 0; i < MEMBERS; ++i)
+            {
+                members.append(" node")
+                    .append(std::to_string(i))
+                    .append("=role/state ")
+                    .append(std::to_string(counter(i, deepmsg::cluster::common::CLUSTER_NODE_ROLE_TYPE_ID)))
+                    .append("/")
+                    .append(
+                        std::to_string(counter(i, deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID)));
+            }
+            ADD_FAILURE() << "no follower to answer a backup query:" << members;
+            return {};
+        }
 
         // `ClientConfig.dir` is a view: the path must outlive the connect.
         const std::string client_dir = node_dir(member) + "/aeron";
         axc::core::ClientConfig client_config{client_dir};
         client_config.on_error = &on_client_error;
         auto connected = DeepmsgClient::connect(client_config);
-        EXPECT_TRUE(connected) << connected.error().message.view();
+        if (!connected)
+        {
+            ADD_FAILURE() << "backup query client: " << connected.error().message.view();
+            return {};
+        }
 
         const std::string response_channel =
             "aeron:udp?endpoint=localhost:" + std::to_string(base_port_ + 300 + query_index);
@@ -1282,10 +1331,13 @@ TEST_F(Xc9JavaBackupAgainstOurClusterTest, theBackupFollowsTheClusterThroughALea
         << "the node started from the backup never became the active leader (state="
         << restart_counter(deepmsg::cluster::common::CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID) << ")";
 
-    // Known flake, and pre-existing: on `main` (3c38481) the tracking check
-    // below fails 2 in 5 in the release preset with the recovered state
-    // stopping after the first batch (baseline in `/tmp/dp-main`, 2026-11-21).
-    // Debug passes. Left active so the gap stays visible.
+    // 2026-11-21: this used to fail 2 in 5 in the release preset, the recovered
+    // state stopping after a batch or skipping the middle one. `send_ints` was
+    // only counting egress messages across a reconnect, so the batches sent
+    // after BACKING_UP and after the election were never actually awaited and
+    // `stop_all()` could catch them before they committed (the scenes are in
+    // `analysis/cpp/records/c9-leader-change-2026-11-21/`). It now waits for a
+    // new echo and checks the payload.
     std::vector<std::int32_t> expected;
     for (int i = 0; i < 20; ++i)
     {
