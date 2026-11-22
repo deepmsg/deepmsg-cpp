@@ -28,6 +28,7 @@
  * to is not the arm the cell says it measured).
  */
 #include "common.h"
+#include "rate.h"
 
 /* How many messages may be in flight at once. At 501K/s and a 25 us round
  * trip, about thirteen are; a thousand is headroom for the paced runs and
@@ -263,16 +264,10 @@ int main(int argc, char** argv)
         int64_t achieved = 0;
         if (rate > 0)
         {
-            /* The send-side span: `last_receive_ns - first_send_ns` includes
-             * the last message's round trip and understates a small sample. */
-            const int64_t span = pong.last_send_ns - pong.first_send_ns;
-            /* The first message was the handshake; the paced count is what
-             * went out after it. */
-            const int64_t paced = total > 1 ? total - 1 : total;
-            if (span > 0)
-            {
-                achieved = (paced * 1000000000LL) / span;
-            }
+            /* The send-side span (see `rate.h`): the first message is the
+             * handshake, and `last_receive_ns - first_send_ns` would include
+             * the last round trip and understate a small sample. */
+            achieved = p6_achieved_rate(total, pong.first_send_ns, pong.last_send_ns);
         }
         printf("RATE %lld ACHIEVED %lld\n", (long long)rate, (long long)achieved);
         if (rate > 0 && achieved * 100 < rate * 90)
