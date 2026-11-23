@@ -78,6 +78,11 @@ public:
     [[nodiscard]] std::expected<PortStats, Error> stats() const noexcept;
     [[nodiscard]] std::expected<PortLink, Error> link() const noexcept;
 
+    /// What the device will take, in place: a queue whose depth the device
+    /// silently clamps is a depth nobody chose. Call before `configure`, and
+    /// use the adjusted values for the queues themselves.
+    [[nodiscard]] std::expected<void, Error> adjust_descriptors(std::uint16_t& rx_descriptors,
+                                                                std::uint16_t& tx_descriptors) noexcept;
     [[nodiscard]] std::expected<void, Error> configure(std::uint16_t rx_queues, std::uint16_t tx_queues,
                                                        std::uint64_t rx_offloads, std::uint64_t tx_offloads) noexcept;
     [[nodiscard]] std::expected<void, Error> setup_rx_queue(std::uint16_t queue, std::uint16_t descriptors,

@@ -77,9 +77,24 @@ packet_io::Disposition demux(stack::Stack& target, const packet_io::RxFrame& fra
             return packet_io::Disposition::consumed();
         }
         const auto& params = target.params();
+        // The answer leaves by the route table, not by the MAC the request
+        // arrived with. A cloud VPC sends every outbound frame to its
+        // gateway's MAC (and does not promise to keep the inbound source
+        // MAC), so a reply addressed to `ethernet->source` is dropped on the
+        // way out (2026-11-23, Aliyun c7: an ICMP reply to the hairpin's real
+        // MAC never reached the peer). The inbound MAC remains the fallback
+        // for a peer the neighbour table does not know.
+        auto reply_destination = ethernet->source;
+        if (const auto next = target.next_hop(echo->ipv4.source))
+        {
+            if (const auto resolved = target.neighbour(*next))
+            {
+                reply_destination = *resolved;
+            }
+        }
         Deferred reply;
         reply.kind = Deferred::Kind::icmp_reply;
-        reply.ipv4 = frame::Ipv4Write{ethernet->source, params.mac, params.address, echo->ipv4.source,
+        reply.ipv4 = frame::Ipv4Write{reply_destination, params.mac, params.address, echo->ipv4.source,
                                       target.next_identification()};
         reply.identifier = echo->echo.identifier;
         reply.sequence = echo->echo.sequence;

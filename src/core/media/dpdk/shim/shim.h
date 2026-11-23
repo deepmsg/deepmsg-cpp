@@ -132,6 +132,7 @@ extern "C"
     uint64_t shim_mbuf_tx_udp_checksum(void);
 
     int shim_port_configure(unsigned port, unsigned nb_rx, unsigned nb_tx, uint64_t rx_offloads, uint64_t tx_offloads);
+    int shim_port_adjust_desc(unsigned port, unsigned* rx_desc, unsigned* tx_desc);
     int shim_rx_queue_setup(unsigned port, unsigned queue, unsigned descriptors, void* pool);
     int shim_tx_queue_setup(unsigned port, unsigned queue, unsigned descriptors);
     int shim_port_start(unsigned port);

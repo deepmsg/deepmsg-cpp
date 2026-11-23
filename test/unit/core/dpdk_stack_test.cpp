@@ -231,6 +231,63 @@ TEST(Stack, AnEchoRequestIsAnswered)
               std::string_view(reinterpret_cast<const char*>(echo->echo.payload.data()), echo->echo.payload.size()));
 }
 
+/// A reply leaves by the neighbour table, not by the MAC the request happened
+/// to arrive with: on a cloud VPC every outbound frame goes to the gateway's
+/// MAC, and an answer addressed to the peer's real MAC is dropped before it
+/// reaches it (2026-11-23, `demux.cpp` answered ICMP with `ethernet->source`).
+TEST(Stack, AnEchoReplyGoesToTheNeighboursMac)
+{
+    Wire wire;
+    auto settings = params(OWN, MAC_A);
+    const Mac gateway{0xee, 0xff, 0xff, 0xff, 0xff, 0xff};
+    settings.static_neighbours.emplace_back(PEER, gateway);
+    auto a = make_stack(wire, Side::a, settings);
+
+    const std::array<std::uint8_t, 4> icmp_payload{'p', 'i', 'n', 'g'};
+    const axc::core::media::dpdk::frame::IcmpEcho request{axc::core::media::dpdk::frame::ICMP_ECHO_REQUEST, 0x1234, 7,
+                                                          icmp_payload};
+    const Ipv4Write from_peer{MAC_A, MAC_B, PEER, OWN, 3};
+    std::vector<std::uint8_t> frame_bytes(14 + 20 + 8 + icmp_payload.size());
+    const auto written = axc::core::media::dpdk::frame::write_icmp_echo(
+        frame_bytes, from_peer, request, axc::core::media::dpdk::frame::ICMP_ECHO_REQUEST);
+    ASSERT_TRUE(written.has_value());
+    wire.send(Side::b, std::span<const std::uint8_t>{frame_bytes}.first(*written));
+
+    EXPECT_EQ(1u, a->pump());
+    const auto answers = wire.take(Side::b, 10);
+    ASSERT_EQ(1u, answers.size());
+
+    const auto header = axc::core::media::dpdk::frame::read_ethernet_header(answers.front());
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(gateway, header->destination);
+}
+
+/// ...and when the neighbour table has nothing, the inbound source MAC is the
+/// only address known, so it is what the answer uses.
+TEST(Stack, AnEchoReplyFallsBackToTheInboundSourceMac)
+{
+    Wire wire;
+    auto a = make_stack(wire, Side::a, params(OWN, MAC_A));
+
+    const std::array<std::uint8_t, 4> icmp_payload{'p', 'i', 'n', 'g'};
+    const axc::core::media::dpdk::frame::IcmpEcho request{axc::core::media::dpdk::frame::ICMP_ECHO_REQUEST, 0x1234, 7,
+                                                          icmp_payload};
+    const Ipv4Write from_peer{MAC_A, MAC_B, PEER, OWN, 3};
+    std::vector<std::uint8_t> frame_bytes(14 + 20 + 8 + icmp_payload.size());
+    const auto written = axc::core::media::dpdk::frame::write_icmp_echo(
+        frame_bytes, from_peer, request, axc::core::media::dpdk::frame::ICMP_ECHO_REQUEST);
+    ASSERT_TRUE(written.has_value());
+    wire.send(Side::b, std::span<const std::uint8_t>{frame_bytes}.first(*written));
+
+    EXPECT_EQ(1u, a->pump());
+    const auto answers = wire.take(Side::b, 10);
+    ASSERT_EQ(1u, answers.size());
+
+    const auto header = axc::core::media::dpdk::frame::read_ethernet_header(answers.front());
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(MAC_B, header->destination);
+}
+
 TEST(Stack, AReleasedBindingDoesNotReceiveAgain)
 {
     Wire wire;

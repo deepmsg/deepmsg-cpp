@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include "core/media/dpdk/mempool.h"
 #include "core/media/dpdk/port.h"
@@ -24,7 +25,17 @@ namespace axc::core::media::dpdk
 class DpdkPort : public packet_io::RxPort, public packet_io::TxPort
 {
 public:
-    DpdkPort(Port& port, Mempool& pool, unsigned rx_queue, unsigned tx_queue, bool tx_checksum_offload);
+    /// `rx_queues` is every receive queue this adapter polls, in the order it
+    /// will take them; the one receive thread owns them, so the round-robin
+    /// cursor needs no synchronisation. A transmit-only adapter passes none.
+    ///
+    /// Why more than one: virtio announces `RTE_MAX(nb_rx, nb_tx)` queue pairs
+    /// at device start (`virtio_ethdev.c:2383-2385`), and the backend hashes
+    /// inbound flows across all of them. A port opened with one receive queue
+    /// and two transmit queues leaves half its inbound flows on a queue nobody
+    /// polls (2026-11-23: DEDICATED over an Aliyun virtio ENI lost every burst
+    /// whose tuple hashed to pair 1, while SHARED -- one pair -- took all).
+    DpdkPort(Port& port, Mempool& pool, std::vector<unsigned> rx_queues, unsigned tx_queue, bool tx_checksum_offload);
 
     std::size_t rx_burst(std::size_t max, packet_io::RxCallback callback, void* context,
                          std::vector<packet_io::KeptFrame>& kept) override;
@@ -39,7 +50,8 @@ public:
 private:
     Port* port_;
     Mempool* pool_;
-    unsigned rx_queue_;
+    std::vector<unsigned> rx_queues_;
+    std::size_t rx_cursor_{0};
     unsigned tx_queue_;
     packet_io::Offloads offloads_;
     frame::L4Checksum tx_checksums_;

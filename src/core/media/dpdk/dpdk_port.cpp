@@ -29,10 +29,11 @@ namespace
 
 }  // namespace
 
-DpdkPort::DpdkPort(Port& port, Mempool& pool, unsigned rx_queue, unsigned tx_queue, bool tx_checksum_offload)
+DpdkPort::DpdkPort(Port& port, Mempool& pool, std::vector<unsigned> rx_queues, unsigned tx_queue,
+                   bool tx_checksum_offload)
     : port_{&port},
       pool_{&pool},
-      rx_queue_{rx_queue},
+      rx_queues_{std::move(rx_queues)},
       tx_queue_{tx_queue},
       tx_checksums_{tx_checksum_offload ? frame::L4Checksum::by_the_nic : frame::L4Checksum::software}
 {
@@ -65,28 +66,39 @@ void release_mbuf(void* mbuf) noexcept
 std::size_t DpdkPort::rx_burst(std::size_t max, packet_io::RxCallback callback, void* context,
                                std::vector<packet_io::KeptFrame>& kept)
 {
-    const auto burst = static_cast<unsigned>(std::min<std::size_t>(max, SHIM_BURST_MAX));
-    const std::size_t received = port_->rx_burst(rx_queue_, rx_scratch_.data(), burst);
-
-    for (std::size_t index = 0; index < received; ++index)
+    // One burst per queue, starting where the last call left off: the budget
+    // stays the caller's, the queues take turns, and a queue that is empty
+    // costs one `rte_eth_rx_burst` and no more.
+    std::size_t total = 0;
+    const std::size_t queues = rx_queues_.size();
+    for (std::size_t turn = 0; turn < queues && total < max; ++turn)
     {
-        const shim_rx_desc& descriptor = rx_scratch_[index];
-        const packet_io::RxFrame view{std::span<const std::uint8_t>{descriptor.data, descriptor.len},
-                                      offloads_.checksums(verdict_of(descriptor.checksum))};
-        const packet_io::Disposition disposition = callback(context, view);
-        if (disposition.keep)
+        const unsigned queue = rx_queues_[rx_cursor_];
+        rx_cursor_ = (rx_cursor_ + 1) % queues;
+        const auto burst = static_cast<unsigned>(std::min<std::size_t>(max - total, SHIM_BURST_MAX));
+        const std::size_t received = port_->rx_burst(queue, rx_scratch_.data(), burst);
+
+        for (std::size_t index = 0; index < received; ++index)
         {
-            // The frame stays in the pool until the transport has copied it
-            // out; nothing is copied here and nothing is allocated.
-            kept.push_back(packet_io::KeptFrame{
-                *disposition.keep, disposition.source, disposition.payload_offset,
-                packet_io::ReadyFrame::parked(descriptor.mbuf, descriptor.data, descriptor.len, &release_mbuf)});
-            continue;
+            const shim_rx_desc& descriptor = rx_scratch_[index];
+            const packet_io::RxFrame view{std::span<const std::uint8_t>{descriptor.data, descriptor.len},
+                                          offloads_.checksums(verdict_of(descriptor.checksum))};
+            const packet_io::Disposition disposition = callback(context, view);
+            if (disposition.keep)
+            {
+                // The frame stays in the pool until the transport has copied it
+                // out; nothing is copied here and nothing is allocated.
+                kept.push_back(packet_io::KeptFrame{
+                    *disposition.keep, disposition.source, disposition.payload_offset,
+                    packet_io::ReadyFrame::parked(descriptor.mbuf, descriptor.data, descriptor.len, &release_mbuf)});
+                continue;
+            }
+            void* mbuf = descriptor.mbuf;
+            Mempool::free_bulk(&mbuf, 1);
         }
-        void* mbuf = descriptor.mbuf;
-        Mempool::free_bulk(&mbuf, 1);
+        total += received;
     }
-    return received;
+    return total;
 }
 
 packet_io::Offloads DpdkPort::offloads() const noexcept
