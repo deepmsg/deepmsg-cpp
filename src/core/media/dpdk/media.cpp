@@ -774,14 +774,22 @@ std::expected<Media, Error> open_media(const Settings& settings, aeron_threading
     const bool rx_checksums = (info->rx_offloads & rx_bits) == rx_bits;
     const bool tx_checksums = (info->tx_offloads & tx_bits) == tx_bits;
 
-    // One receive queue, and one transmit queue per sending thread: two for a
-    // DEDICATED driver, one for the modes that run both sending agents on a
-    // thread (see `transmit_queues_for`). A virtual device reports one of each,
-    // so a DEDICATED driver over one is the single-queue fallback -- and that
-    // is the 2026-11-16 lost-frame shape (two agents, one queue), which the
-    // warning below names instead of leaving it to the bench to find again.
-    const std::uint16_t rx_queues = std::min<std::uint16_t>(1, info->max_rx_queues);
+    // One transmit queue per sending thread: two for a DEDICATED driver, one
+    // for the modes that run both sending agents on a thread (see
+    // `transmit_queues_for`). A virtual device reports one of each, so a
+    // DEDICATED driver over one is the single-queue fallback -- and that is the
+    // 2026-11-16 lost-frame shape (two agents, one queue), which the warning
+    // below names instead of leaving it to the bench to find again.
     const std::uint16_t tx_queues = transmit_queues_for(mode, info->max_tx_queues);
+    // The receive side opens as many queues as the transmit side. Virtio ties
+    // the two together: the driver announces `RTE_MAX(nb_rx, nb_tx)` queue
+    // pairs at device start (`virtio_ethdev.c:2383-2385`), and the backend
+    // hashes inbound flows across every pair it was given. A port with one
+    // receive queue and two transmit queues therefore leaves half its inbound
+    // flows on a queue nobody polls -- 2026-11-23, DEDICATED over an Aliyun
+    // virtio ENI lost every burst whose tuple hashed to pair 1, while SHARED
+    // (one pair) took them all. The one receive thread polls them in turn.
+    const std::uint16_t rx_queues = std::min<std::uint16_t>(std::max<std::uint16_t>(1, tx_queues), info->max_rx_queues);
     if (0 == rx_queues || 0 == tx_queues)
     {
         return fail(make_error(ErrorCode::config_error, "the DPDK port has no queue to open"));
@@ -794,23 +802,31 @@ std::expected<Media, Error> open_media(const Settings& settings, aeron_threading
                      "AERON_THREADING_MODE=SHARED for a single-threaded driver)\n");
     }
 
+    // The depths the device will actually take, before anything is set up with
+    // them: the queue this build asks for and the queue the PMD gives are not
+    // always the same number (`virtio` wants a power of two within its range).
+    std::uint16_t rx_descriptors = settings.rx_descriptors;
+    std::uint16_t tx_descriptors = settings.tx_descriptors;
+    if (auto adjusted = port_owner->adjust_descriptors(rx_descriptors, tx_descriptors); !adjusted)
+    {
+        return fail(adjusted.error());
+    }
     if (auto configured =
             port_owner->configure(rx_queues, tx_queues, rx_checksums ? rx_bits : 0, tx_checksums ? tx_bits : 0);
         !configured)
     {
         return fail(configured.error());
     }
-    if (auto setup = port_owner->setup_rx_queue(0, settings.rx_descriptors, *pool_owner); !setup)
+    for (std::uint16_t queue = 0; queue < rx_queues; ++queue)
     {
-        return fail(setup.error());
+        if (auto setup = port_owner->setup_rx_queue(queue, rx_descriptors, *pool_owner); !setup)
+        {
+            return fail(setup.error());
+        }
     }
-    if (auto setup = port_owner->setup_tx_queue(0, settings.tx_descriptors); !setup)
+    for (std::uint16_t queue = 0; queue < tx_queues; ++queue)
     {
-        return fail(setup.error());
-    }
-    if (tx_queues > 1)
-    {
-        if (auto setup = port_owner->setup_tx_queue(1, settings.tx_descriptors); !setup)
+        if (auto setup = port_owner->setup_tx_queue(queue, tx_descriptors); !setup)
         {
             return fail(setup.error());
         }
@@ -867,8 +883,8 @@ std::expected<Media, Error> open_media(const Settings& settings, aeron_threading
     // budget `Stack::bind` will hold every channel to (a parked frame holds a
     // buffer for as long as its ring does).
     const std::size_t pool_size = settings.mempool_size.value_or(8191);
-    const std::size_t descriptor_reserve = static_cast<std::size_t>(settings.rx_descriptors) +
-                                           static_cast<std::size_t>(settings.tx_descriptors) * tx_queues + 64;
+    const std::size_t descriptor_reserve = static_cast<std::size_t>(rx_descriptors) * rx_queues +
+                                           static_cast<std::size_t>(tx_descriptors) * tx_queues + 64;
     params.ring_mbuf_budget = pool_size > descriptor_reserve ? pool_size - descriptor_reserve : 0;
 
     // The adapters hold raw pointers to the port and the pool, so they are
@@ -878,9 +894,19 @@ std::expected<Media, Error> open_media(const Settings& settings, aeron_threading
         Media::Impl{std::move(*eal), std::move(*pool_owner), std::move(*port_owner), nullptr});
 
     const unsigned receiver_queue = tx_queues > 1 ? 1 : 0;
-    auto rx_adapter = std::make_unique<DpdkPort>(impl->port, impl->pool, 0, 0, tx_checksums);
-    auto sender_adapter = std::make_unique<DpdkPort>(impl->port, impl->pool, 0, 0, tx_checksums);
-    auto receiver_adapter = std::make_unique<DpdkPort>(impl->port, impl->pool, 0, receiver_queue, tx_checksums);
+    std::vector<unsigned> receive_queues;
+    receive_queues.reserve(rx_queues);
+    for (std::uint16_t queue = 0; queue < rx_queues; ++queue)
+    {
+        receive_queues.push_back(queue);
+    }
+    // The receive adapter polls every queue the device was given; the two
+    // transmit adapters poll none (they only send, and the receive thread is
+    // the one that owns the queues).
+    auto rx_adapter = std::make_unique<DpdkPort>(impl->port, impl->pool, receive_queues, 0, tx_checksums);
+    auto sender_adapter = std::make_unique<DpdkPort>(impl->port, impl->pool, std::vector<unsigned>{}, 0, tx_checksums);
+    auto receiver_adapter =
+        std::make_unique<DpdkPort>(impl->port, impl->pool, std::vector<unsigned>{}, receiver_queue, tx_checksums);
     impl->stack = std::make_unique<stack::Stack>(params, std::move(rx_adapter), std::move(sender_adapter),
                                                  std::move(receiver_adapter));
 

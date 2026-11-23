@@ -139,6 +139,20 @@ std::expected<PortLink, Error> Port::link() const noexcept
     return PortLink{raw.speed_mbps, 0 != raw.up, 0 != raw.full_duplex};
 }
 
+std::expected<void, Error> Port::adjust_descriptors(std::uint16_t& rx_descriptors,
+                                                    std::uint16_t& tx_descriptors) noexcept
+{
+    unsigned rx = rx_descriptors;
+    unsigned tx = tx_descriptors;
+    if (0 != shim_port_adjust_desc(index_, &rx, &tx))
+    {
+        return std::unexpected(rte_error("rte_eth_dev_adjust_nb_rx_tx_desc"));
+    }
+    rx_descriptors = static_cast<std::uint16_t>(rx);
+    tx_descriptors = static_cast<std::uint16_t>(tx);
+    return {};
+}
+
 std::expected<void, Error> Port::configure(std::uint16_t rx_queues, std::uint16_t tx_queues, std::uint64_t rx_offloads,
                                            std::uint64_t tx_offloads) noexcept
 {

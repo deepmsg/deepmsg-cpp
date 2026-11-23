@@ -305,6 +305,28 @@ uint64_t shim_mbuf_tx_ip_checksum(void) { return RTE_MBUF_F_TX_IP_CKSUM; }
 
 uint64_t shim_mbuf_tx_udp_checksum(void) { return RTE_MBUF_F_TX_UDP_CKSUM; }
 
+/*
+ * The descriptor counts the device will actually take. Rounded here and not by
+ * the caller: `rte_eth_dev_adjust_nb_rx_tx_desc` is the one place that knows a
+ * PMD's minimum, maximum and cache-line steps (`virtio` wants a power of two
+ * within 256..32768), and a queue set up with a number the device then clamps
+ * is a queue whose depth nobody chose.
+ */
+int shim_port_adjust_desc(unsigned port, unsigned* rx_desc, unsigned* tx_desc)
+{
+    uint16_t rx = (uint16_t)*rx_desc;
+    uint16_t tx = (uint16_t)*tx_desc;
+
+    rte_errno = 0;
+    if (0 != rte_eth_dev_adjust_nb_rx_tx_desc((uint16_t)port, &rx, &tx))
+    {
+        return -1;
+    }
+    *rx_desc = rx;
+    *tx_desc = tx;
+    return 0;
+}
+
 int shim_port_configure(unsigned port, unsigned nb_rx, unsigned nb_tx, uint64_t rx_offloads, uint64_t tx_offloads)
 {
     struct rte_eth_conf conf;

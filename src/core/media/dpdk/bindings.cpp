@@ -360,12 +360,40 @@ extern "C" int dpdk_init(aeron_udp_channel_transport_t* transport, struct sockad
             {
                 state->binding = *binding;
             }
-            else if (ENOBUFS == binding.error().errcode)
+            else
             {
-                std::fprintf(stdout,
-                             "dpdk media: a channel was refused: the mbuf pool has no room for another ring "
-                             "(rings use %zu of %zu buffers)\n",
-                             g_stack->ring_mbufs(), g_stack->params().ring_mbuf_budget);
+                // A channel that named this media's own address has nowhere
+                // else to go: the kernel cannot bind it (`EADDRNOTAVAIL`), and
+                // the socket the default bindings made sits on the wildcard
+                // where nothing for this address arrives. Returning 0 here
+                // (2026-11-23, an `ENOBUFS` that printed one line) left the
+                // transport in `kernel_transports`, and it silently received
+                // nothing for the life of the process. Fail instead, and let
+                // the driver report it (the reference treats a refused bind as
+                // a failed transport, `aeron_receive_channel_endpoint.c:1038`).
+                const bool owns_the_address = address.has_value() && *address == g_stack->params().address;
+                if (owns_the_address)
+                {
+                    const int errcode = binding.error().errcode;
+                    char name[INET_ADDRSTRLEN]{};
+                    struct in_addr own{};
+                    own.s_addr = htonl(g_stack->params().address);
+                    const char* text = inet_ntop(AF_INET, &own, name, sizeof(name));
+                    (void)g_default->close_func(transport);
+                    AERON_SET_ERR(errcode,
+                                  "dpdk media: channel %s:%u could not be bound on the media (rings use %zu of %zu "
+                                  "buffers)",
+                                  nullptr != text ? text : "?", static_cast<unsigned>(*port), g_stack->ring_mbufs(),
+                                  g_stack->params().ring_mbuf_budget);
+                    return -1;
+                }
+                if (ENOBUFS == binding.error().errcode)
+                {
+                    std::fprintf(stdout,
+                                 "dpdk media: a channel was refused: the mbuf pool has no room for another ring "
+                                 "(rings use %zu of %zu buffers)\n",
+                                 g_stack->ring_mbufs(), g_stack->params().ring_mbuf_budget);
+                }
             }
         }
     }

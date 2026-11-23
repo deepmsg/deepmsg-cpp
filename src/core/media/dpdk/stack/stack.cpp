@@ -51,7 +51,10 @@ std::pair<std::size_t, frame::TxOffloads> copy_fill(void* context, std::span<std
 
 struct UdpFill
 {
-    Stack* stack;
+    /// The port this datagram actually leaves by: the sender's or the
+    /// receiver's, and the two may not always answer alike (2026-11-23, the
+    /// checksum question a cloud NIC asks is the port's, not the stack's).
+    packet_io::TxPort* port;
     frame::Ipv4Write ipv4;
     ports::Binding binding;
     ports::Ipv4Endpoint destination;
@@ -73,7 +76,7 @@ std::pair<std::size_t, frame::TxOffloads> udp_fill(void* context, std::span<std:
         offset += part.size();
     }
     const frame::UdpWrite write{udp.ipv4, udp.binding.port, udp.destination.port, udp.total};
-    const auto written = frame::write_ipv4_udp(buffer, write, udp.stack->sender_tx().checksums());
+    const auto written = frame::write_ipv4_udp(buffer, write, udp.port->checksums());
     if (!written)
     {
         return {0, frame::TxOffloads::none()};
@@ -325,7 +328,7 @@ std::expected<std::size_t, Error> Stack::send_to(packet_io::TxPort& port, const 
 
     const frame::Ipv4Write ipv4{*hardware, params_.mac, params_.address, destination.address, next_identification()};
 
-    UdpFill fill_context{this, ipv4, binding, destination, parts, payload_size};
+    UdpFill fill_context{&port, ipv4, binding, destination, parts, payload_size};
     const packet_io::TxResult sent = port.tx_burst(1, &udp_fill, &fill_context);
     if (0 == sent.taken)
     {
