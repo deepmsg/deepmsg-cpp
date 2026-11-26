@@ -46,7 +46,7 @@ esac
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 build=${AXC_BUILD_DIR:-$repo/build/dpdk}
-jar=${AXC_AERON_JAR:-$repo/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar}
+jar=${AXC_AERON_JAR:-$repo/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.2.jar}
 tests_root=${AXC_AERON_TESTS:-}
 pci=${AXC_DPDK_BENCH_PCI:-0000:03:00.0}
 peer_bdf=$(printf '%s' "$pci" | sed -E 's/([0-9a-f]{2}:[0-9a-f]{2})\.[0-9a-f]$/\1.1/')
