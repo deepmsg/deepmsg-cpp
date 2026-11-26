@@ -174,6 +174,34 @@ TEST_F(RecordingLogTest, shouldIgnoreInvalidMidSnapshotInRecoveryPlan)
     EXPECT_EQ(5, plan->snapshots[1].recording_id);
 }
 
+TEST_F(RecordingLogTest, shouldNotAppendTheSameSnapshotTwiceForOnePosition)
+{
+    constexpr std::int32_t service_count = 1;
+
+    {
+        auto log = open_log(true);
+        append_snapshot(log, 1, 1, 0, 777, 0, 0);
+        append_snapshot(log, 2, 1, 0, 777, 0, SERVICE_ID);
+        // A leader change or a replay re-executes the action: the same snapshot
+        // at the same position comes back with a new recording id.
+        append_snapshot(log, 3, 1, 0, 777, 0, 0);
+        append_snapshot(log, 4, 1, 0, 777, 0, SERVICE_ID);
+    }
+
+    auto log = open_log(true);
+    ASSERT_EQ(2U, log.entries().size());
+
+    RecordingLog::RecordingExtentSource source = [](std::int64_t)
+    { return std::optional<RecordingLog::RecordingExtent>{}; };
+    auto plan = log.create_recovery_plan(source, service_count, NULL_VALUE);
+    ASSERT_TRUE(plan) << plan.error().message.view();
+    ASSERT_EQ(2U, plan->snapshots.size());
+    EXPECT_EQ(SERVICE_ID, plan->snapshots[0].service_id);
+    EXPECT_EQ(2, plan->snapshots[0].recording_id);
+    EXPECT_EQ(0, plan->snapshots[1].service_id);
+    EXPECT_EQ(1, plan->snapshots[1].recording_id);
+}
+
 TEST_F(RecordingLogTest, shouldIgnoreInvalidTermInRecoveryPlan)
 {
     constexpr std::int32_t service_count = 1;
