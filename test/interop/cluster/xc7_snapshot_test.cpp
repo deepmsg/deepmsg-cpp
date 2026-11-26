@@ -551,6 +551,23 @@ TEST_F(Xc7SnapshotTest, shouldTerminateNodeWithInvalidSnapshotAndRecoveryAfterIn
     session.close();
 
     const int follower = (leader + 1) % NODES;
+    // `TestCluster.awaitSnapshotCount(1)` (`:1538-1547`) waits for **every**
+    // live node, not just the one whose toggle was set. The follower has to
+    // have written its own snapshot entry before it is stopped: a follower
+    // stopped inside that window restarts with no snapshot to hand its
+    // service, so the service never refuses it and the member rightly keeps
+    // running.
+    {
+        const auto snapshot_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (std::chrono::steady_clock::now() < snapshot_deadline &&
+               node_counter(follower, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID) < 1)
+        {
+            drive_node_clients();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ASSERT_GE(node_counter(follower, deepmsg::cluster::common::CLUSTER_SNAPSHOT_COUNTER_TYPE_ID), 1)
+            << "the follower never took the snapshot it must refuse: " << node_dump();
+    }
     stop_node_gracefully(follower);
     restart_node(round_, follower, false);
 
