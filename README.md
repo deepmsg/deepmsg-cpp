@@ -2,7 +2,7 @@
 
 C++23 reimplementation of the Aeron **archive server** and **cluster** on top of
 the official Aeron C client, C media driver and C archive client. The reference
-is Aeron **1.54.0**, pinned as the submodule gitlink `454da1e4e6`
+is Aeron **1.54.2**, pinned as the submodule gitlink `481d4271ad`
 (`third_party/aeron`, our fork `github.com/deepmsg/aeron`).
 
 Goals, in two separate judgments:
@@ -48,14 +48,14 @@ The plan, work packages and delivery records live **outside** this repository in
 
 ## Build
 
-Prerequisites: **CMake ≥ 3.30** (Aeron 1.54.0 requires it), JDK 21, gcc 13.3 for
+Prerequisites: **CMake ≥ 3.30** (Aeron 1.54.2 requires it), JDK 21, gcc 13.3 for
 all presets and **clang-20** for the `debug-clang` preset (clang 18 reports
 `__cpp_concepts=201907`, so libstdc++ 13 does not expose `std::expected`),
 `libdpdk-dev` for the DPDK presets.
 
 ```sh
 git submodule update --init --recursive
-scripts/fetch-sbe.sh                      # sbe-all 1.42.0 (the version Aeron 1.54.0 uses)
+scripts/fetch-sbe.sh                      # sbe-all 1.42.0 (the version Aeron 1.54.2 uses)
 cmake --preset debug
 cmake --build build/debug --parallel
 ctest --test-dir build/debug --output-on-failure
@@ -99,4 +99,4 @@ build if one of them references `operator new`, `pthread_mutex_lock`,
 
 ## License
 
-Apache-2.0. Sources are transcribed from Aeron 1.54.0; see `NOTICE`.
+Apache-2.0. Sources are transcribed from Aeron 1.54.2; see `NOTICE`.

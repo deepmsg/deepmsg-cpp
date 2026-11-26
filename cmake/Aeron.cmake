@@ -1,4 +1,4 @@
-# Build Aeron 1.54.0 from the pinned submodule (github.com/deepmsg/aeron @ 454da1e4e6).
+# Build Aeron 1.54.2 from the pinned submodule (github.com/deepmsg/aeron @ 481d4271ad).
 #
 # Rules:
 #  * never patch the submodule; the gitlink is the whole contract;

@@ -713,8 +713,8 @@ TEST(ClusterClientTest, theAdminRequestToTakeASnapshotIsTheSchemaGolden)
     ASSERT_TRUE(*sent);
     ASSERT_TRUE(pump_session(*session, fake, [&] { return fake.admin_requests() == 1; }));
 
-    // 1.54.0 schema 111 v17: MessageHeader(blockLength=28, template=26,
-    // schema=111, version=17), then leadershipTermId, clusterSessionId,
+    // 1.54.2 schema 111 v18: MessageHeader(blockLength=28, template=26,
+    // schema=111, version=18), then leadershipTermId, clusterSessionId,
     // correlationId, requestType=SNAPSHOT(0), and an empty payload (length 0).
     std::vector<std::uint8_t> expected(8 + 28 + 4, 0);
     const auto put = [&expected](std::size_t offset, const auto& value)
@@ -722,7 +722,7 @@ TEST(ClusterClientTest, theAdminRequestToTakeASnapshotIsTheSchemaGolden)
     put(0, std::uint16_t{28});
     put(2, std::uint16_t{26});
     put(4, std::uint16_t{111});
-    put(6, std::uint16_t{17});
+    put(6, std::uint16_t{18});
     put(8, TERM_ID);
     put(16, static_cast<std::int64_t>(SESSION_ID));
     put(24, correlation_id);

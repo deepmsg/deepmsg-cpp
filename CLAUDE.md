@@ -1,8 +1,8 @@
 # deepmsg-cpp — instructions for AI sessions
 
 C++23 transcription of the Aeron archive server and cluster on the official C
-client/driver. Reference: Aeron **1.54.0**, pinned as the submodule gitlink
-`454da1e4e6` in `third_party/aeron` (our fork `github.com/deepmsg/aeron`).
+client/driver. Reference: Aeron **1.54.2**, pinned as the submodule gitlink
+`481d4271ad` in `third_party/aeron` (our fork `github.com/deepmsg/aeron`).
 
 The plan, per-card plans and delivery records live outside this repo in
 `/home/gavin/trader/analysis/cpp/` (work packages: `work-packages-2026-11-07-cpp.md`).

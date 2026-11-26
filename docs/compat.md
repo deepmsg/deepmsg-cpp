@@ -1,7 +1,7 @@
 # Byte contracts
 
 Every wire format, disk format, counter key layout and configuration name that
-must match Aeron 1.54.0 goes here, with the test that pins it. A new format or
+must match Aeron 1.54.2 goes here, with the test that pins it. A new format or
 key is not mergeable without a row **and** a golden or interop test in the same
 commit.
 
