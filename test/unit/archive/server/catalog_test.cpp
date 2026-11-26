@@ -1,5 +1,5 @@
 // Reference: `aeron-archive/src/test/java/io/aeron/archive/CatalogTest.java`
-// (Aeron 1.54.0, 454da1e4e6). Test names are the reference method names.
+// (Aeron 1.54.2, 481d4271ad). Test names are the reference method names.
 //
 // Deviations from the reference test, recorded in `analysis/cpp/records/a1a.md`:
 //   * `shouldCloseAndRemainReadableWhenTheClosingThreadIsInterrupted` and
@@ -178,6 +178,19 @@ protected:
         EXPECT_TRUE(catalog) << (catalog ? std::string{} : std::string{catalog.error().message.view()});
         auto id = catalog->add_new_recording(0, 0, 0, SEGMENT_LENGTH, TERM_LENGTH, MTU_LENGTH, 6, 1, "channelG",
                                              "channelG?tag=f", "sourceA");
+        EXPECT_TRUE(id) << (id ? std::string{} : std::string{id.error().message.view()});
+        EXPECT_TRUE(catalog->close());
+        return *id;
+    }
+
+    /// `CatalogTest.newRecording(startPosition, termLength)` (`CatalogTest.java`):
+    /// a recording whose segment and term are both `term_length`.
+    [[nodiscard]] std::int64_t new_recording_with(std::int64_t start_position, std::int32_t term_length)
+    {
+        auto catalog = create_writer();
+        EXPECT_TRUE(catalog) << (catalog ? std::string{} : std::string{catalog.error().message.view()});
+        auto id = catalog->add_new_recording(start_position, 0, 0, term_length, term_length, MTU_LENGTH, 6, 1,
+                                             "channelG", "channelG?tag=f", "sourceA");
         EXPECT_TRUE(id) << (id ? std::string{} : std::string{id.error().message.view()});
         EXPECT_TRUE(catalog->close());
         return *id;
@@ -596,6 +609,63 @@ TEST_F(CatalogTest, shouldVerifyLastFragmentWhenZeroLengthFrameIsReadIntoNextBuf
                                        EXPECT_EQ(42, entry.descriptor.stopTimestamp());
                                        EXPECT_EQ(Catalog::PAGE_SIZE + 128, entry.descriptor.stopPosition());
                                    }));
+}
+
+TEST_F(CatalogTest, shouldDetectTornLastFragmentWhenRecoveryReadStartsInsideAPage)
+{
+    constexpr std::int32_t term_length = 64 * 1024;
+    const std::int64_t recording_id = new_recording_with(0, term_length);
+    const std::string segment_file = archive_dir_ + "/" + segment_file_name(recording_id, 0);
+
+    {
+        const int fd = ::open(segment_file.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        // With an 8 KiB recovery buffer the frame at 8160 crosses the end of the
+        // first read, so the second read starts at 9184, 992 bytes into a page.
+        write_frame_header(fd, 0, 8160, 0);
+        write_frame_header(fd, 8160, 1024, 0);
+        write_frame_header(fd, 9184, 3072, 0);
+        // The last fragment, torn: its header written, nothing past the page
+        // boundary at 12288.
+        write_frame_header(fd, 12256, 64, 0);
+        write_zero_byte(fd, term_length - 1);
+        ::close(fd);
+    }
+
+    for (const std::int32_t recovery_buffer_length : {2 * Catalog::PAGE_SIZE, 1024 * 1024})
+    {
+        std::vector<std::uint8_t> recovery_buffer(static_cast<std::size_t>(recovery_buffer_length), 0);
+        auto catalog = create_writer(nullptr, CAPACITY, 0, std::span<std::uint8_t>(recovery_buffer));
+        ASSERT_FALSE(catalog);
+        EXPECT_NE(std::string::npos,
+                  std::string{catalog.error().message.view()}.find(std::filesystem::absolute(segment_file).string()));
+    }
+}
+
+TEST_F(CatalogTest, shouldDetectTornLastFragmentWhenRecordingStartsInsideAPage)
+{
+    constexpr std::int32_t term_length = 64 * 1024;
+    const std::int64_t recording_id = new_recording_with(992, term_length);
+    const std::string segment_file = archive_dir_ + "/" + segment_file_name(recording_id, 0);
+
+    {
+        const int fd = ::open(segment_file.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        write_frame_header(fd, 992, 3072, 0);
+        // The last fragment, torn: its header written, nothing past the page
+        // boundary at 4096.
+        write_frame_header(fd, 4064, 64, 0);
+        write_zero_byte(fd, term_length - 1);
+        ::close(fd);
+    }
+
+    for (const bool with_checksum : {false, true})
+    {
+        auto catalog = create_writer(with_checksum ? &crc32() : nullptr, CAPACITY, 0, {});
+        ASSERT_FALSE(catalog);
+        EXPECT_NE(std::string::npos,
+                  std::string{catalog.error().message.view()}.find(std::filesystem::absolute(segment_file).string()));
+    }
 }
 
 TEST_F(CatalogTest, shouldNotComputeChecksumWhenFragmentExceedsRecoveryBuffer)
