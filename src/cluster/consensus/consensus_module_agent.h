@@ -438,6 +438,9 @@ private:
 
     [[nodiscard]] std::expected<bool, Error> append_action(std::int32_t action, std::int64_t timestamp,
                                                            std::int32_t flags);
+    /// `termBaseLogPosition()` (`ConsensusModuleAgent.java:3214-3218`): the
+    /// term's base, or the recovery plan's when the term has no entry yet.
+    [[nodiscard]] std::int64_t term_base_log_position() const;
     void offer_position_and_previous_state(std::int64_t position, ConsensusModuleState state);
     [[nodiscard]] election::ElectionContext make_election_context();
     void stop_existing_catchup_replay(common::ClusterMember& follower) noexcept;

@@ -22,6 +22,7 @@
 #include "cluster/consensus/cluster_session.h"
 #include "cluster/consensus/log_publisher.h"
 #include "core/deepmsg/deepmsg_client.h"
+#include "io_aeron_cluster_codecs/ClusterActionRequest.h"
 #include "io_aeron_cluster_codecs/MessageHeader.h"
 #include "io_aeron_cluster_codecs/NewLeadershipTermEvent.h"
 #include "io_aeron_cluster_codecs/SessionCloseEvent.h"
@@ -307,6 +308,39 @@ TEST_F(LogPublisherTest, aNewLeadershipTermEventNamesThePositionAfterItsOwnFrame
     const std::int64_t aligned_frame_length = (32 + length + 31) & ~31L;
     EXPECT_EQ(before + aligned_frame_length, decoder.logPosition());
     EXPECT_EQ(decoder.logPosition(), publisher_.last_append_position());
+}
+
+TEST_F(LogPublisherTest, aClusterActionNamesThePositionOfItsOwnClaimAndCarriesTheTermBase)
+{
+    const std::int64_t before = publisher_.position();
+    constexpr std::int64_t TERM_BASE_LOG_POSITION = 123456;
+    constexpr std::int32_t ACTION = static_cast<std::int32_t>(codecs::ClusterAction::SNAPSHOT);
+    constexpr std::int32_t FLAGS = 0;
+
+    ASSERT_TRUE(publisher_.append_cluster_action(LEADERSHIP_TERM_ID, TERM_BASE_LOG_POSITION, TIMESTAMP, ACTION, FLAGS));
+
+    const std::vector<std::uint8_t> message = next_message();
+    ASSERT_FALSE(message.empty());
+    auto header = deepmsg::cluster::common::message_header(message);
+    ASSERT_TRUE(header);
+    EXPECT_EQ(codecs::ClusterActionRequest::SBE_TEMPLATE_ID, header->templateId());
+    auto decoder = deepmsg::cluster::common::wrap_body<codecs::ClusterActionRequest>(message, *header);
+
+    // `LogPublisher.java:260`: the field is the position of this record's own
+    // claim -- the snapshot starts after it -- not the end of the frame.
+    EXPECT_EQ(before, decoder.logPosition());
+    EXPECT_EQ(TERM_BASE_LOG_POSITION, decoder.termBaseLogPosition());
+    EXPECT_EQ(LEADERSHIP_TERM_ID, decoder.leadershipTermId());
+    EXPECT_EQ(TIMESTAMP, decoder.timestamp());
+    EXPECT_EQ(ACTION, static_cast<std::int32_t>(decoder.action()));
+    EXPECT_EQ(FLAGS, static_cast<std::int32_t>(decoder.flags()));
+
+    // The accessor keeps naming the frame's end, which is where the log
+    // recording is stopped right after an append.
+    const std::int64_t length = static_cast<std::int64_t>(codecs::MessageHeader::encodedLength()) +
+                                codecs::ClusterActionRequest::sbeBlockLength();
+    const std::int64_t aligned_frame_length = (32 + length + 31) & ~31L;
+    EXPECT_EQ(before + aligned_frame_length, publisher_.last_append_position());
 }
 
 }  // namespace

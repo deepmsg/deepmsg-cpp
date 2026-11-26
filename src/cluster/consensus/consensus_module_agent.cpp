@@ -3547,7 +3547,14 @@ std::expected<bool, Error> ConsensusModuleAgent::append_action(std::int32_t acti
     {
         return false;
     }
-    return log_publisher_->append_cluster_action(leadership_term_id_, timestamp, action, flags);
+    return log_publisher_->append_cluster_action(leadership_term_id_, term_base_log_position(), timestamp, action,
+                                                 flags);
+}
+
+std::int64_t ConsensusModuleAgent::term_base_log_position() const
+{
+    const common::RecordingLog::Entry* term_entry = recording_log_.find_term_entry(leadership_term_id_);
+    return nullptr != term_entry ? term_entry->term_base_log_position : recovery_plan_.last_term_base_log_position;
 }
 
 void ConsensusModuleAgent::offer_position_and_previous_state(std::int64_t position, ConsensusModuleState previous)
@@ -3929,9 +3936,7 @@ void ConsensusModuleAgent::enter_election(bool is_log_end_of_stream, std::string
     role(ClusterRole::follower);
 
     const std::int64_t term = leadership_term_id_;
-    const common::RecordingLog::Entry* term_entry = recording_log_.find_term_entry(term);
-    const std::int64_t term_base_log_position =
-        nullptr != term_entry ? term_entry->term_base_log_position : recovery_plan_.last_term_base_log_position;
+    const std::int64_t term_base = term_base_log_position();
     const std::int64_t appended_position =
         AERON_NULL_COUNTER_ID != append_position_counter_id_
             ? recording_position()
@@ -3941,8 +3946,8 @@ void ConsensusModuleAgent::enter_election(bool is_log_end_of_stream, std::string
     report(make_error(ErrorCode::internal_error, std::string{reason}));
 
     election_ = std::make_unique<election::Election>(
-        false, is_log_end_of_stream ? leader_member_.id : static_cast<std::int32_t>(NULL_VALUE), term,
-        term_base_log_position, commit, appended_position, active_members_, this_member_, *consensus_publisher_, *this,
+        false, is_log_end_of_stream ? leader_member_.id : static_cast<std::int32_t>(NULL_VALUE), term, term_base,
+        commit, appended_position, active_members_, this_member_, *consensus_publisher_, *this,
         make_election_context());
 
     auto worked = election_->do_work(now_ns());
@@ -4334,10 +4339,7 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
             update_member_log_position(*follower, log_leadership_term_id, log_position);
             stop_existing_catchup_replay(*follower);
 
-            const common::RecordingLog::Entry* current_term_entry = recording_log_.find_term_entry(leadership_term_id_);
-            const std::int64_t term_base_log_position = nullptr != current_term_entry
-                                                            ? current_term_entry->term_base_log_position
-                                                            : recovery_plan_.last_term_base_log_position;
+            const std::int64_t term_base = term_base_log_position();
             std::int64_t next_log_leadership_term_id = NULL_VALUE;
             std::int64_t next_term_base_log_position = NULL_POSITION;
             std::int64_t next_log_position = NULL_POSITION;
@@ -4345,7 +4347,7 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
             {
                 const common::RecordingLog::Entry* next = recording_log_.find_term_entry(log_leadership_term_id + 1);
                 next_log_leadership_term_id = nullptr != next ? next->leadership_term_id : leadership_term_id_;
-                next_term_base_log_position = nullptr != next ? next->term_base_log_position : term_base_log_position;
+                next_term_base_log_position = nullptr != next ? next->term_base_log_position : term_base;
                 next_log_position = nullptr != next ? next->log_position : NULL_POSITION;
             }
 
@@ -4353,9 +4355,8 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
             {
                 (void)consensus_publisher_->new_leadership_term(
                     follower->id, log_leadership_term_id, next_log_leadership_term_id, next_term_base_log_position,
-                    next_log_position, leadership_term_id_, term_base_log_position, log_publisher_->position(),
-                    commit_position(), log_recording_id_, now_ms(), config_.member_id, log_publisher_->session_id(), 1,
-                    false);
+                    next_log_position, leadership_term_id_, term_base, log_publisher_->position(), commit_position(),
+                    log_recording_id_, now_ms(), config_.member_id, log_publisher_->session_id(), 1, false);
             }
         }
     }
