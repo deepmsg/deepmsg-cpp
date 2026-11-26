@@ -152,6 +152,7 @@ private:
     {
         std::int64_t log_position{-1};
         std::int64_t leadership_term_id{-1};
+        std::int64_t term_base_log_position{-1};
     };
 
     struct LoadedSnapshot
@@ -162,8 +163,9 @@ private:
     };
 
     [[nodiscard]] std::expected<LoadedSnapshot, Error> load_snapshot(std::int64_t recording_id);
-    [[nodiscard]] std::expected<std::int64_t, Error> take_snapshot(std::int64_t log_position,
-                                                                   std::int64_t leadership_term_id);
+    [[nodiscard]] std::expected<std::int64_t, Error> take_snapshot(std::int64_t leadership_term_id,
+                                                                   std::int64_t term_base_log_position,
+                                                                   std::int64_t log_position);
     [[nodiscard]] std::expected<void, Error> execute_snapshot_action(const SnapshotAction& action);
 
     void report(const Error& error) noexcept;
@@ -704,8 +706,9 @@ std::expected<typename ClusteredServiceAgent<S>::LoadedSnapshot, Error> Clustere
 }
 
 template <ClusteredService S>
-std::expected<std::int64_t, Error> ClusteredServiceAgent<S>::take_snapshot(std::int64_t log_position,
-                                                                           std::int64_t leadership_term_id)
+std::expected<std::int64_t, Error> ClusteredServiceAgent<S>::take_snapshot(std::int64_t leadership_term_id,
+                                                                           std::int64_t term_base_log_position,
+                                                                           std::int64_t log_position)
 {
     auto archive = ArchiveClient::connect(*client_, config_);
     if (!archive)
@@ -764,7 +767,7 @@ std::expected<std::int64_t, Error> ClusteredServiceAgent<S>::take_snapshot(std::
         aeron_archive_recording_pos_get_recording_id(client_->counters_reader(), counter_id);
 
     ServiceSnapshotTaker taker{writer, time_unit_, config_.app_version};
-    auto begun = taker.mark_begin(log_position, leadership_term_id);
+    auto begun = taker.mark_begin(leadership_term_id, term_base_log_position, log_position);
     if (!begun)
     {
         return std::unexpected(begun.error());
@@ -777,7 +780,7 @@ std::expected<std::int64_t, Error> ClusteredServiceAgent<S>::take_snapshot(std::
             return std::unexpected(snapped.error());
         }
     }
-    auto ended = taker.mark_end(log_position, leadership_term_id);
+    auto ended = taker.mark_end(leadership_term_id, term_base_log_position, log_position);
     if (!ended)
     {
         return std::unexpected(ended.error());
@@ -835,7 +838,8 @@ template <ClusteredService S>
 std::expected<void, Error> ClusteredServiceAgent<S>::execute_snapshot_action(const SnapshotAction& action)
 {
     snapshot_start_ns_ = axc::core::NanoClock::now();
-    std::expected<std::int64_t, Error> taken = take_snapshot(action.log_position, action.leadership_term_id);
+    std::expected<std::int64_t, Error> taken =
+        take_snapshot(action.leadership_term_id, action.term_base_log_position, action.log_position);
 
     const std::int64_t duration_ns = axc::core::NanoClock::now() - snapshot_start_ns_;
     if (max_snapshot_duration_)
@@ -1145,7 +1149,8 @@ public:
                         message.action &&
                     detail::should_snapshot(message.flags, agent_.standby_snapshot_flags_))
                 {
-                    agent_.pending_snapshot_ = SnapshotAction{message.log_position, message.leadership_term_id};
+                    agent_.pending_snapshot_ = SnapshotAction{message.log_position, message.leadership_term_id,
+                                                              message.term_base_log_position};
                 }
                 return {};
             }

@@ -406,12 +406,12 @@ TEST(ConsensusModuleSnapshotAdapterTest, theTakersRecordsRoundTripThroughTheAdap
     encoder.clusterSessionId(0).timestamp(0);
     ASSERT_TRUE(tracker.enqueue_message(std::span<const std::uint8_t>(message, sizeof(message))));
 
-    ASSERT_TRUE(taker.mark_begin(100, 2));
+    ASSERT_TRUE(taker.mark_begin(2, 1234, 100));
     ASSERT_TRUE(taker.snapshot_consensus_module_state(11, 22, 33, 44));
     ASSERT_TRUE(taker.snapshot_session(session));
     taker.snapshot_timer(42, 1000);
     ASSERT_TRUE(taker.snapshot_tracker(tracker, error_handler));
-    ASSERT_TRUE(taker.mark_end(100, 2));
+    ASSERT_TRUE(taker.mark_end(2, 1234, 100));
     ASSERT_FALSE(taker.take_error().has_value());
 
     RecordingLoadHandler handler;
@@ -444,7 +444,7 @@ TEST(ConsensusModuleSnapshotAdapterTest, aForeignSnapshotTypeIsRejected)
 {
     FakePublication publication;
     auto taker = make_taker(publication);
-    ASSERT_TRUE(taker.mark_begin(100, 2));
+    ASSERT_TRUE(taker.mark_begin(2, 1234, 100));
 
     auto record = publication.records()[0];
     // The container's snapshot type id is 2; rewrite it.
@@ -465,15 +465,19 @@ TEST(ConsensusModuleSnapshotAdapterTest, theMarkersFollowTheReferenceOrder)
 {
     FakePublication publication;
     auto taker = make_taker(publication);
-    ASSERT_TRUE(taker.mark_begin(100, 2));
-    ASSERT_TRUE(taker.mark_end(100, 2));
+    ASSERT_TRUE(taker.mark_begin(2, 1234, 100));
+    ASSERT_TRUE(taker.mark_end(2, 1234, 100));
 
-    EXPECT_EQ(CM_SNAPSHOT_TYPE_ID,
-              decode<io::aeron::cluster::codecs::SnapshotMarker>(publication.records()[0]).typeId());
-    EXPECT_EQ(io::aeron::cluster::codecs::SnapshotMark::BEGIN,
-              decode<io::aeron::cluster::codecs::SnapshotMarker>(publication.records()[0]).mark());
-    EXPECT_EQ(io::aeron::cluster::codecs::SnapshotMark::END,
-              decode<io::aeron::cluster::codecs::SnapshotMarker>(publication.records()[1]).mark());
+    const auto begin = decode<io::aeron::cluster::codecs::SnapshotMarker>(publication.records()[0]);
+    EXPECT_EQ(CM_SNAPSHOT_TYPE_ID, begin.typeId());
+    EXPECT_EQ(io::aeron::cluster::codecs::SnapshotMark::BEGIN, begin.mark());
+    EXPECT_EQ(2, begin.leadershipTermId());
+    EXPECT_EQ(1234, begin.termBaseLogPosition());
+    EXPECT_EQ(100, begin.logPosition());
+
+    const auto end = decode<io::aeron::cluster::codecs::SnapshotMarker>(publication.records()[1]);
+    EXPECT_EQ(io::aeron::cluster::codecs::SnapshotMark::END, end.mark());
+    EXPECT_EQ(1234, end.termBaseLogPosition());
 }
 
 }  // namespace

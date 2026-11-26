@@ -431,6 +431,8 @@ private:
     [[nodiscard]] std::expected<void, Error> take_snapshot(std::int64_t timestamp, std::int64_t log_position,
                                                            std::span<const ServiceAck> acks);
     [[nodiscard]] std::expected<void, Error> snapshot_state(SnapshotPublicationSink& publication,
+                                                            std::int64_t leadership_term_id,
+                                                            std::int64_t term_base_log_position,
                                                             std::int64_t log_position);
     [[nodiscard]] std::expected<void, Error> take_snapshot_recording();
 

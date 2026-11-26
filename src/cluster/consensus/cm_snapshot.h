@@ -119,8 +119,10 @@ public:
     {
     }
 
-    [[nodiscard]] std::expected<void, Error> mark_begin(std::int64_t log_position, std::int64_t leadership_term_id);
-    [[nodiscard]] std::expected<void, Error> mark_end(std::int64_t log_position, std::int64_t leadership_term_id);
+    [[nodiscard]] std::expected<void, Error> mark_begin(std::int64_t leadership_term_id,
+                                                        std::int64_t term_base_log_position, std::int64_t log_position);
+    [[nodiscard]] std::expected<void, Error> mark_end(std::int64_t leadership_term_id,
+                                                      std::int64_t term_base_log_position, std::int64_t log_position);
 
     /// `snapshotConsensusModuleState` (`:56-83`).
     [[nodiscard]] std::expected<void, Error> snapshot_consensus_module_state(std::int64_t next_session_id,
@@ -153,8 +155,8 @@ public:
     }
 
 private:
-    [[nodiscard]] std::expected<void, Error> mark(std::int32_t mark, std::int64_t log_position,
-                                                  std::int64_t leadership_term_id);
+    [[nodiscard]] std::expected<void, Error> mark(std::int32_t mark, std::int64_t leadership_term_id,
+                                                  std::int64_t term_base_log_position, std::int64_t log_position);
     [[nodiscard]] std::expected<void, Error> claim(std::span<const std::uint8_t> record);
     [[nodiscard]] std::expected<void, Error> offer(std::span<const std::uint8_t> record);
     [[nodiscard]] bool offer_message(std::span<const std::uint8_t> message) noexcept;

@@ -4109,6 +4109,11 @@ std::expected<void, Error> ConsensusModuleAgent::snapshot_on_service_ack(std::in
 std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t timestamp, std::int64_t log_position,
                                                                std::span<const ServiceAck> acks)
 {
+    // The base is taken before the snapshot is written and reused for the
+    // recording log entries below, so all three agree even when the term has
+    // no entry yet (`ConsensusModuleAgent.java:3178`).
+    const std::int64_t term_base = term_base_log_position();
+
     auto add = client_.add_exclusive_publication(config_.snapshot_channel, config_.snapshot_stream_id);
     auto publication = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
     if (!publication)
@@ -4146,7 +4151,7 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
         aeron_archive_recording_pos_get_recording_id(client_.counters_reader(), counter_id);
 
     ExclusivePublicationSink sink(client_, publication->get());
-    auto taken = snapshot_state(sink, log_position);
+    auto taken = snapshot_state(sink, leadership_term_id_, term_base, log_position);
     if (!taken)
     {
         return taken;
@@ -4157,16 +4162,13 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
     aeron_exclusive_publication_t* raw_publication = publication->release();
     (void)aeron_exclusive_publication_close(raw_publication, nullptr, nullptr);
 
-    const common::RecordingLog::Entry* term = recording_log_.find_term_entry(leadership_term_id_);
-    const std::int64_t term_base_log_position = nullptr == term ? 0 : term->term_base_log_position;
-
     for (std::size_t service_id = acks.size(); service_id-- > 0;)
     {
-        (void)recording_log_.append_snapshot(acks[service_id].relevant_id, leadership_term_id_, term_base_log_position,
-                                             log_position, timestamp, static_cast<std::int32_t>(service_id));
+        (void)recording_log_.append_snapshot(acks[service_id].relevant_id, leadership_term_id_, term_base, log_position,
+                                             timestamp, static_cast<std::int32_t>(service_id));
     }
-    (void)recording_log_.append_snapshot(recording_id, leadership_term_id_, term_base_log_position, log_position,
-                                         timestamp, static_cast<std::int32_t>(NULL_VALUE));
+    (void)recording_log_.append_snapshot(recording_id, leadership_term_id_, term_base, log_position, timestamp,
+                                         static_cast<std::int32_t>(NULL_VALUE));
     (void)recording_log_.force(config_.file_sync_level);
 
     // `totalSnapshotDurationTracker.onSnapshotEnd` (`:3207`): the whole cycle
@@ -4201,11 +4203,13 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
 }
 
 std::expected<void, Error> ConsensusModuleAgent::snapshot_state(SnapshotPublicationSink& publication,
+                                                                std::int64_t leadership_term_id,
+                                                                std::int64_t term_base_log_position,
                                                                 std::int64_t log_position)
 {
     ConsensusModuleSnapshotTaker taker(publication, service::TimeUnit::milliseconds, 0);
 
-    auto began = taker.mark_begin(log_position, leadership_term_id_);
+    auto began = taker.mark_begin(leadership_term_id, term_base_log_position, log_position);
     if (!began)
     {
         return began;
@@ -4247,7 +4251,7 @@ std::expected<void, Error> ConsensusModuleAgent::snapshot_state(SnapshotPublicat
     {
         return std::unexpected(*error);
     }
-    return taker.mark_end(log_position, leadership_term_id_);
+    return taker.mark_end(leadership_term_id, term_base_log_position, log_position);
 }
 
 // ---- the log recording ----------------------------------------------------

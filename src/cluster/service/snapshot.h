@@ -193,13 +193,15 @@ public:
     {
     }
 
-    [[nodiscard]] std::expected<void, Error> mark_begin(std::int64_t log_position, std::int64_t leadership_term_id);
-    [[nodiscard]] std::expected<void, Error> mark_end(std::int64_t log_position, std::int64_t leadership_term_id);
+    [[nodiscard]] std::expected<void, Error> mark_begin(std::int64_t leadership_term_id,
+                                                        std::int64_t term_base_log_position, std::int64_t log_position);
+    [[nodiscard]] std::expected<void, Error> mark_end(std::int64_t leadership_term_id,
+                                                      std::int64_t term_base_log_position, std::int64_t log_position);
     [[nodiscard]] std::expected<void, Error> snapshot_session(const ContainerClientSession& session);
 
 private:
-    [[nodiscard]] std::expected<void, Error> mark(std::int32_t mark, std::int64_t log_position,
-                                                  std::int64_t leadership_term_id);
+    [[nodiscard]] std::expected<void, Error> mark(std::int32_t mark, std::int64_t leadership_term_id,
+                                                  std::int64_t term_base_log_position, std::int64_t log_position);
     [[nodiscard]] std::expected<void, Error> claim(std::span<const std::uint8_t> record);
     [[nodiscard]] std::expected<void, Error> offer(std::span<const std::uint8_t> record);
 
