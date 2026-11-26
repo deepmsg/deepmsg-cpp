@@ -168,8 +168,8 @@ TEST(ClientConfigTest, theClientInfoIsTheReferencesBytes)
     ClientConfig config = minimal_config();
     config.client_name = "probe";
 
-    EXPECT_EQ("version=1.54.0 commit=454da1e4e6", format_version_info());
-    EXPECT_EQ("name=probe version=1.54.0 commit=454da1e4e6", client_info(config));
+    EXPECT_EQ("version=1.54.2 commit=481d4271ad", format_version_info());
+    EXPECT_EQ("name=probe version=1.54.2 commit=481d4271ad", client_info(config));
     EXPECT_EQ(768, PROTOCOL_SEMANTIC_VERSION);
 }
 

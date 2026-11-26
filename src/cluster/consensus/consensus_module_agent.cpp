@@ -51,8 +51,8 @@ namespace
 using axc::core::ErrorCode;
 using axc::core::make_error;
 
-constexpr std::string_view VERSION = "1.54.0";
-constexpr std::string_view GIT_SHA = "454da1e4e6";
+constexpr std::string_view VERSION = "1.54.2";
+constexpr std::string_view GIT_SHA = "481d4271ad";
 
 /// `aeron_archive_client_map_archive_to_client_error_code(ARCHIVE_ERROR_CODE_UNKNOWN_RECORDING)`
 /// (`aeron_archive_client.c:2701-2709`): archive code 5 becomes 205, and

@@ -43,10 +43,10 @@ inline constexpr std::string_view IPC_CHANNEL = "aeron:ipc";
 inline constexpr std::string_view REJOIN_PARAM_NAME = "rejoin";
 
 /// `AeronClusterVersion.VERSION` / `GIT_SHA` at the pinned submodule
-/// (`AeronClusterVersion.java`, 1.54.0 = `454da1e4e6`). `clientInfo` is byte
+/// (`AeronClusterVersion.java`, 1.54.2 = `481d4271ad`). `clientInfo` is byte
 /// for byte the reference's (`AeronCluster.java:2457-2458`).
-inline constexpr std::string_view CLUSTER_VERSION = "1.54.0";
-inline constexpr std::string_view CLUSTER_GIT_SHA = "454da1e4e6";
+inline constexpr std::string_view CLUSTER_VERSION = "1.54.2";
+inline constexpr std::string_view CLUSTER_GIT_SHA = "481d4271ad";
 
 /// The credentials hooks (`CredentialsSupplier`). The default sends an empty
 /// encoded credential and answers a challenge with an empty response, which is
