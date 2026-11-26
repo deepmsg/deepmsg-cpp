@@ -4114,6 +4114,20 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
     // no entry yet (`ConsensusModuleAgent.java:3178`).
     const std::int64_t term_base = term_base_log_position();
 
+    // A leader change or a replay re-executes the snapshot action at a position
+    // already in the log. Taking it again would leave two groups for one
+    // position, and the recovery state reads a group as the CM entry followed
+    // by one per service.
+    for (const common::RecordingLog::Entry& entry : recording_log_.entries())
+    {
+        if (entry.is_valid && common::RecordingLog::ENTRY_TYPE_SNAPSHOT == entry.type &&
+            entry.leadership_term_id == leadership_term_id_ && entry.log_position == log_position &&
+            static_cast<std::int32_t>(NULL_VALUE) == entry.service_id)
+        {
+            return {};
+        }
+    }
+
     auto add = client_.add_exclusive_publication(config_.snapshot_channel, config_.snapshot_stream_id);
     auto publication = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
     if (!publication)

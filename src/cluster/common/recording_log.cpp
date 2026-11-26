@@ -819,19 +819,6 @@ std::expected<void, Error> RecordingLog::append_snapshot(std::int64_t recording_
             make_error(ErrorCode::invalid_argument, "invalid recordingId=" + std::to_string(recording_id)));
     }
 
-    // A snapshot is a function of where it was taken: if a valid entry for the
-    // same term, log position and service is already here, this is the same
-    // snapshot taken again (a leader change or a replay re-executes the action)
-    // and the log keeps the first copy.
-    for (const Entry& entry : entries_)
-    {
-        if (entry.is_valid && ENTRY_TYPE_SNAPSHOT == entry.type && entry.leadership_term_id == leadership_term_id &&
-            entry.log_position == log_position && entry.service_id == service_id)
-        {
-            return {};
-        }
-    }
-
     auto restored = restore_invalid_snapshot(ENTRY_TYPE_SNAPSHOT, recording_id, leadership_term_id,
                                              term_base_log_position, log_position, timestamp, service_id);
     if (!restored)
