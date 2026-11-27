@@ -42,9 +42,6 @@ if ! command -v clang++-20 >/dev/null 2>&1; then
     exit 0
 fi
 
-cmake --preset fuzz
-cmake --build build/fuzz --parallel "$(nproc)"
-
 targets=(
     archive_control_fuzz
     cluster_ingress_fuzz
@@ -53,8 +50,16 @@ targets=(
     dpdk_frame_fuzz
 )
 
+# Only the fuzz targets: the tests and the interop binaries are not part of a
+# fuzz run, and under ASan/UBSan building them costs more than the search.
+cmake --preset fuzz
+cmake --build build/fuzz --parallel "$(nproc)" --target "${targets[@]}"
+
 mkdir -p build/fuzz/crashes
 shopt -s nullglob
+
+total=$(du -sb build/fuzz/corpus 2>/dev/null | cut -f1 || true)
+echo "corpus: total before ${total:-0} bytes"
 
 copy_seeds()
 {
@@ -115,6 +120,8 @@ for target in "${targets[@]}"; do
         echo "run-fuzz: ${target} failed; artifacts in build/fuzz/crashes/${target}-*" >&2
         exit 1
     fi
+    size=$(du -sb "$corpus" 2>/dev/null | cut -f1 || true)
+    echo "corpus: ${target} ${size:-0} bytes"
 done
 
 echo "run-fuzz: all targets clean"
