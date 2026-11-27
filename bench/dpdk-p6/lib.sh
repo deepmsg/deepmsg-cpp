@@ -10,7 +10,7 @@
 
 p6_repo=${p6_repo:?set p6_repo}
 p6_build=${AXC_BUILD_DIR:-$p6_repo/build/dpdk}
-p6_jar=${AXC_AERON_JAR:-$p6_repo/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar}
+p6_jar=${AXC_AERON_JAR:-$p6_repo/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.2.jar}
 p6_pci=${AXC_DPDK_BENCH_PCI:-0000:03:00.0}
 p6_peer_bdf=$(printf '%s' "$p6_pci" | sed -E 's/([0-9a-f]{2}:[0-9a-f]{2})\.[0-9a-f]$/\1.1/')
 p6_local_cidr=${AXC_DPDK_BENCH_LOCAL:-10.10.0.1/24}

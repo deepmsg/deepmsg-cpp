@@ -240,6 +240,7 @@ std::expected<LogMessage, Error> BoundedLogAdapter::decode(std::span<const std::
                 decoded.timestamp = decoder.timestamp();
                 decoded.action = static_cast<std::int32_t>(decoder.action());
                 decoded.flags = decoder.flags();
+                decoded.term_base_log_position = decoder.termBaseLogPosition();
                 return decoded;
             }
             case codecs::NewLeadershipTermEvent::SBE_TEMPLATE_ID:

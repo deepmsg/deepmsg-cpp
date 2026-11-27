@@ -10,13 +10,13 @@ if [ -n "${AXC_AERON_ALL_JAR:-}" ]; then
     exit 0
 fi
 
-jar="$root/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar"
+jar="$root/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.2.jar"
 if [ -f "$jar" ]; then
     echo "$jar"
     exit 0
 fi
 
-legacy_jar="$root/third_party/aeron/build/libs/aeron-all-1.54.0.jar"
+legacy_jar="$root/third_party/aeron/build/libs/aeron-all-1.54.2.jar"
 if [ -f "$legacy_jar" ]; then
     echo "$legacy_jar"
     exit 0

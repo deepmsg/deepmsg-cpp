@@ -117,11 +117,15 @@ void write_long_volatile(std::uint8_t* address, std::int64_t value) noexcept
     return true;
 }
 
-/// `Catalog.hasDataInAllPagesAfterStraddle` (`Catalog.java:1459`).
+/// `Catalog.hasDataInAllPagesAfterStraddle` (`Catalog.java:1464`).
 [[nodiscard]] bool has_data_in_all_pages_after_straddle(const std::uint8_t* buffer, std::int32_t fragment_offset,
+                                                        std::int32_t fragment_file_offset,
                                                         std::int32_t aligned_fragment_length) noexcept
 {
-    std::int32_t straddle_offset = ((fragment_offset / Catalog::PAGE_SIZE) + 1) * Catalog::PAGE_SIZE;
+    // The buffer holds a read that starts at a frame, not at a page, so the
+    // pages are found from the file offset (`Catalog.java:1470`).
+    std::int32_t straddle_offset =
+        fragment_offset + Catalog::PAGE_SIZE - (fragment_file_offset & (Catalog::PAGE_SIZE - 1));
     const std::int32_t end_offset = fragment_offset + aligned_fragment_length;
     while (straddle_offset < end_offset)
     {
@@ -134,9 +138,10 @@ void write_long_volatile(std::uint8_t* address, std::int64_t value) noexcept
     return true;
 }
 
-/// `Catalog.isValidFragment` (`Catalog.java:1434`).
+/// `Catalog.isValidFragment` (`Catalog.java:1435`).
 [[nodiscard]] bool is_valid_fragment(std::span<std::uint8_t> buffer, std::int32_t fragment_offset,
-                                     std::int32_t aligned_fragment_length, const Checksum* checksum) noexcept
+                                     std::int32_t fragment_file_offset, std::int32_t aligned_fragment_length,
+                                     const Checksum* checksum) noexcept
 {
     const auto capacity = static_cast<std::int32_t>(buffer.size());
     if (fragment_offset < 0 || aligned_fragment_length < DATA_HEADER_LENGTH ||
@@ -147,7 +152,8 @@ void write_long_volatile(std::uint8_t* address, std::int64_t value) noexcept
 
     return (nullptr != checksum &&
             has_valid_checksum(buffer.data(), fragment_offset, aligned_fragment_length, *checksum)) ||
-           has_data_in_all_pages_after_straddle(buffer.data(), fragment_offset, aligned_fragment_length);
+           has_data_in_all_pages_after_straddle(buffer.data(), fragment_offset, fragment_file_offset,
+                                                aligned_fragment_length);
 }
 
 /// `Catalog.readNextChunk` (`Catalog.java:1415`), `pread` in place of
@@ -265,7 +271,8 @@ void write_long_volatile(std::uint8_t* address, std::int64_t value) noexcept
 
     const std::int32_t last_fragment_offset = next_fragment_offset - last_fragment_length;
     if (Catalog::fragment_straddles_page_boundary(last_fragment_offset, last_fragment_length) &&
-        !is_valid_fragment(buffer, buffer_offset - last_fragment_length, last_fragment_length, checksum))
+        !is_valid_fragment(buffer, buffer_offset - last_fragment_length, last_fragment_offset, last_fragment_length,
+                           checksum))
     {
         if (!truncate_on_page_straddle(path))
         {

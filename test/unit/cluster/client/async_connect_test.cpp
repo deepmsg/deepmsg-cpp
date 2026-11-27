@@ -508,7 +508,7 @@ TEST(AsyncConnectTest, theSevenStepsReachALiveSessionAndTheRequestCarriesTheRefe
     const std::uint32_t credentials_length = decoder.encodedCredentialsLength();
     (void)decoder.encodedCredentials();
     EXPECT_EQ(0U, credentials_length);
-    EXPECT_EQ(std::string{"name=probe version=1.54.0 commit=454da1e4e6"}, decoder.getClientInfoAsString());
+    EXPECT_EQ(std::string{"name=probe version=1.54.2 commit=481d4271ad"}, decoder.getClientInfoAsString());
 
     cluster.close();
 }

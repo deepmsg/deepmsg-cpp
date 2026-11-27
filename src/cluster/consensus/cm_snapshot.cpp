@@ -125,8 +125,9 @@ void ExclusivePublicationSink::idle()
 
 // -- ConsensusModuleSnapshotTaker -------------------------------------------
 
-std::expected<void, Error> ConsensusModuleSnapshotTaker::mark(std::int32_t mark, std::int64_t log_position,
-                                                              std::int64_t leadership_term_id)
+std::expected<void, Error> ConsensusModuleSnapshotTaker::mark(std::int32_t mark, std::int64_t leadership_term_id,
+                                                              std::int64_t term_base_log_position,
+                                                              std::int64_t log_position)
 {
     std::uint8_t buffer[MESSAGE_HEADER_LENGTH + codecs::SnapshotMarker::SBE_BLOCK_LENGTH]{};
 
@@ -138,21 +139,26 @@ std::expected<void, Error> ConsensusModuleSnapshotTaker::mark(std::int32_t mark,
         .index(0)
         .mark(static_cast<codecs::SnapshotMark::Value>(mark))
         .timeUnit(static_cast<codecs::ClusterTimeUnit::Value>(cm_time_unit_code(time_unit_)))
-        .appVersion(app_version_);
+        .appVersion(app_version_)
+        .termBaseLogPosition(term_base_log_position);
 
     return claim(std::span<const std::uint8_t>(buffer, sizeof(buffer)));
 }
 
-std::expected<void, Error> ConsensusModuleSnapshotTaker::mark_begin(std::int64_t log_position,
-                                                                    std::int64_t leadership_term_id)
+std::expected<void, Error> ConsensusModuleSnapshotTaker::mark_begin(std::int64_t leadership_term_id,
+                                                                    std::int64_t term_base_log_position,
+                                                                    std::int64_t log_position)
 {
-    return mark(static_cast<std::int32_t>(codecs::SnapshotMark::BEGIN), log_position, leadership_term_id);
+    return mark(static_cast<std::int32_t>(codecs::SnapshotMark::BEGIN), leadership_term_id, term_base_log_position,
+                log_position);
 }
 
-std::expected<void, Error> ConsensusModuleSnapshotTaker::mark_end(std::int64_t log_position,
-                                                                  std::int64_t leadership_term_id)
+std::expected<void, Error> ConsensusModuleSnapshotTaker::mark_end(std::int64_t leadership_term_id,
+                                                                  std::int64_t term_base_log_position,
+                                                                  std::int64_t log_position)
 {
-    return mark(static_cast<std::int32_t>(codecs::SnapshotMark::END), log_position, leadership_term_id);
+    return mark(static_cast<std::int32_t>(codecs::SnapshotMark::END), leadership_term_id, term_base_log_position,
+                log_position);
 }
 
 std::expected<void, Error> ConsensusModuleSnapshotTaker::snapshot_consensus_module_state(

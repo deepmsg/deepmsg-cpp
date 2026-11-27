@@ -116,10 +116,13 @@ public:
                                                         std::int32_t leader_member_id, std::int32_t log_session_id,
                                                         std::int32_t time_unit_code, std::int32_t app_version);
 
-    /// `appendAction` (`ConsensusModuleAgent.java:2728-2732`) for
-    /// `ClusterActionRequest` (SUSPEND/RESUME/SNAPSHOT).
-    [[nodiscard]] bool append_cluster_action(std::int64_t leadership_term_id, std::int64_t timestamp,
-                                             std::int32_t action, std::int32_t flags);
+    /// `appendClusterAction` (`LogPublisher.java:241-275`) for
+    /// `ClusterActionRequest` (SUSPEND/RESUME/SNAPSHOT). The record's
+    /// `logPosition` is the position of its own claim -- the snapshot starts
+    /// after it (`LogPublisher.java:260`) -- and `termBaseLogPosition` names
+    /// where the term began.
+    [[nodiscard]] bool append_cluster_action(std::int64_t leadership_term_id, std::int64_t term_base_log_position,
+                                             std::int64_t timestamp, std::int32_t action, std::int32_t flags);
 
     /// The C4b criterion: the ingress payload's bytes that went through an
     /// intermediate copy. `append_message` is `offerv`, so this stays 0.

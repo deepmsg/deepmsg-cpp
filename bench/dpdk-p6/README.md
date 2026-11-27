@@ -49,7 +49,7 @@ hugepage files, NetworkManager managed state).
 ```bash
 build=build/dpdk-release          # Release, DPDK ON
 sudo env AXC_BUILD_DIR=$PWD/$build \
-     AXC_AERON_JAR=$PWD/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar \
+     AXC_AERON_JAR=$PWD/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.2.jar \
      bench/dpdk-p6/run-perf.sh                       # P6_SESSIONS=2 by default
 ```
 

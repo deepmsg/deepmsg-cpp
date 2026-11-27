@@ -1,7 +1,7 @@
 # Interop tests
 
 Everything here needs a JDK; the Java peers are the reference `aeron-all` jar
-(1.54.0). The fixture and the shim are self-contained in this repo.
+(1.54.2). The fixture and the shim are self-contained in this repo.
 
 ## Shims
 

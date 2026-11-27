@@ -36,8 +36,8 @@ namespace
 
 namespace codecs = ::io::aeron::cluster::codecs;
 
-constexpr std::string_view VERSION = "1.54.0";
-constexpr std::string_view GIT_SHA = "454da1e4e6";
+constexpr std::string_view VERSION = "1.54.2";
+constexpr std::string_view GIT_SHA = "481d4271ad";
 constexpr std::int64_t ASYNC_ADD_TIMEOUT_NS = 5'000'000'000;
 /// `ClusterBackupAgent.SLOW_TICK_INTERVAL_MS` (`:88`).
 constexpr std::int64_t SLOW_TICK_INTERVAL_MS = 10;

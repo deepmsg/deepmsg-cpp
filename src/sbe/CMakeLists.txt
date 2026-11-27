@@ -18,7 +18,7 @@ if (AXC_WITH_SBE)
         if (NOT EXISTS "${schema}")
             message(FATAL_ERROR
                 "SBE schema not found: ${schema}\n"
-                "third_party/aeron must be pinned at 454da1e4e6 (tag 1.54.0).")
+                "third_party/aeron must be pinned at 481d4271ad (tag 1.54.2).")
         endif ()
         axc_sbe_generate("${schema}" "${AXC_SBE_GEN_DIR}")
     endforeach ()

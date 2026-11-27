@@ -3,7 +3,7 @@
 # The five schemas live in the pinned aeron submodule (single source of truth);
 # generated headers go to ${PROJECT_BINARY_DIR}/generated/axc/sbe and are never
 # committed. sbe-tool is not vendored: scripts/fetch-sbe.sh downloads
-# sbe-all-1.42.0.jar (the version aeron 1.54.0's gradle catalog uses) and checks
+# sbe-all-1.42.0.jar (the version aeron 1.54.2's gradle catalog uses) and checks
 # its sha256.
 
 if (AXC_WITH_SBE)

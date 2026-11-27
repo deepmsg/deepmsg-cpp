@@ -47,7 +47,7 @@ BENCHMARKS_LIVE_RECORDING_CLIENT="$BENCHMARKS_SCRIPTS_DIR/live-recording-client"
 # shape, A5a) and the reference C driver it runs beside.
 BENCH_ARCHIVE_SERVER="${BENCH_ARCHIVE_SERVER:-$REPO_ROOT/build/$BENCH_PRESET/apps/deepmsg-archive-server/deepmsg-archive-server}"
 BENCH_AERONMD="${BENCH_AERONMD:-$REPO_ROOT/build/$BENCH_PRESET/aeron/binaries/aeronmd}"
-BENCH_JAVA_ARCHIVE_JAR="${BENCH_JAVA_ARCHIVE_JAR:-$AERON_REF_DIR/aeron-all/build/libs/aeron-all-1.54.0.jar}"
+BENCH_JAVA_ARCHIVE_JAR="${BENCH_JAVA_ARCHIVE_JAR:-$AERON_REF_DIR/aeron-all/build/libs/aeron-all-1.54.2.jar}"
 
 BENCH_AERON_DIR="${BENCH_AERON_DIR:-/dev/shm/aeron}"
 BENCH_JAVA="${BENCH_JAVA:-/usr/bin/java}"

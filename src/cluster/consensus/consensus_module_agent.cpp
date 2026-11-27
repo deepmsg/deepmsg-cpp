@@ -51,8 +51,8 @@ namespace
 using axc::core::ErrorCode;
 using axc::core::make_error;
 
-constexpr std::string_view VERSION = "1.54.0";
-constexpr std::string_view GIT_SHA = "454da1e4e6";
+constexpr std::string_view VERSION = "1.54.2";
+constexpr std::string_view GIT_SHA = "481d4271ad";
 
 /// `aeron_archive_client_map_archive_to_client_error_code(ARCHIVE_ERROR_CODE_UNKNOWN_RECORDING)`
 /// (`aeron_archive_client.c:2701-2709`): archive code 5 becomes 205, and
@@ -3547,7 +3547,14 @@ std::expected<bool, Error> ConsensusModuleAgent::append_action(std::int32_t acti
     {
         return false;
     }
-    return log_publisher_->append_cluster_action(leadership_term_id_, timestamp, action, flags);
+    return log_publisher_->append_cluster_action(leadership_term_id_, term_base_log_position(), timestamp, action,
+                                                 flags);
+}
+
+std::int64_t ConsensusModuleAgent::term_base_log_position() const
+{
+    const common::RecordingLog::Entry* term_entry = recording_log_.find_term_entry(leadership_term_id_);
+    return nullptr != term_entry ? term_entry->term_base_log_position : recovery_plan_.last_term_base_log_position;
 }
 
 void ConsensusModuleAgent::offer_position_and_previous_state(std::int64_t position, ConsensusModuleState previous)
@@ -3929,9 +3936,7 @@ void ConsensusModuleAgent::enter_election(bool is_log_end_of_stream, std::string
     role(ClusterRole::follower);
 
     const std::int64_t term = leadership_term_id_;
-    const common::RecordingLog::Entry* term_entry = recording_log_.find_term_entry(term);
-    const std::int64_t term_base_log_position =
-        nullptr != term_entry ? term_entry->term_base_log_position : recovery_plan_.last_term_base_log_position;
+    const std::int64_t term_base = term_base_log_position();
     const std::int64_t appended_position =
         AERON_NULL_COUNTER_ID != append_position_counter_id_
             ? recording_position()
@@ -3941,8 +3946,8 @@ void ConsensusModuleAgent::enter_election(bool is_log_end_of_stream, std::string
     report(make_error(ErrorCode::internal_error, std::string{reason}));
 
     election_ = std::make_unique<election::Election>(
-        false, is_log_end_of_stream ? leader_member_.id : static_cast<std::int32_t>(NULL_VALUE), term,
-        term_base_log_position, commit, appended_position, active_members_, this_member_, *consensus_publisher_, *this,
+        false, is_log_end_of_stream ? leader_member_.id : static_cast<std::int32_t>(NULL_VALUE), term, term_base,
+        commit, appended_position, active_members_, this_member_, *consensus_publisher_, *this,
         make_election_context());
 
     auto worked = election_->do_work(now_ns());
@@ -4104,6 +4109,25 @@ std::expected<void, Error> ConsensusModuleAgent::snapshot_on_service_ack(std::in
 std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t timestamp, std::int64_t log_position,
                                                                std::span<const ServiceAck> acks)
 {
+    // The base is taken before the snapshot is written and reused for the
+    // recording log entries below, so all three agree even when the term has
+    // no entry yet (`ConsensusModuleAgent.java:3178`).
+    const std::int64_t term_base = term_base_log_position();
+
+    // A leader change or a replay re-executes the snapshot action at a position
+    // already in the log. Taking it again would leave two groups for one
+    // position, and the recovery state reads a group as the CM entry followed
+    // by one per service.
+    for (const common::RecordingLog::Entry& entry : recording_log_.entries())
+    {
+        if (entry.is_valid && common::RecordingLog::ENTRY_TYPE_SNAPSHOT == entry.type &&
+            entry.leadership_term_id == leadership_term_id_ && entry.log_position == log_position &&
+            static_cast<std::int32_t>(NULL_VALUE) == entry.service_id)
+        {
+            return {};
+        }
+    }
+
     auto add = client_.add_exclusive_publication(config_.snapshot_channel, config_.snapshot_stream_id);
     auto publication = await_handle(client_, add, ASYNC_ADD_TIMEOUT_NS);
     if (!publication)
@@ -4141,7 +4165,7 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
         aeron_archive_recording_pos_get_recording_id(client_.counters_reader(), counter_id);
 
     ExclusivePublicationSink sink(client_, publication->get());
-    auto taken = snapshot_state(sink, log_position);
+    auto taken = snapshot_state(sink, leadership_term_id_, term_base, log_position);
     if (!taken)
     {
         return taken;
@@ -4152,16 +4176,13 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
     aeron_exclusive_publication_t* raw_publication = publication->release();
     (void)aeron_exclusive_publication_close(raw_publication, nullptr, nullptr);
 
-    const common::RecordingLog::Entry* term = recording_log_.find_term_entry(leadership_term_id_);
-    const std::int64_t term_base_log_position = nullptr == term ? 0 : term->term_base_log_position;
-
     for (std::size_t service_id = acks.size(); service_id-- > 0;)
     {
-        (void)recording_log_.append_snapshot(acks[service_id].relevant_id, leadership_term_id_, term_base_log_position,
-                                             log_position, timestamp, static_cast<std::int32_t>(service_id));
+        (void)recording_log_.append_snapshot(acks[service_id].relevant_id, leadership_term_id_, term_base, log_position,
+                                             timestamp, static_cast<std::int32_t>(service_id));
     }
-    (void)recording_log_.append_snapshot(recording_id, leadership_term_id_, term_base_log_position, log_position,
-                                         timestamp, static_cast<std::int32_t>(NULL_VALUE));
+    (void)recording_log_.append_snapshot(recording_id, leadership_term_id_, term_base, log_position, timestamp,
+                                         static_cast<std::int32_t>(NULL_VALUE));
     (void)recording_log_.force(config_.file_sync_level);
 
     // `totalSnapshotDurationTracker.onSnapshotEnd` (`:3207`): the whole cycle
@@ -4196,11 +4217,13 @@ std::expected<void, Error> ConsensusModuleAgent::take_snapshot(std::int64_t time
 }
 
 std::expected<void, Error> ConsensusModuleAgent::snapshot_state(SnapshotPublicationSink& publication,
+                                                                std::int64_t leadership_term_id,
+                                                                std::int64_t term_base_log_position,
                                                                 std::int64_t log_position)
 {
     ConsensusModuleSnapshotTaker taker(publication, service::TimeUnit::milliseconds, 0);
 
-    auto began = taker.mark_begin(log_position, leadership_term_id_);
+    auto began = taker.mark_begin(leadership_term_id, term_base_log_position, log_position);
     if (!began)
     {
         return began;
@@ -4242,7 +4265,7 @@ std::expected<void, Error> ConsensusModuleAgent::snapshot_state(SnapshotPublicat
     {
         return std::unexpected(*error);
     }
-    return taker.mark_end(log_position, leadership_term_id_);
+    return taker.mark_end(leadership_term_id, term_base_log_position, log_position);
 }
 
 // ---- the log recording ----------------------------------------------------
@@ -4334,10 +4357,7 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
             update_member_log_position(*follower, log_leadership_term_id, log_position);
             stop_existing_catchup_replay(*follower);
 
-            const common::RecordingLog::Entry* current_term_entry = recording_log_.find_term_entry(leadership_term_id_);
-            const std::int64_t term_base_log_position = nullptr != current_term_entry
-                                                            ? current_term_entry->term_base_log_position
-                                                            : recovery_plan_.last_term_base_log_position;
+            const std::int64_t term_base = term_base_log_position();
             std::int64_t next_log_leadership_term_id = NULL_VALUE;
             std::int64_t next_term_base_log_position = NULL_POSITION;
             std::int64_t next_log_position = NULL_POSITION;
@@ -4345,7 +4365,7 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
             {
                 const common::RecordingLog::Entry* next = recording_log_.find_term_entry(log_leadership_term_id + 1);
                 next_log_leadership_term_id = nullptr != next ? next->leadership_term_id : leadership_term_id_;
-                next_term_base_log_position = nullptr != next ? next->term_base_log_position : term_base_log_position;
+                next_term_base_log_position = nullptr != next ? next->term_base_log_position : term_base;
                 next_log_position = nullptr != next ? next->log_position : NULL_POSITION;
             }
 
@@ -4353,9 +4373,8 @@ void ConsensusModuleAgent::on_canvass_position(std::int64_t log_leadership_term_
             {
                 (void)consensus_publisher_->new_leadership_term(
                     follower->id, log_leadership_term_id, next_log_leadership_term_id, next_term_base_log_position,
-                    next_log_position, leadership_term_id_, term_base_log_position, log_publisher_->position(),
-                    commit_position(), log_recording_id_, now_ms(), config_.member_id, log_publisher_->session_id(), 1,
-                    false);
+                    next_log_position, leadership_term_id_, term_base, log_publisher_->position(), commit_position(),
+                    log_recording_id_, now_ms(), config_.member_id, log_publisher_->session_id(), 1, false);
             }
         }
     }

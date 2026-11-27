@@ -247,8 +247,8 @@ bool LogPublisher::append_new_leadership_term_event(std::int64_t leadership_term
     return false;
 }
 
-bool LogPublisher::append_cluster_action(std::int64_t leadership_term_id, std::int64_t timestamp, std::int32_t action,
-                                         std::int32_t flags)
+bool LogPublisher::append_cluster_action(std::int64_t leadership_term_id, std::int64_t term_base_log_position,
+                                         std::int64_t timestamp, std::int32_t action, std::int32_t flags)
 {
     if (nullptr == publication_)
     {
@@ -257,8 +257,6 @@ bool LogPublisher::append_cluster_action(std::int64_t leadership_term_id, std::i
 
     const std::size_t length = codecs::MessageHeader::encodedLength() + codecs::ClusterActionRequest::sbeBlockLength();
     const long aligned_frame_length = (32 + static_cast<long>(length) + 31) & ~31L;
-    const long log_position =
-        static_cast<long>(aeron_exclusive_publication_position(publication_.get())) + aligned_frame_length;
 
     for (int attempts = SEND_ATTEMPTS; attempts > 0; attempts--)
     {
@@ -267,14 +265,22 @@ bool LogPublisher::append_cluster_action(std::int64_t leadership_term_id, std::i
             static_cast<long>(aeron_exclusive_publication_try_claim(publication_.get(), length, &claim));
         if (position > 0)
         {
+            // The C client's `try_claim` answers with the new stream position,
+            // i.e. the frame's end; the reference's Java `tryClaim` answers
+            // with the frame's start (`LogPublisher.java:253`). The record's
+            // field wants the start, the accessor keeps the end.
+            const std::int64_t log_position = static_cast<std::int64_t>(position) - aligned_frame_length;
             codecs::ClusterActionRequest encoder;
             encoder.wrapAndApplyHeader(reinterpret_cast<char*>(claim.data), 0, claim.length);
             encoder.leadershipTermId(leadership_term_id)
-                .logPosition(log_position)
+                .logPosition(log_position)  // `LogPublisher.java:260`: the snapshot starts after this record in the log
                 .timestamp(timestamp)
                 .action(static_cast<codecs::ClusterAction::Value>(action))
-                .flags(static_cast<std::uint8_t>(flags));
-            last_append_position_ = log_position;
+                .flags(static_cast<std::uint8_t>(flags))
+                .termBaseLogPosition(term_base_log_position);
+            // The accessor still names the frame's end: it is what the log
+            // recording is stopped at right after an append.
+            last_append_position_ = position;
             aeron_buffer_claim_commit(&claim);
             return true;
         }

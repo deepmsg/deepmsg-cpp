@@ -49,7 +49,7 @@ target_compile_definitions(axc_archive_interop_tests PRIVATE
 # (`./gradlew :aeron-all:assemble`), not a checked-in artifact; a missing jar
 # skips the binary loudly instead of pretending to pass.
 set(AXC_AERON_ALL_JAR
-    "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.0.jar")
+    "${PROJECT_SOURCE_DIR}/third_party/aeron/aeron-all/build/libs/aeron-all-1.54.2.jar")
 
 target_compile_definitions(axc_archive_interop_tests PRIVATE
     "AXC_AERON_JAR=\"${AXC_AERON_ALL_JAR}\""

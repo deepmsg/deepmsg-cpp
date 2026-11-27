@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download the SBE tool used by Aeron 1.54.0 (gradle/libs.versions.toml: sbe = 1.42.0).
+# Download the SBE tool used by Aeron 1.54.2 (gradle/libs.versions.toml: sbe = 1.42.0).
 # The jar is not vendored; CMake resolves third_party/sbe-tool/sbe-all-*.jar.
 set -euo pipefail
 
