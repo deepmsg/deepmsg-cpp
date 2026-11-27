@@ -36,8 +36,18 @@ throughput is thousands (not millions) of execs per second by design.
 
 ```
 scripts/run-fuzz.sh                 # 15 s per target
-scripts/run-fuzz.sh --duration 600  # nightly
+scripts/run-fuzz.sh --duration 120  # the scheduled nightly (fuzz.yml)
 ```
+
+`.github/workflows/fuzz.yml` runs that 120-second shape on a schedule and
+keeps `build/fuzz/corpus/` in the Actions cache between nights, so each run
+starts from what the previous one found; the script and the workflow log each
+target's corpus size, and no `cmin` is applied yet.
+
+On a host where ASan aborts with "Shadow memory range interleaves with an
+existing memory mapping", run the script under `setarch -R`: the kernel's
+address randomisation is wider than ASan's shadow range, and disabling ASLR
+is the same workaround the `asan` preset uses.
 
 The `fuzz` preset builds with `-fsanitize=fuzzer,address,undefined`. Every
 target's `LLVMFuzzerInitialize` writes its generated seeds when
