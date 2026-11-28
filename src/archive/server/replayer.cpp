@@ -90,6 +90,17 @@ int Replayer::do_work_threaded()
 
 void Replayer::close_threaded()
 {
+    // Same guard as `Recorder::close_threaded`: a conductor whose init failed
+    // before `set_queues` still destroys this replayer. The reference hands the
+    // close queue to the replayer in the constructor
+    // (`DedicatedModeArchiveConductor.java:108-117`), so its `close` always has
+    // one; ours must close the sessions the serial way instead.
+    if (nullptr == inbox_)
+    {
+        close();
+        return;
+    }
+
     while (auto* session = inbox_->pop())
     {
         sessions_.add(std::unique_ptr<ReplaySession>(session));

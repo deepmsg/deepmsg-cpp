@@ -85,6 +85,7 @@ axc_add_executable(axc_archive_unit_tests
         archive/server/replication_validation_test.cpp
         archive/server/replication_session_test.cpp
         archive/server/session_worker_test.cpp
+        archive/server/worker_close_test.cpp
         archive/server/threading_test.cpp
         archive/server/config_registry_test.cpp
     DEPS

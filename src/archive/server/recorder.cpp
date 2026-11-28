@@ -79,6 +79,20 @@ int Recorder::do_work_threaded()
 
 void Recorder::close_threaded()
 {
+    // The conductor wires these queues only once both control subscriptions are
+    // up (`ArchiveConductor::init`). An init that fails before that point still
+    // destroys the conductor, and its destructor closes this recorder. The
+    // reference cannot meet this state: its recorder is handed the close queue
+    // in the constructor (`DedicatedModeArchiveConductor.java:97-106`), so
+    // `close` always has one. Close the sessions the serial way instead of
+    // draining an inbox that was never set (2026-11-28: a failed archive init
+    // dereferenced this null pointer and the core dump hid the real error).
+    if (nullptr == inbox_)
+    {
+        close();
+        return;
+    }
+
     // `preSessionsClose` drains the inbox first
     // (`DedicatedModeArchiveConductor.java:215-219`), then every remaining
     // session goes back through the close queue.
