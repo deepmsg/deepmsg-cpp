@@ -64,6 +64,47 @@ jobs:
       - name: Fetch SBE tool
         run: scripts/fetch-sbe.sh
 
+      # The archive codecs and the reference `aeron-all` jar are Gradle build
+      # products of the pinned submodule, so a fuzz build configures that
+      # Gradle build before it compiles anything. `ci.yml` warms the wrapper
+      # distribution for the same reason; here the resolved dependencies are
+      # kept too, because resolving them is what failed (2026-11-27: Maven
+      # Central answered 429 for `moshi-kotlin` and the job died in
+      # `:buildSrc` before a single target ran).
+      - name: Cache Gradle wrapper distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-deps-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties', 'third_party/aeron/gradle/libs.versions.toml', 'third_party/aeron/buildSrc/**', 'third_party/aeron/build.gradle', 'third_party/aeron/settings.gradle') }}
+          # A newer submodule may want artifacts an older cache does not have;
+          # Gradle fetches only those, so an old cache is still worth more than
+          # a cold one.
+          restore-keys: |
+            gradle-deps-
+
+      # The task `cmake --build` runs anyway, in a loop that retries: a
+      # rate-limited resolution lands here, where it is retried, instead of
+      # halfway through the build. The assembled jar is what CMake looks for,
+      # so the build then skips its own Gradle invocation.
+      - name: Warm Gradle (retry)
+        run: |
+          cd third_party/aeron
+          for attempt in 1 2 3 4 5; do
+            if ./gradlew --no-daemon --console=plain --quiet \
+                :aeron-all:assemble --exclude-task javadoc --exclude-task check; then
+              exit 0
+            fi
+            echo "gradle resolution attempt $attempt failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
+
       - name: Restore the corpus
         uses: actions/cache/restore@v4
         with:

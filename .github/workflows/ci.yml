@@ -60,14 +60,30 @@ jobs:
           path: ~/.gradle/wrapper/dists
           key: gradle-wrapper-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties') }}
 
-      - name: Warm Gradle wrapper (retry)
+      # Artifacts the submodule's build resolves (its `buildSrc` plugins among
+      # them). Maven Central answers 429 to a share of the runners (2026-11-27:
+      # the nightly fuzz died on `moshi-kotlin`); a cache hit keeps the gate off
+      # the network, and the warm step below retries the resolution.
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-deps-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties', 'third_party/aeron/gradle/libs.versions.toml', 'third_party/aeron/buildSrc/**', 'third_party/aeron/build.gradle', 'third_party/aeron/settings.gradle') }}
+          restore-keys: |
+            gradle-deps-
+
+      # `./gradlew --version` only fetches the distribution; the resolution the
+      # build actually needs happens on `:aeron-all:assemble`, so warm that with
+      # the retries no Gradle invocation has of its own.
+      - name: Warm Gradle (retry)
         run: |
           cd third_party/aeron
           for attempt in 1 2 3 4 5; do
-            if ./gradlew --version; then
+            if ./gradlew --no-daemon --console=plain --quiet \
+                :aeron-all:assemble --exclude-task javadoc --exclude-task check; then
               exit 0
             fi
-            echo "gradle wrapper attempt $attempt failed; retrying" >&2
+            echo "gradle resolution attempt $attempt failed; retrying" >&2
             sleep 20
           done
           exit 1
@@ -123,14 +139,30 @@ jobs:
           path: ~/.gradle/wrapper/dists
           key: gradle-wrapper-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties') }}
 
-      - name: Warm Gradle wrapper (retry)
+      # Artifacts the submodule's build resolves (its `buildSrc` plugins among
+      # them). Maven Central answers 429 to a share of the runners (2026-11-27:
+      # the nightly fuzz died on `moshi-kotlin`); a cache hit keeps the gate off
+      # the network, and the warm step below retries the resolution.
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-deps-${{ hashFiles('third_party/aeron/gradle/wrapper/gradle-wrapper.properties', 'third_party/aeron/gradle/libs.versions.toml', 'third_party/aeron/buildSrc/**', 'third_party/aeron/build.gradle', 'third_party/aeron/settings.gradle') }}
+          restore-keys: |
+            gradle-deps-
+
+      # `./gradlew --version` only fetches the distribution; the resolution the
+      # build actually needs happens on `:aeron-all:assemble`, so warm that with
+      # the retries no Gradle invocation has of its own.
+      - name: Warm Gradle (retry)
         run: |
           cd third_party/aeron
           for attempt in 1 2 3 4 5; do
-            if ./gradlew --version; then
+            if ./gradlew --no-daemon --console=plain --quiet \
+                :aeron-all:assemble --exclude-task javadoc --exclude-task check; then
               exit 0
             fi
-            echo "gradle wrapper attempt $attempt failed; retrying" >&2
+            echo "gradle resolution attempt $attempt failed; retrying" >&2
             sleep 20
           done
           exit 1
